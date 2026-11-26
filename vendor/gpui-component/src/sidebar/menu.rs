@@ -297,6 +297,11 @@ impl SidebarItem for SidebarMenuItem {
                 h_flex()
                     .size_full()
                     .id("item")
+                    .when(!is_disabled, |item| {
+                        item.focusable().tab_stop(true).focus(|style| {
+                            style.border_1().border_color(cx.theme().selection)
+                        })
+                    })
                     .role(Role::TreeItem)
                     .aria_label(accessibility_label.unwrap_or_else(|| label_text.clone()))
                     .aria_selected(is_active)

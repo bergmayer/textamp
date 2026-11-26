@@ -263,7 +263,7 @@ fn live_catalog_responsiveness() {
             engine
                 .commands
                 .send(Command::Palette(PaletteCommandKind::SetApplicationMode(
-                    ApplicationMode::GuiSingle,
+                    ApplicationMode::Gui,
                 )))
                 .await
                 .unwrap();

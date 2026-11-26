@@ -17,121 +17,6 @@ pub use refresh::{current_view_category, refresh_current_view, refresh_due_cache
 /// Page size for paginated API requests.
 pub const PAGE_SIZE: u32 = 100;
 
-/// Append discovery and one-time queue-edit actions to the station command catalog.
-pub fn append_station_action_items(
-    stations: &mut Vec<crate::library::models::Station>,
-    shuffle_active: bool,
-) {
-    use crate::library::models::Station;
-
-    // Remove synthetic entries before rebuilding the column headers.
-    stations.retain(|s| {
-        s.station_type != "action"
-            && s.station_type != "separator"
-            && s.station_type != "dj_mode"
-            && s.station_type != "remix"
-    });
-
-    // ── Actions ──
-    stations.push(Station {
-        key: "sep:actions".to_string(),
-        title: "\u{2500}".to_string(), // ─
-        station_type: "separator".to_string(),
-        identifier: None,
-        thumb: None,
-        art: None,
-        description: None,
-    });
-
-    stations.push(Station {
-        key: "action:adventure".to_string(),
-        title: "Journey".to_string(),
-        station_type: "action".to_string(),
-        identifier: None,
-        thumb: None,
-        art: None,
-        description: Some("Create a sonic bridge between two tracks".to_string()),
-    });
-    stations.push(Station {
-        key: "action:artist_radio".to_string(),
-        title: "Artist Mix".to_string(),
-        station_type: "action".to_string(),
-        identifier: None,
-        thumb: None,
-        art: None,
-        description: Some("Blend radio from multiple artists".to_string()),
-    });
-
-    // ── Queue Remix ──
-    stations.push(Station {
-        key: "sep:remix".to_string(),
-        title: "\u{2500}".to_string(), // ─
-        station_type: "separator".to_string(),
-        identifier: None,
-        thumb: None,
-        art: None,
-        description: None,
-    });
-
-    stations.push(Station {
-        key: "remix:gemini".to_string(),
-        title: "Remix: Twins".to_string(),
-        station_type: "remix".to_string(),
-        identifier: None,
-        thumb: None,
-        art: None,
-        description: Some("Insert similar tracks between queue items".to_string()),
-    });
-    stations.push(Station {
-        key: "remix:twofer".to_string(),
-        title: "Remix: Twofer".to_string(),
-        station_type: "remix".to_string(),
-        identifier: None,
-        thumb: None,
-        art: None,
-        description: Some("Insert same-artist tracks between queue items".to_string()),
-    });
-    stations.push(Station {
-        key: "remix:stretch".to_string(),
-        title: "Remix: Stretch".to_string(),
-        station_type: "remix".to_string(),
-        identifier: None,
-        thumb: None,
-        art: None,
-        description: Some("Insert sonic bridge tracks between queue items".to_string()),
-    });
-    stations.push(Station {
-        key: "remix:doppelganger".to_string(),
-        title: "Remix: Doppelganger".to_string(),
-        station_type: "remix".to_string(),
-        identifier: None,
-        thumb: None,
-        art: None,
-        description: Some("Replace each track with similar track by different artist".to_string()),
-    });
-    stations.push(Station {
-        key: "remix:shuffle".to_string(),
-        title: if shuffle_active {
-            "Undo Shuffle"
-        } else {
-            "Remix: Shuffle"
-        }
-        .to_string(),
-        station_type: "remix".to_string(),
-        identifier: None,
-        thumb: None,
-        art: None,
-        description: Some(
-            if shuffle_active {
-                "Restore original queue order"
-            } else {
-                "Shuffle the current queue"
-            }
-            .to_string(),
-        ),
-    });
-}
-
 /// Build a drill-down column from a grouped-by-album column's selected album group.
 ///
 /// Used by keyboard (Enter/Right, Up/Down auto-drill) and mouse click handlers
@@ -259,10 +144,13 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
     use crate::app::state::{BrowseItem, PlaybackMode, View};
     if state.view == View::Browse
         && !state.category_column_focused
-        && let Some(crate::app::state::BrowseDetails::Artist(info)) = state
+        && let Some(info) = state
             .browse_nav()
             .and_then(|nav| nav.focused())
-            .and_then(|column| column.details.as_ref())
+            .and_then(|column| match &column.details {
+                Some(crate::app::state::BrowseDetails::Artist(info)) => Some(info),
+                _ => column.artist_header.as_ref(),
+            })
     {
         return Some((info.artist_key.clone(), info.artist_name.clone()));
     }
@@ -323,18 +211,12 @@ pub fn get_artist_for_bio(state: &crate::app::state::AppState) -> Option<(String
     //    into the pane and picked a similar song, "Artist Bio"
     //    should target THAT artist, not the parent track's.
     if state.palette_target_is_similar()
-        && let Some(parent) = state.focused_track()
+        && let Some(result) = state
+            .palette_target_track()
+            .as_ref()
+            .and_then(artist_from_track)
     {
-        let sim_idx = state.track_pane_index - 2;
-        if let Some(sim) = state
-            .track_pane_similar
-            .get(&parent.rating_key)
-            .and_then(|result| result.as_ref().ok())
-            .and_then(|v| v.get(sim_idx))
-            && let Some(result) = artist_from_track(sim)
-        {
-            return Some(result);
-        }
+        return Some(result);
     }
 
     // 1. Check selected item (in Browse, Queue, Search, etc.)

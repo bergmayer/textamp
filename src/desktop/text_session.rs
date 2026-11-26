@@ -10,6 +10,38 @@ use crate::{
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+fn sidebar_symbols(state: &AppState) -> Vec<(ratatui::layout::Rect, &'static str)> {
+    let h = &state.hit_regions;
+    h.queue_menus
+        .iter()
+        .map(|(r, m)| (*r, crate::ui::screens::now_playing::queue_menu_symbol(*m)))
+        .chain(
+            h.queue_tabs
+                .iter()
+                .map(|(r, history)| (*r, if *history { "◷" } else { "♫" })),
+        )
+        .chain(h.queue_clear.map(|r| (r, "×")))
+        .chain(h.player_toggle.map(|r| {
+            (
+                r,
+                if state.tui_player_raised() {
+                    "⌄"
+                } else {
+                    "⌃"
+                },
+            )
+        }))
+        .chain(h.sidebar_back.map(|r| (r, "‹")))
+        .chain(h.sidebar_toggle.map(|r| (r, "◧")))
+        .chain(h.rail_radio.map(|r| (r, "≋")))
+        .chain(
+            h.footer_controls
+                .iter()
+                .map(|(r, i)| (*r, app::tui_navigation::FOOTER[*i].1.trim())),
+        )
+        .collect()
+}
+
 #[derive(Default)]
 pub(super) struct TextSession {
     renderer: Option<Renderer>,
@@ -96,6 +128,7 @@ impl TextSession {
                 viewport,
                 frame,
                 app::terminal_text::document(state),
+                sidebar_symbols(state),
             );
             self.viewport = Some(viewport);
             Ok(())
@@ -163,12 +196,13 @@ impl TextSession {
             state.browse_viewport = Some(anchors);
         }
         let editor = app::terminal_text::document(state);
+        let sidebar_symbols = sidebar_symbols(state);
         if self.frame.as_ref().is_some_and(|previous| {
             frame.dirty_rows.is_empty()
                 && state.hit_regions.graphical_visualizer.is_none()
                 && previous.frame.cursor == frame.cursor
                 && previous.editor == editor
-                && previous.queue_menus == state.hit_regions.queue_menus
+                && previous.sidebar_symbols == sidebar_symbols
                 && previous.graphical_visualizer == state.hit_regions.graphical_visualizer
                 && previous.transport_controls.as_slice()
                     == state
@@ -192,7 +226,7 @@ impl TextSession {
         }) {
             return Ok(());
         }
-        self.publish(state, identity, viewport, frame, editor);
+        self.publish(state, identity, viewport, frame, editor, sidebar_symbols);
         Ok(())
     }
     fn publish(
@@ -202,6 +236,7 @@ impl TextSession {
         viewport: Viewport,
         frame: text_mode::vt::Frame,
         editor: Option<app::terminal_text::Document>,
+        sidebar_symbols: Vec<(ratatui::layout::Rect, &'static str)>,
     ) {
         self.serial = self.serial.wrapping_add(1);
         self.frame = Some(Arc::new(PresentedFrame {
@@ -211,7 +246,21 @@ impl TextSession {
             frame,
             breadcrumbs: super::browser::terminal_breadcrumbs(state),
             editor,
-            queue_menus: state.hit_regions.queue_menus.clone(),
+            mini_artwork: if matches!(state.popups.modal(), app::state::Modal::Closed)
+                && !state.palette.open
+                && state.hit_regions.popup_outer.is_none()
+            {
+                [
+                    state.hit_regions.transport_artwork,
+                    state.hit_regions.player_artwork,
+                ]
+                .into_iter()
+                .flatten()
+                .collect()
+            } else {
+                Vec::new()
+            },
+            sidebar_symbols,
             graphical_visualizer: state.hit_regions.graphical_visualizer,
             transport_controls: state
                 .hit_regions
@@ -243,16 +292,18 @@ impl TextSession {
         {
             return vec![];
         }
+        let mut terminal_event = |event| {
+            self.renderer
+                .as_mut()
+                .and_then(|r| r.picker.input(&event, state))
+                .unwrap_or_else(|| app::runtime::reduce(event, state, config, events))
+        };
         match input {
             text_mode::Input::Edit(edit) => app::terminal_text::edit(edit, state),
-            text_mode::Input::Key(key) => {
-                app::runtime::reduce(Event::Key(key), state, config, events)
-            }
-            text_mode::Input::Mouse(mouse) => {
-                app::runtime::reduce(Event::Mouse(mouse), state, config, events)
-            }
+            text_mode::Input::Key(key) => terminal_event(Event::Key(key)),
+            text_mode::Input::Mouse(mouse) => terminal_event(Event::Mouse(mouse)),
             text_mode::Input::Text(text) | text_mode::Input::Paste(text) => {
-                app::runtime::reduce(Event::Paste(text), state, config, events)
+                terminal_event(Event::Paste(text))
             }
             text_mode::Input::Focus(focused) => {
                 if !focused {

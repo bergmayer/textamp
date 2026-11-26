@@ -104,6 +104,16 @@ impl Profile {
             Self::read(volume)? == *previous,
             "Player settings changed. Refresh the player and try again."
         );
+        if volume.is_mtp() {
+            crate::services::player_sync::mtp::session::update_metadata(
+                volume,
+                std::path::Path::new(FILE),
+                &crate::services::player_sync::mtp::session::read_optional(
+                    &volume.mount.join(FILE),
+                )?,
+                self,
+            )?;
+        }
         let mut temp = tempfile::NamedTempFile::new_in(&volume.mount)?;
         temp.write_all(&serde_json::to_vec_pretty(self)?)?;
         temp.as_file().sync_all()?;

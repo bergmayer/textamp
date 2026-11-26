@@ -58,7 +58,7 @@ fn opens_artist(actions: &[Action], key: &str) -> bool {
     matches!(actions,[Action::Browse(BrowseAction::OpenDetailsInLibrary{track, destination: textamp::app::library_details::Destination::Artist})] if track.grandparent_rating_key.as_deref()==Some(key))
 }
 #[test]
-fn queue_and_transport_artist_labels_open_library_without_playing_or_matching_track_titles() {
+fn queue_artist_labels_open_library_without_playing_or_matching_track_titles() {
     let mut state = fixture();
     let buffer = draw(&mut state);
     let queue = state
@@ -136,7 +136,7 @@ fn track_metadata_and_search_artist_spans_are_clickable() {
     assert!(opens_artist(&click(&mut state, &link), "a"));
 }
 #[test]
-fn artist_info_and_biography_reader_show_clickable_related_artists() {
+fn artist_info_has_related_links_and_biography_reader_displays_only_prose() {
     let mut state = fixture();
     state.view = View::Browse;
     let document = Biography {
@@ -183,15 +183,18 @@ fn artist_info_and_biography_reader_show_clickable_related_artists() {
         image_index: 0,
         task: None,
     }));
-    draw(&mut state);
-    let link = state
-        .hit_regions
-        .artist_links
-        .iter()
-        .find(|link| link.key == "b")
-        .expect("related artist in reader")
-        .clone();
-    assert!(opens_artist(&click(&mut state, &link), "b"));
+    let buffer = draw(&mut state);
+    let region = state.hit_regions.biography_text.as_ref().unwrap().area;
+    let body = (region.y..region.bottom())
+        .map(|y| {
+            (region.x..region.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(body.contains("No biography available"));
+    assert!(!body.contains("Related Artists"));
 }
 
 #[test]
@@ -294,14 +297,7 @@ fn now_playing_track_and_album_names_open_details_without_flipping_or_playing() 
     draw(&mut state);
     let links = state.hit_regions.detail_links.clone();
     for destination in [Destination::Track, Destination::Album] {
-        assert!(
-            links
-                .iter()
-                .filter(|link| link.destination == destination)
-                .count()
-                >= 2,
-            "both the main metadata and transport should expose {destination:?}"
-        );
+        assert!(links.iter().any(|link| link.destination == destination));
     }
     for link in links {
         let actions = mouse_input::handle_mouse(
@@ -326,24 +322,36 @@ fn now_playing_track_and_album_names_open_details_without_flipping_or_playing() 
 }
 
 #[test]
-fn multi_artist_transport_has_one_keyboard_stop_for_each_metadata_control() {
-    use textamp::app::transport_controls::{self, TransportControl};
+fn transport_metadata_opens_now_playing_and_keeps_it_open() {
     let mut state = fixture();
-    state.queue.tracks[0].original_title = Some("Artist A; Artist B".into());
-    draw(&mut state);
-    let controls = transport_controls::visible(&state);
-    assert_eq!(
-        controls
-            .iter()
-            .filter(|control| **control == TransportControl::Artist)
-            .count(),
-        1
-    );
-    assert_eq!(
-        controls
-            .iter()
-            .filter(|control| **control == TransportControl::Album)
-            .count(),
-        1
-    );
+    for view in [View::Browse, View::NowPlaying] {
+        state.view = view;
+        draw(&mut state);
+        let rect = state
+            .hit_regions
+            .transport
+            .as_ref()
+            .unwrap()
+            .track_info
+            .unwrap();
+        let actions = mouse_input::handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut state,
+        );
+        if view == View::NowPlaying {
+            assert!(actions.is_empty());
+        } else {
+            assert!(matches!(
+                actions.first(),
+                Some(Action::Navigation(
+                    textamp::app::action::NavigationAction::SetView(View::NowPlaying)
+                ))
+            ));
+        }
+    }
 }

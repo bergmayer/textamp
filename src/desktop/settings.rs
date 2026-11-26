@@ -12,7 +12,6 @@ use gpui_kit::component::{
     alert::Alert,
     button::ButtonVariants,
     form::{Field, Form},
-    group_box::{GroupBox, GroupBoxVariants},
     input::{Input, InputState},
     list::{List, ListEvent, ListState},
 };
@@ -63,6 +62,7 @@ pub(super) struct ConnectionSettings {
     phase: Option<Progress>,
     error: Option<String>,
     focus: FocusHandle,
+    pane_focus: [FocusHandle; 2],
     category_index: usize,
     category_navigation: bool,
     about_taps: u8,
@@ -349,6 +349,7 @@ impl ConnectionSettings {
             phase: None,
             error: None,
             focus,
+            pane_focus: [cx.focus_handle(), cx.focus_handle().tab_stop(true)],
             category_index: 0,
             category_navigation: true,
             about_taps: 0,
@@ -967,7 +968,7 @@ impl Render for ConnectionSettings {
                 )
             }));
         }
-        let mut libraries = if self.editor_open {
+        let libraries = if self.editor_open {
             SettingPage::new("Libraries").resettable(false).group(
                 SettingGroup::new()
                     .item(section_heading(if self.selected.is_some() {
@@ -997,7 +998,8 @@ impl Render for ConnectionSettings {
                 let _ = owner.update(cx, |this, _| this.category_index = index.page_ix);
             }
         })
-        .sidebar_width(px(200.));
+        .sidebar_width(px(200.))
+        .pane_focus(&self.pane_focus[0], &self.pane_focus[1]);
         let mut pages = Vec::new();
         for page in &self.snapshot.preferences {
             let mut group = SettingGroup::new();
@@ -1037,7 +1039,11 @@ impl Render for ConnectionSettings {
                     {
                         groups.push((
                             option.group,
-                            SettingGroup::new().item(section_heading(option.group)),
+                            if matches!(option.group, "Library" | "Playlists") {
+                                SettingGroup::new()
+                            } else {
+                                SettingGroup::new().item(section_heading(option.group))
+                            },
                         ));
                     }
                     let sender = self.commands.clone();
@@ -1206,110 +1212,52 @@ impl Render for ConnectionSettings {
                             },
                         ),
                     )
-                }
-                .description(item.description);
+                };
+                let field = if item.description.is_empty() {
+                    field
+                } else {
+                    field.description(item.description)
+                };
                 group = group.item(field);
             }
             pages.push(page_view.group(group));
         }
-        libraries=libraries.group(SettingGroup::new().item(section_heading("Cache Policy")).item(SettingItem::render(|_,_,_|div().child("Libraries open from cached metadata, refresh weekly, and can be refreshed manually. Scans index metadata; they do not download music."))));
-        for (index, cache) in self.snapshot.caches.iter().enumerate() {
-            let metadata = cache.metadata.clone();
-            let artwork = cache.artwork.clone();
-            let status = cache.status.clone();
-            let mut group = SettingGroup::new()
-                .item(section_heading(cache.choice.label()))
-                .item(SettingItem::render(move |_, _, cx| {
-                    GroupBox::new()
-                        .fill()
-                        .content_style(
-                            gpui::StyleRefinement::default().bg(cx.theme().muted.opacity(0.5)),
-                        )
-                        .child(
-                            gpui_kit::component::description_list::DescriptionList::horizontal()
-                                .bordered(false)
-                                .label_width(px(166.))
-                                .columns(1)
-                                .item("Metadata and analysis", metadata.clone(), 1)
-                                .item("Downloaded artwork", artwork.clone(), 1)
-                                .item("Scan status", status.clone(), 1),
-                        )
-                }));
-            for (action, label) in cache.controls {
-                let sender = self.commands.clone();
-                let choice = cache.choice.clone();
-                let generation = self.snapshot.generation;
-                group = group.item(SettingItem::render(move |_, _, _| {
-                    let sender = sender.clone();
-                    let choice = choice.clone();
-                    gpui_kit::component::h_flex().child(
-                        Button::new(SharedString::from(format!("cache-{index}-{action:?}")))
-                            .small()
-                            .label(label)
-                            .on_click(move |_, _, _| {
-                                let _ = sender.try_send(Command::Cache {
-                                    generation,
-                                    choice: choice.clone(),
-                                    action,
-                                });
-                            }),
-                    )
-                }));
-            }
-            libraries = libraries.group(group);
-        }
-        let sender = self.commands.clone();
-        libraries = libraries.group(SettingGroup::new().item(SettingItem::render(
-            move |_, _, _| {
-                let sender = sender.clone();
-                gpui_kit::component::h_flex().child(
-                    Button::new("refresh-cache-sizes")
-                        .small()
-                        .label("Refresh cache sizes")
-                        .on_click(move |_, _, _| {
-                            let _ = sender.try_send(Command::Action(
-                                crate::app::action::SettingsAction::RefreshCacheStats.into(),
-                            ));
-                        }),
-                )
-            },
-        )));
         pages.push(
             SettingPage::new("About")
                 .resettable(false)
-                .group(SettingGroup::new().item(
-                SettingItem::render(move |_, _, cx| {
-                    let owner = owner.clone();
-                    let history = owner.upgrade().and_then(|entity| {
-                        let editor = entity.read(cx);
-                        editor
-                            .activity_open
-                            .then(|| editor.snapshot.activity_history.clone())
-                            .flatten()
-                    });
-                    let logo = super::about::content(cx);
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(div().id("activity-log-disclosure").child(logo).on_click(
-                            move |_, _, cx| {
-                                let _ = owner.update(cx, |editor, cx| {
-                                    editor.about_taps += 1;
-                                    if editor.about_taps == 4 {
-                                        editor.about_taps = 0;
-                                        editor.activity_open = true;
-                                        let _ = editor.commands.try_send(Command::Action(
+                .group(
+                    SettingGroup::new().item(SettingItem::render(move |_, _, cx| {
+                        let owner = owner.clone();
+                        let history = owner.upgrade().and_then(|entity| {
+                            let editor = entity.read(cx);
+                            editor
+                                .activity_open
+                                .then(|| editor.snapshot.activity_history.clone())
+                                .flatten()
+                        });
+                        let logo = super::about::content(cx);
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(div().id("activity-log-disclosure").child(logo).on_click(
+                                move |_, _, cx| {
+                                    let _ = owner.update(cx, |editor, cx| {
+                                        editor.about_taps += 1;
+                                        if editor.about_taps == 4 {
+                                            editor.about_taps = 0;
+                                            editor.activity_open = true;
+                                            let _ = editor.commands.try_send(Command::Action(
                                             crate::app::action::SettingsAction::ReadActivityHistory
                                                 .into(),
                                         ));
-                                        cx.notify();
-                                    }
-                                });
-                            },
-                        ))
-                        .children(history.map(|text| div().child(text.to_string())))
-                }),
-            )),
+                                            cx.notify();
+                                        }
+                                    });
+                                },
+                            ))
+                            .children(history.map(|text| div().child(text.to_string())))
+                    })),
+                ),
         );
         // The resizable sidebar divider separates the two panes. Spacing
         // separates each page heading from the controls below it.
@@ -1329,8 +1277,34 @@ impl Render for ConnectionSettings {
             .text_size(px(13.))
             .track_focus(&self.focus)
             .key_context("TextampSettings")
-            .on_action(super::keyboard::next_focus)
-            .on_action(super::keyboard::previous_focus)
+            .on_action(
+                cx.listener(|this, _: &super::keyboard::NextFocus, window, cx| {
+                    if window.has_active_dialog(cx) {
+                        window.focus_next(cx);
+                        cx.stop_propagation();
+                    } else {
+                        super::keyboard::step_pane_focus(
+                            &this.pane_focus,
+                            false,
+                            false,
+                            window,
+                            cx,
+                        );
+                        this.category_navigation = false;
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &super::keyboard::PreviousFocus, window, cx| {
+                    if window.has_active_dialog(cx) {
+                        window.focus_prev(cx);
+                        cx.stop_propagation();
+                    } else {
+                        super::keyboard::step_pane_focus(&this.pane_focus, true, false, window, cx);
+                        this.category_navigation = false;
+                    }
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
                     "f10" => {
@@ -1366,8 +1340,21 @@ impl Render for ConnectionSettings {
                                 .contains_focused(window, cx) =>
                     {
                         this.category_navigation = false;
+                        this.pane_focus[1].focus(window, cx);
                         window.focus_next(cx);
                         cx.stop_propagation();
+                    }
+                    "up" | "down"
+                        if !window.has_active_dialog(cx)
+                            && event.keystroke.modifiers == Modifiers::default() =>
+                    {
+                        super::keyboard::step_pane_focus(
+                            &this.pane_focus,
+                            event.keystroke.key == "up",
+                            true,
+                            window,
+                            cx,
+                        );
                     }
                     "escape" if !window.has_active_dialog(cx) => {
                         if this.editor_open {

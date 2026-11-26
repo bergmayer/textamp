@@ -134,6 +134,64 @@ pub fn remove(state: &mut AppState, indices: &BTreeSet<usize>) -> Removal {
         return Removal::Unchanged;
     }
     record(state, "Remove tracks");
+    remove_selected(state, &selected)
+}
+pub(crate) fn consume(state: &mut AppState, index: usize) {
+    remember_previous(state, index);
+    remove_selected(state, &BTreeSet::from([index]));
+    invalidate_playback_undo(state);
+}
+fn remember_previous(state: &mut AppState, index: usize) {
+    if let Some(track) = state.playback_tracks().get(index).cloned() {
+        state.queue.previous.push_back(track);
+        if state.queue.previous.len() > 512 {
+            state.queue.previous.pop_front();
+        }
+    }
+}
+fn invalidate_playback_undo(state: &mut AppState) {
+    state.queue.shuffle_undo_queue = None;
+    state.queue.shuffle_undo_index = None;
+    state.queue.undo_snapshot = None;
+}
+pub(crate) fn before_jump(state: &mut AppState, destination: usize) -> usize {
+    let current = if state.playback_mode == PlaybackMode::Radio {
+        state.radio.track_index
+    } else {
+        state.queue.index
+    };
+    if destination > 0 && current.is_none_or(|index| index < destination) {
+        if let Some(index) = current.filter(|_| state.play_recorded) {
+            remember_previous(state, index);
+        }
+        let (buffer, playing) = state.playback_buffer_mut();
+        buffer.drain(..destination);
+        *playing = Some(0);
+        state.queue.selected = state
+            .queue
+            .selected
+            .iter()
+            .filter_map(|index| index.checked_sub(destination))
+            .collect();
+        state.queue.selection_anchor = state
+            .queue
+            .selection_anchor
+            .and_then(|index| index.checked_sub(destination));
+        state.queue.original.clear();
+        state.queue.sort_mode = crate::app::state::QueueSortMode::QueueOrder;
+        invalidate_playback_undo(state);
+        return 0;
+    }
+    if let Some(index) = current
+        && index != destination
+        && state.play_recorded
+        && state.queue.repeat != crate::app::state::RepeatMode::Queue
+    {
+        consume(state, index);
+    }
+    destination
+}
+fn remove_selected(state: &mut AppState, selected: &BTreeSet<usize>) -> Removal {
     let (buffer, playing) = state.playback_buffer_mut();
     let removed_playback = playing.is_some_and(|index| selected.contains(&index));
     let current = playing.map(|index| index - selected.range(..index).count());
@@ -285,6 +343,41 @@ mod tests {
         );
         assert!(state.queue.tracks.is_empty());
         assert_eq!(state.queue.index, None);
+    }
+    #[test]
+    fn forward_jump_drops_the_prefix_and_remembers_only_the_played_occurrence() {
+        for mode in [PlaybackMode::Queue, PlaybackMode::Radio] {
+            for recorded in [true, false] {
+                let mut state = AppState::new();
+                state.set_playback_mode(mode);
+                state.queue.repeat = crate::app::state::RepeatMode::Queue;
+                let (tracks, index) = state.playback_buffer_mut();
+                *tracks = ["A", "B", "A", "D"]
+                    .map(|title| Track {
+                        title: title.into(),
+                        ..Default::default()
+                    })
+                    .into();
+                *index = Some(0);
+                state.play_recorded = recorded;
+                state.queue.selected.extend([1, 3]);
+                state.queue.selection_anchor = Some(1);
+                assert_eq!(before_jump(&mut state, 2), 0);
+                let titles: Vec<_> = state
+                    .playback_tracks()
+                    .iter()
+                    .map(|t| t.title.as_str())
+                    .collect();
+                assert_eq!(titles, ["A", "D"]);
+                assert_eq!(state.queue.previous.len(), usize::from(recorded));
+                assert_eq!(
+                    state.queue.previous.front().map(|t| t.title.as_str()),
+                    recorded.then_some("A")
+                );
+                assert_eq!(state.queue.selected, BTreeSet::from([1]));
+                assert_eq!(state.queue.selection_anchor, None);
+            }
+        }
     }
     #[test]
     fn playing_a_duplicate_targets_its_existing_occurrence() {

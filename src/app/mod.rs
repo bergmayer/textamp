@@ -31,6 +31,7 @@ pub use state::{AppState, BrowseCategory, Focus, PlayStatus, RightPanelMode, Vie
 pub mod command_catalog;
 pub mod command_history;
 pub mod command_palette;
+pub mod listening_history;
 pub mod presentation;
 pub mod scrollbar;
 pub mod shortcuts;

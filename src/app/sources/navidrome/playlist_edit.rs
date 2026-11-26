@@ -458,17 +458,20 @@ pub async fn save(
     let store = session.cache_store()?;
     let gate = playlists::gate(&store, &id);
     let _guard = gate.lock().await;
-    let before = read_complete(&session, &id).await?;
-    let mut order: Vec<_> = before.entry.into_iter().map(|song| song.id).collect();
+    let read_order = async {
+        let before = read_complete(&session, &id).await?;
+        Ok::<Vec<_>, anyhow::Error>(before.entry.into_iter().map(|song| song.id).collect())
+    };
     let mut selection = None;
     let mut conflict = false;
-    match change {
+    let order = match change {
         Change::Append(addition) => {
-            let added = addition.song_ids(&session).await?;
+            let (mut order, added) = tokio::try_join!(read_order, addition.song_ids(&session))?;
             let mut params = vec![("playlistId", id.clone())];
             params.extend(added.iter().cloned().map(|song| ("songIdToAdd", song)));
             session.client.call("updatePlaylist", &params).await?;
             order.extend(added);
+            order
         }
         Change::Edit {
             expected,
@@ -476,6 +479,7 @@ pub async fn save(
             index,
             edit,
         } => {
+            let mut order = read_order.await?;
             if order.iter().map(|song| session.key(song)).ne(expected) {
                 conflict = true;
             } else {
@@ -529,8 +533,9 @@ pub async fn save(
                     }
                 }
             }
+            order
         }
-    }
+    };
     let mut remote = read_complete(&session, &id).await.map_err(|e| {
         anyhow::anyhow!("Could not verify playlist contents. Refresh before retrying: {e}")
     })?;

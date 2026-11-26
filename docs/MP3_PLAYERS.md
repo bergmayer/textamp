@@ -1,14 +1,16 @@
 # MP3 players on macOS
 
 Open **Audio Player** in the main sidebar of the Mac GUI or TUI. In the GUI,
-**Window → Audio Player…** opens the same workspace column. Connect a player as writable USB storage. For an
-innioasis Y2 running stock firmware, press its center OK button to turn on USB
-storage when the USB connection screen appears.
+**Window → Audio Player…** opens the same workspace column. Connect the player in MTP (file transfer) mode. Standalone card readers and mounted disks are ignored.
 
-Choose the storage volume when multiple drives are mounted, then check or
+Y2Linux exposes Internal Storage and SD Card separately over MTP. Select **SD Card** to reuse libraries previously synced to the card. The Mac uses ImageCaptureCore to read and write objects over USB. Textamp uses the profile and library manifests on the player. After an MTP sync finishes, the player can be disconnected.
+
+Enable playback logging on supported firmware. During sync, Textamp reads completed listens from the AudioScrobbler 1.1 log and matches them to managed tracks. Navidrome receives the original playback time. WebDAV listens are recorded locally. The on-player receipt prevents resubmission. If a connection drops during a scrobble request, an unconfirmed receipt is retained because the server may already have counted it. Older indexes without track tags may require a recognizable filename to identify a listen.
+
+Choose the storage volume when multiple MTP storage areas are available, then check or
 uncheck entries in **Playlists**. The Mac checklist includes a filter for long
 lists. In the TUI, use Up and Down to move between controls and Enter to toggle
-a selection. Selection saves immediately on the mounted volume. Its hidden `.textamp-player.json`
+a selection. Selection saves immediately on the selected player storage. Its hidden `.textamp-player.json`
 stores the player name, library associations, playlists, WebDAV folders, media-scanner
 preference and reconnect setting. On another Mac, configure the same server URL and
 username (including the share path for WebDAV). Textamp uses that Mac’s sign-in
@@ -28,7 +30,7 @@ using the normal playlist controls. Use exactly one playlist with this name.
 WebDAV, Textamp uses a complete matching copy from Downloads when available.
 Other tracks transfer directly from the source. Player sync leaves saved
 downloads in place.
-**Sync when connected** starts a sync when an enrolled volume reconnects as the only mounted player volume. With multiple drives, choose the storage volume and select **Review Sync…**, then **Apply Sync**. Editing the server playlist while the player remains attached
+**Sync when connected** starts a sync when an enrolled volume reconnects as the only available player storage. With multiple storage areas, choose the storage volume and select **Review Sync…**, then **Apply Sync**. Editing the server playlist while the player remains attached
 requires a manual sync. The connection remains bound to the account used at setup,
 even when another library is active.
 
@@ -47,6 +49,13 @@ artist when available, orders multi-disc albums by disc and track, and pads
 all numbers consistently for albums with 100 or more tracks. Tracks without
 a number follow the numbered tracks on their disc. A short suffix distinguishes two tracks that would otherwise
 have the same filename.
+
+On Y2 Linux, open **Settings → Customize → Browsing**. Set **Artists List**
+to **Album Artists Only** to hide performers credited only on compilation tracks.
+Set **Sort Albums** to **By Artist** to browse compilations together under their
+shared album artist. Reborn groups album entries by album title and album artist
+from the audio tags. Compilations with inconsistent album-artist tags can appear
+as separate releases even when their files share a folder.
 
 Textamp keeps its file index on the player and writes a separate UTF-8 M3U for
 each selected playlist, preserving its track order and repeats. Playlists
@@ -90,17 +99,7 @@ playlist and reconnect settings remain separate.
 
 ## On the device
 
-Use **Eject** before disconnecting. On the stock Y2, turn off USB storage and use
-**Music settings → Import M3U** to import the M3U files from the library’s Textamp folder. Copying an
-M3U does not directly modify the firmware's private music database. Playback and
-playlist import on the hardware require a separate check after ejecting.
-
-For folder playback on the stock Y2, use **Display Song By → File name** and
-**List Sort → A–Z** so the numeric filename prefixes determine playback order.
-The stock firmware recognizes audiobooks under `Audiobooks`. Innioasis's
-published Music settings do not describe a folder exclusion for the music
-index. [Y2 Music settings](https://www.innioasis.com/a/docs/q3e/music-app)
-and [audiobook folder behavior](https://www.innioasis.com/a/docs/y2/now-playing).
+Disconnect the MTP player once the transfer finishes. The player reads the M3U files from each Textamp library folder.
 
 Textamp copies originals; it does not transcode. Formats are checked against the
 Y2's documented supported extensions before audio transfer. Codec details within
@@ -108,13 +107,6 @@ a container may still exceed a particular player's decoder support. Leave room
 for new files alongside the old playlist: older managed copies are retained until
 the new playlist is ready. An unknown file size or a device's filesystem limits
 can still cause an individual copy to fail.
-
-Playback counts and last-played dates are **not synced**. The stock Y2's exposed
-USB storage has not provided a usable playback-history export. Textamp does not
-guess play counts from file timestamps or overwrite server history.
-
-The manufacturer documents USB storage, supported formats and M3U import/export
-in the [Y2 manual](https://www.innioasis.com/cdn/shop/files/Y2_EN_V1.21.pdf?v=6393700319299377419).
 
 ## Implementation and validation
 
@@ -124,10 +116,10 @@ file reconciliation. The desktop window projects that state through Kit controls
 it does not implement a second transfer policy. File → Devices commands share the
 normal menu and palette catalog. The Mac GUI and TUI use the same sync service.
 
-Volume information reads have concurrency limited to four. USB copies remain
+MTP object transfers are
 sequential to limit device pressure and preserve simple cancellation and progress.
 The on-device index records playlist ownership before publication so an
-interrupted sync can resume. Mount and UUID checks reject
+interrupted sync can resume. Session identity checks reject
 a disconnected or replaced target. HTTP transfers have bounded header and idle
 timeouts and reject empty audio and document responses.
 

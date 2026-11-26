@@ -90,11 +90,6 @@ pub enum ArtworkEvent {
 }
 
 #[derive(Debug, Clone)]
-pub enum CacheEvent {
-    WaveformCacheStats { count: usize, total_bytes: u64 },
-}
-
-#[derive(Debug, Clone)]
 pub enum VisualizerEvent {
     AnalysisProgress {
         track_key: String,

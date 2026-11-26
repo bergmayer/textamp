@@ -29,7 +29,7 @@ targets:
     platform: iOS
     sources:
       - Textamp
-      - path: ../src/desktop/about-logo.txt
+      - path: ../assets/artwork/textamp_clean.ansi
         buildPhase: resources
     settings:
       base:

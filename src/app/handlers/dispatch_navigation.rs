@@ -40,8 +40,25 @@ pub fn dispatch(
             return Ok(crate::app::sidebar::open_root(root, state));
         }
         NavigationAction::ToggleSidebar => {
+            let rows = crate::app::sidebar::visible_rows(state);
+            let selection = rows.get(state.category_column_index).map(|row| {
+                if state.tui_sidebar_visible
+                    && let Some(parent) = row.parent
+                {
+                    parent.label().to_owned()
+                } else {
+                    row.label.clone()
+                }
+            });
             state.tui_sidebar_visible = !state.tui_sidebar_visible;
-            if !state.tui_sidebar_visible {
+            if let Some(label) = selection {
+                state.category_column_index = crate::app::sidebar::visible_rows(state)
+                    .iter()
+                    .position(|row| row.label == label)
+                    .unwrap_or(0);
+            }
+            state.scroll.category = None;
+            if !state.tui_sidebar_visible && !cfg!(target_os = "macos") {
                 state.category_column_focused = false;
             }
         }
@@ -52,6 +69,9 @@ pub fn dispatch(
             }
         }
 
+        NavigationAction::Back if state.tui_player_raised() => {
+            return Ok(crate::app::tui_navigation::sheet_back(state));
+        }
         NavigationAction::Back => return Ok(crate::app::navigation_history::back(state)),
         NavigationAction::Undo => return Ok(crate::app::navigation_history::undo(state)),
         NavigationAction::ResetDesktopPanels => {}
@@ -78,6 +98,9 @@ pub fn dispatch(
             }
         }
         NavigationAction::SetView(view) => {
+            if matches!(view, View::Browse | View::NowPlaying) {
+                state.tui_browsing_player = false;
+            }
             state.set_view(view);
             if view == View::Queue {
                 state.tui_queue_visible = true;
@@ -156,7 +179,17 @@ pub fn dispatch(
                 state.category_column_focused = false;
             }
 
-            if state.browse_category != category {
+            let reopen_root = !preserve_sections_focus
+                && match category {
+                    BrowseCategory::Folders => {
+                        state.folder_state.is_none() && state.sources.listing.is_none()
+                    }
+                    cat if cat.is_tag_section() => {
+                        state.tag_nav.columns.is_empty() && !state.tag_nav.loading
+                    }
+                    _ => false,
+                };
+            if state.browse_category != category || reopen_root {
                 // Unshuffle Library root when leaving, so "All Artists" is in correct position
                 if state.browse_category == BrowseCategory::Library
                     && let Some(col) = state.artist_nav.columns.first_mut()

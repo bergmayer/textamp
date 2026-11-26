@@ -10,16 +10,17 @@ ESSENTIAL
   Ctrl+F         Search (current-folder files for Local/WebDAV)
   Audio Player: Review Sync shows pending changes. On this player searches synced libraries. / filters either list.
   WebDAV Audio Player: / filters descendants, Enter or row click opens, Space or checkbox click selects, Left goes up.
+  Open an empty search to reuse a query whose result you previously chose in this library.
   Search boxes: AND, OR, NOT; parentheses; quotes for exact phrases. Adjacent terms imply AND.
   F1   Ctrl+H    Toggle this help
-  Tab / Shift+Tab Next / previous panel; arrows navigate inside
+  Tab / Shift+Tab Next / previous pane; arrows select rows and controls
   Click           Focus the clicked pane; wheel scrolls under the pointer
-  Alt+A          Select visible artist names; arrows choose, Enter opens Artist Details
+  Alt+A          Select visible artist names; arrows choose, Enter opens the artist’s albums
   Dialogs         Tab/Shift+Tab traverses fields and buttons; Enter activates
   Esc            Back / close
 
 VIEW MODES
-  ⌘⌥T           Cycle GUI Multiple Windows → GUI Single Window → Text
+  ⌘⌥T           Switch between GUI and Text
   Now Playing names open Track, Artist or Album Details in the library.
   ⌘⇧T / Ctrl+Shift+T Also cycle application modes
   [ / ]          Show / hide sidebar / queue
@@ -33,7 +34,8 @@ NAVIGATE
   ↑↓ ←→          Move / drill in / drill out
   Enter          Open selection in the library; never starts playback
   Double-click   Play a track, album or playlist
-  Artist Details Biography, photos, related artists and Artist Mix
+  Artist Bio     Open the artist biography beside Play on an album
+  Album View Options: Grid (default) or List, including playlists and downloads grouped by album.
   Artist View Options: Show compilation-only artists; hidden name jumps appear dimmed.
   Backspace / Alt+Left   Back through the last six library locations
   Ctrl+Z         Undo the latest library jump or queue edit
@@ -48,7 +50,7 @@ COLUMN HEADERS
   Up at top      Focus the title and controls; Left/Right moves between them
   Enter / click title   Open the column filter; Esc or × closes it
   ≡ / ×          View Options / close column
-  Album Details  Row above an album track list; Enter opens its details
+  Album Notes    Open the album review in a reader
   Detail panes   ▷ Play · ▹ Play Next · + Add to Queue
   Shift/Alt+click Sidebar heading opens subitems in a column
   :              Track-and-following operations are contextual commands
@@ -113,9 +115,9 @@ MULTI-SELECT  (track lists)
   Esc            Clear
 
 TOOLS
-  ≡ in a column header opens its View Options (sorting, covers, grouping when available).
+  F6 or ≡ opens View Options in the command palette. Dimmed options are unavailable in this column.
   Recently Added: Date added restores newest first; reverse shows oldest first.
-  F3  Switch library    F4  Artist Details    F5  Refresh    F6  View options
+  F3  Switch library    F4  Artist Biography    F5  Refresh    F6  View options
   Biography: ↓ past text or Tab focuses Search Google; Enter selects. G searches, B opens source.
 
   Startup opens your last library. F3: Enter switches, Esc cancels, F2 manages.
@@ -123,7 +125,8 @@ TOOLS
   Settings: ↑↓ chooses a category; Enter / → opens it; Tab / Shift+Tab switches panes.
   Settings → Sidebar: Enter / Space hides or shows sidebar sections for this library type.
   Playlist names appear in the leftmost sidebar.
-  Queue header: Queue Type (list) / Queue Tools (sliders); Enter opens a menu.
+  In the queue, h switches Next / History. In History, Enter plays, + plays next, Right opens details, and c clears history.
+  In the queue, Shift+M opens Queue Type and Shift+T opens Queue Tools.
   Queue tools: Settings → Audio toggles Allow same artist; Twofer always permits it.
   Added tracks exclude queued albums.
   Streaming quality sets the next server stream’s bitrate limit; Original requests raw audio.
@@ -156,11 +159,13 @@ TOOLS
   Re-scan refreshes enabled AudioMuse too; it never scans audio on the server.
   Navidrome Folders is an artist/album tree, not disk directories.
   System lists query the server on opening; F5 refreshes the open system list.
-  Sidebar: ↑↓ selects; Enter toggles groups; Right opens; Left collapses.
+  Library: arrows move through items and open columns. Enter opens the selected item.
   Navidrome Ctrl+G: all tagged album genres → albums → tracks; not AI moods/styles.
   Queue Type: manual, related tracks, or radio; Auto-Mix overlaps songs.
   Lyrics: S toggles playback following, L changes language, R reloads, G searches the web; arrows scroll.
   Navidrome loads synchronized lyrics; local files display embedded text.
+  In Track Details, Left/Right choose playback controls. Down enters Similar Tracks.
+  Page Up and Page Down scroll metadata and lyrics.
   Navidrome palette (:): favorite/unfavorite selection, ratings, lyrics,
   random mix, saved playback queues and playlist rename/replace/delete.
   Search… sits above browse: highlight for the logo, Enter for the Ctrl+F search popup.
@@ -180,14 +185,14 @@ TOOLS
   AudioMuse background failures keep cached results; F5 in an analysis category retries.
   Results show title, then artist and album, like playlists.
   Describe Music: Tab to its search field; Enter searches, arrows browse history and results.
-  Search and Similar Tracks: Enter/Right opens the actual details in the library; Alt+Left returns.
+  Search and Similar Tracks: Enter opens the actual details in the library; Alt+Left returns.
   Details: ▷ Play · ▹ Play Next · + Add to Queue. Shift+Enter includes following tracks. These actions are also in the command palette.
   Page Up/Down or the mouse wheel scrolls details. Enter on a queue track opens its details.
   AudioMuse: use the command palette's AudioMuse analysis for the selected track's details.
   Bios: Navidrome first, Wikipedia fallback. ↑↓ scroll, ←→ photos, B source.
   Ctrl+J  Open in library                  Ctrl+W  Close column
   Alt+F   Activate filter (same as `/`)
-  Alt+R   Random album radio (leaf-folder albums for local / WebDAV)
+  Alt+R   Random album radio
   Palette: Settings stays first; available music searches and selected-item actions follow.
   External search: palette → Search Apple Music / Spotify / YouTube.
   Searches the selection or focused details, then artist/album context, then playback.
@@ -216,8 +221,8 @@ CONNECTIONS
   current section immediately, including after automatic retries stop.
 
 RADIO & QUEUE EDITS  (Queue / Now Playing → Radio / Queue Edits)
-  Every library shares Radio controls. Local/WebDAV offer Library Mix and
-  Play Random Albums: bottommost music folders are albums, in filename order.
+  Stations require 20 albums by distinct album artists. Each station plays
+  at most one track per album until you start a new session.
   Navidrome metadata stations and the Twofer queue edit do not need analysis.
   Sonic modes use Navidrome's plugin or a direct AudioMuse connection.
   AudioMuse: Mood Mix offers the server's available moods when connected and enabled.
@@ -232,7 +237,8 @@ RADIO & QUEUE EDITS  (Queue / Now Playing → Radio / Queue Edits)
   "Radio: Back" to return to the parent list; Esc closes the palette.
   Sonic Mix follows each new song outward; Stay Close Mix retains its seed.
   Both seed-based stations use one track chooser, then explicit Start Radio.
-  Artist Mix uses one dialog: choose up to 12 artists, then start with Tab.
+  The artist column header’s ◉ starts a mix for that artist.
+  The Artist Mix station opens a chooser: choose up to 12 artists, then start with Tab.
   Queue Edits rewrite the queue once; repeat an edit to apply it again.
     Twins, Twofer, Stretch, Doppelganger, Opposite Day, Enemies, Shuffle; Ctrl+Z undoes the last edit.
     Opposite Day and Enemies require the AudioMuse Distant Rank plugin.

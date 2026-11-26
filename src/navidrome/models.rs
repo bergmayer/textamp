@@ -83,6 +83,15 @@ pub struct Song {
     pub starred: Option<String>,
     pub user_rating: Option<u8>,
 }
+impl Song {
+    pub(crate) fn album_order(&self) -> (u32, u32, &str) {
+        (
+            self.disc_number.unwrap_or(1),
+            self.track.unwrap_or(0),
+            &self.title,
+        )
+    }
+}
 #[derive(Debug, Clone, Deserialize)]
 pub struct ItemDate {
     pub year: Option<u16>,

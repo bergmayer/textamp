@@ -14,9 +14,6 @@ pub(in crate::app::handlers) fn handle_similar_keys(
 ) -> Vec<Action> {
     use crate::app::state::SimilarMode;
 
-    if key.code == KeyCode::Right {
-        return activate_similar_item(state);
-    }
     match key.code {
         KeyCode::Esc => {
             // Return to previous view, or Browse if none

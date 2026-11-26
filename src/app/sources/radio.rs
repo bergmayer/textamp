@@ -6,8 +6,8 @@ use crate::app::event::{LibraryEventSender, RadioEvent};
 use crate::app::state::{ActiveStation, PlayStatus, RadioRefill, View};
 use crate::app::tasks::TaskLease;
 use crate::app::{Action, AppState, Event};
-use crate::library::station::{RadioSource, Station};
-use crate::library::{FolderSource, radio::Recipe, track::Track};
+use crate::library::station::RadioSource;
+use crate::library::track::Track;
 
 use rand::prelude::IndexedRandom;
 use std::collections::HashSet;
@@ -30,16 +30,7 @@ impl Batch {
 
 enum Request {
     Navidrome(navidrome::radio::Request),
-    Related {
-        seed: Box<Track>,
-        catalog: std::sync::Arc<Vec<Track>>,
-        excluded: HashSet<String>,
-    },
-    Folder {
-        source: FolderSource,
-        recipe: Recipe,
-        excluded: HashSet<String>,
-    },
+    Folder(Vec<Track>),
 }
 impl Request {
     fn prepare(
@@ -65,98 +56,41 @@ impl Request {
             ActiveSource::Navidrome(session) => Self::Navidrome(
                 navidrome::radio::Request::prepare(state, session, &source, refill)?,
             ),
-            ActiveSource::Folder(id) => {
-                let source = state
-                    .sources
-                    .folders
-                    .iter()
-                    .find(|s| &s.id == id)
-                    .cloned()
-                    .ok_or_else(|| failure("The folder library has been removed"))?;
-                if let RadioSource::Related(key) = &station.source {
-                    let seed = state
-                        .radio
-                        .tracks
-                        .iter()
-                        .find(|track| &track.rating_key == key)
-                        .cloned()
-                        .ok_or_else(|| failure("Choose a track first"))?;
-                    return Ok(Self::Related {
-                        seed: Box::new(seed),
-                        catalog: state.library.all_tracks.clone(),
-                        excluded: state
-                            .radio
-                            .tracks
-                            .iter()
-                            .skip(state.radio.track_index.unwrap_or(0))
-                            .map(|t| t.rating_key.clone())
-                            .collect(),
-                    });
-                }
-                let recipe = match station.source.station_key() {
-                    Some("folder-radio/randomAlbum") => Recipe::RandomAlbum,
-                    Some("folder-radio/library") => Recipe::Library,
-                    _ => {
-                        return Err(failure(
-                            "This station is not available for folder libraries",
-                        ));
+            ActiveSource::Folder(_) => {
+                let seed = match &source {
+                    RadioSource::Station(k)
+                        if matches!(
+                            k.as_str(),
+                            "folder-radio/randomAlbum" | "folder-radio/library"
+                        ) =>
+                    {
+                        None
                     }
+                    RadioSource::Related(key) => {
+                        state.radio.tracks.iter().find(|t| t.rating_key == *key)
+                    }
+                    _ => return Err(failure("This station is unavailable for folder libraries")),
                 };
+                let empty = HashSet::new();
                 let excluded = if refill {
-                    state
-                        .radio
-                        .tracks
-                        .iter()
-                        .skip(state.radio.track_index.unwrap_or(0))
-                        .map(|t| t.rating_key.clone())
-                        .collect()
+                    &state.radio.introduced_albums
                 } else {
-                    HashSet::new()
+                    &empty
                 };
-                Self::Folder {
-                    source,
-                    recipe,
-                    excluded,
-                }
+                Self::Folder(
+                    state
+                        .library
+                        .folder_radio
+                        .select(excluded, seed)
+                        .map_err(|e| failure(&e.to_string()))?,
+                )
             }
         })
     }
     async fn fetch(self) -> Result<Batch, AsyncError> {
         match self {
             Self::Navidrome(request) => request.fetch().await,
-            Self::Related {
-                seed,
-                catalog,
-                excluded,
-            } => {
-                let mut tracks: Vec<_> = catalog
-                    .iter()
-                    .filter(|t| !excluded.contains(&t.rating_key))
-                    .cloned()
-                    .collect();
-                tracks.sort_by_key(|t| {
-                    std::cmp::Reverse(
-                        t.genres
-                            .iter()
-                            .filter(|genre| seed.genres.contains(genre))
-                            .count(),
-                    )
-                });
-                tracks.truncate(20);
-                Ok(Batch::tracks(tracks))
-            }
-            Self::Folder {
-                source,
-                recipe,
-                excluded,
-            } => {
-                let store = crate::library::cache::Store::folder(&source)
-                    .map_err(|e| failure(&format!("{e:#}")))?;
-                crate::library::radio::select(&source, &store, recipe, &excluded)
-                    .await
-                    .map(Batch::tracks)
-                    .map_err(|e| failure(&format!("{e:#}")))
-            }
+            Self::Folder(tracks) => Ok(Batch::tracks(tracks)),
         }
     }
 }
@@ -317,7 +251,10 @@ fn launch(
         let event = match (refill, result) {
             (false, Ok(mut batch)) => {
                 if let Some(seed) = seed {
-                    batch.tracks.retain(|t| t.rating_key != seed.rating_key);
+                    batch.tracks.retain(|t| {
+                        t.rating_key != seed.rating_key
+                            && t.parent_rating_key != seed.parent_rating_key
+                    });
                     if batch.tracks.is_empty() {
                         let _ = tx
                             .send(
@@ -373,19 +310,19 @@ pub fn children(
     }
 }
 
-/// Folder stations depend on directory listings rather than tag metadata.
-pub fn folder_stations() -> Vec<Station> {
-    crate::library::station::standard_stations(
-        "folder-radio",
-        crate::library::capabilities::FOLDERS,
-    )
-}
-
 pub fn load_folder_stations(state: &mut AppState) {
+    let stations = if state.library.folder_radio.available() {
+        crate::library::station::standard_stations(
+            "folder-radio",
+            crate::library::capabilities::FOLDERS,
+        )
+    } else {
+        vec![]
+    };
     state.station_nav.columns = vec![crate::app::state::StationColumn::new(
         None,
         "stations".into(),
-        folder_stations(),
+        stations,
     )];
     state.station_nav.focused_column = 0;
     state.station_nav.loading = false;

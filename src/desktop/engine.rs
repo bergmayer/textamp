@@ -33,16 +33,22 @@ pub struct Snapshot {
     pub collapsed_sidebar_sections: Vec<String>,
     pub filter: app::state::ListFilterState,
     pub sidebar_options: Vec<super::preferences::SidebarOption>,
-    pub caches: Vec<app::sources::cache::CacheLibrary>,
     pub status: String,
     pub download_notification: bool,
     pub error: Option<String>,
     pub loading: Option<String>,
+    pub library_stations: Vec<crate::library::station::Station>,
+    pub preferred_station: Option<String>,
     pub radio_commands: Vec<String>,
     pub menu_commands: Vec<super::menu_catalog::Command>,
     pub settings_request: u64,
     pub player_window_request: u64,
     pub queue_open: bool,
+    pub sheet_browser: bool,
+    pub sheet_root_request: Option<u64>,
+    pub showing_queue_history: bool,
+    pub history_cursor: usize,
+    pub listening_history: app::listening_history::History,
     pub sidebar_visible: Option<bool>,
     pub queue_request: u64,
     pub library_window_request: u64,
@@ -64,7 +70,6 @@ pub struct Snapshot {
     pub theme: crate::app::theme::ThemeName,
     pub artwork_mode: app::state::ArtworkMode,
     pub ghost_artist: Option<String>,
-    pub split_player: bool,
     pub context_policy: crate::app::track_context::ContextPolicy,
     pub now_playing: String,
     pub generation: u64,
@@ -91,6 +96,28 @@ pub struct Snapshot {
     pub artist: String,
 }
 impl Snapshot {
+    pub(super) fn album_page_column(&self) -> Option<usize> {
+        self.preview
+            .as_ref()
+            .filter(|p| p.kind == super::catalog::PreviewKind::Album)?;
+        self.columns
+            .iter()
+            .rposition(|column| column.album_info && !column.hidden)
+    }
+
+    pub(super) fn has_inspector(&self) -> bool {
+        self.preview.is_some() && self.album_page_column().is_none()
+    }
+
+    pub(super) fn sheet_shows_inspector(&self) -> bool {
+        self.has_inspector()
+            && (self.details_focused
+                || self
+                    .columns
+                    .get(self.focused_column)
+                    .is_some_and(|column| column.metadata))
+    }
+
     /// Refresh clock, meters and activity without rebuilding catalog or Settings models.
     fn refresh_playback(
         &mut self,
@@ -143,7 +170,6 @@ impl Snapshot {
             };
         self.playing
             || self.player.active
-            || state.desktop_split_view
             || state.desktop_player_visible
             || state.gui_multiple_windows
             || previous
@@ -205,13 +231,13 @@ pub enum Command {
     },
     PlayerWindowVisible(bool),
     ToggleQueue,
-    ToggleLargeAlbumCovers,
     QueueWindowClosed,
     PlayerKey(crossterm::event::KeyEvent),
     SidebarGroup {
         generation: u64,
         title: String,
     },
+    PreferStation(String),
     ToggleSidebarSection {
         generation: u64,
         title: String,
@@ -262,11 +288,6 @@ pub enum Command {
         root: app::state::LibraryRoot,
         visible: bool,
     },
-    Cache {
-        generation: u64,
-        choice: app::sources::LibraryChoice,
-        action: app::sources::options::OptionAction,
-    },
     ColumnOptions {
         generation: u64,
         column: usize,
@@ -276,7 +297,6 @@ pub enum Command {
     OpenPlaylist {
         generation: u64,
         key: String,
-        focus: super::sidebar::PlaylistFocus,
     },
     Viewport {
         generation: u64,
@@ -365,6 +385,7 @@ pub enum Command {
         following: bool,
     },
     Navigate {
+        grid_columns: usize,
         column_delta: i8,
         row_delta: i8,
     },
@@ -513,12 +534,11 @@ impl Engine {
                         let mut connection = None;
                         let mut main_view=state.view;let mut settings_request=0u64;
                         let mut player_window_request=0u64;let mut library_window_request=0u64;
-                        let mut queue_open=false;let mut queue_request=0u64;
+                        let mut sheet_root_request=None;let mut sheet_browser=false;let mut queue_open=false;let mut queue_request=0u64;
                         let mut sessions=super::workflows::Sessions::default();let mut cached_surfaces=std::sync::Arc::new(Vec::new());
                         let mut surface_request=0u64;let mut surface_epoch=0u64;let mut previous_surface=None;
 
                         let mut sidebar_cursor=None;
-                        let mut sidebar_inspection=super::sidebar::PlaylistInspection::default();
                         let mut sidebar_group:Option<(u64,String,usize)>=None;
                         let mut navigation_serial=0;let mut player_navigation_serial=0u64;
                         let mut navigation_origin=super::browser::Origin::Pointer;
@@ -536,9 +556,9 @@ impl Engine {
                             let text_continuous=text_session.continuous(state);
                             #[cfg(not(target_os="macos"))]
                             let text_continuous=false;
+                            if !graphical || config.ui.desktop_separate_player {sheet_browser=false;}
                             if graphical && matches!(state.view,app::View::Queue|app::View::NowPlaying) {state.view=app::View::Browse;}
                             if graphical && queue_open!=state.tui_queue_visible {queue_open=state.tui_queue_visible;queue_request=queue_request.wrapping_add(1);}
-                            if graphical && state.desktop_split_view && !state.desktop_player_fullscreen.is_open() {state.desktop_player_visible=false;}
                             if graphical && changes!=ProjectionChange::Playback {let mosaics=crate::app::artwork_mosaic::requests(state);if !mosaics.is_empty() {app::dispatch::dispatch_action(SystemAction::LoadAlbumArt(mosaics).into(),state,audio,config,&events).await?;}}
                             if source_generation!=state.library_generation {
                                 state.desktop_library_root=app::state::LibraryRoot::Artists;source_generation=state.library_generation;sidebar_cursor=None;sidebar_group=None;
@@ -592,7 +612,6 @@ impl Engine {
                             if config.ui.desktop_separate_player&& let Some(model)=active_surface.as_mut()&& let Some(id)=sessions.resolve(&model.id){model.id=id;}
                             if changes!=ProjectionChange::Playback {
                                 if changes!=ProjectionChange::Selection || !super::browser::refresh_selection(state,&mut cached_columns) {cached_columns=super::browser::columns(state);}
-                                for column in &mut cached_columns {column.large_artwork=config.ui.desktop_large_album_covers && column.rows.iter().any(|r|r.kind==super::browser::Kind::Album);}
                                 cached_queue=Some(super::browser::queue(state));
                             }
                             inspection.settle(state);
@@ -624,16 +643,16 @@ impl Engine {
                                 filter: if state.list_filter.category == state.browse_category {state.list_filter.clone()} else {Default::default()},
                                 connection: connection.clone(),settings_progress:state.staged_settings.as_ref().map(|draft|draft.progress.clone()),
                                 sidebar_options: super::preferences::sidebar_options(state),
-                                caches: app::sources::cache::summaries(state),
-                                settings_request, player_window_request, library_window_request, queue_open, queue_request,sidebar_visible:Some(state.tui_sidebar_visible),
+                                settings_request, player_window_request, library_window_request, sheet_browser, sheet_root_request, queue_open, queue_request,sidebar_visible:Some(state.tui_sidebar_visible),
                                 surface_request,
+                                library_stations: state.station_nav.columns.first().map(|column| column.stations().to_vec()).unwrap_or_default(),
+                                preferred_station: config.ui.library_radio_station.clone(),
                                 radio_commands: app::command_palette::materialize_entries(state).into_iter().filter(|e|matches!(e.command,PaletteCommandKind::StopRadio|PaletteCommandKind::PlayStation(_)|PaletteCommandKind::BrowseStations{..}|PaletteCommandKind::StationsBack)).map(|e|e.label).collect(),
                                 images:art_cache.project(state),art_generation:state.artwork.grid_generation,
-                                playback_queue:cached_queue.clone(),
+                                playback_queue:cached_queue.clone(),showing_queue_history:state.showing_queue_history,history_cursor:state.history_cursor,listening_history:state.listening_history.clone(),
                                 preferences:super::preferences::project(state),
-                                theme:state.theme,artwork_mode:state.artwork.graphical_mode,
+                                theme:state.theme,artwork_mode:state.artwork.mode,
                                 view_options:super::commands::view_options(state),queue_tools:app::queue_controls::definitions(state),disabled_queue_menu_items:super::commands::disabled_queue_menu_items(state),queue_mode:app::queue_modes::label(state),queue_modes:app::queue_modes::choices(state),
-                                split_player:state.desktop_split_view,
                                 context_policy:crate::app::track_context::ContextPolicy::for_state(state),
                                 preview:presentation.preview.clone(),
                                 sidebar:super::catalog::sidebar(state),
@@ -690,8 +709,8 @@ impl Engine {
                                 next.status=status;
                                 next.loading=loading;
                                 next.error=state.notifications.last_error.clone();
-                                next.playing=state.playback.status==app::PlayStatus::Playing;
-                                next.position_ms=state.playback.position_ms;
+                                next.artwork_mode=state.artwork.mode;
+                                next.refresh_playback(state, &mut player_projection, connection.as_ref());
                                 updates.send_replace(next);
                                 }
                             }
@@ -729,6 +748,7 @@ impl Engine {
                                     let command = if let Some(Command::SidebarOpen { generation, index }) = command {
                                         if generation != state.library_generation { continue; }
                                         let Some(destination) = super::sidebar::open_command(state,index) else { continue; };
+                                        sheet_browser |= graphical && state.desktop_player_visible && !config.ui.desktop_separate_player;
                                         sidebar_group = None;
                                         if super::workspace::owns(state) {
                                             for action in super::surface::cancel(state,config) {
@@ -737,6 +757,11 @@ impl Engine {
                                         }
                                         if config.ui.desktop_separate_player { sessions.leave_for_browse(state); }
                                         if !matches!(destination, Command::ToggleSidebarSection { .. }) {
+                                            if state.desktop_player_visible && !config.ui.desktop_separate_player {
+                                                state.windowed_presentation.set_workspace(app::windowed_presentation::Workspace::Library);
+                                                state.desktop_player_visible=false;
+                                                library_window_request=library_window_request.wrapping_add(1);
+                                            }
                                             if app::player_sync::visible(state)
                                                 && !matches!(destination, Command::OpenLibraryRoot { root: app::state::LibraryRoot::Mp3Players, .. })
                                             {
@@ -802,10 +827,13 @@ impl Engine {
                                     Some(Command::AlbumInfo {generation,column,identity})=>{
                                         if generation!=state.library_generation || super::browser::columns(state).get(column).is_none_or(|c|c.identity!=identity || !c.album_info) {continue;}
                                         sidebar_cursor=None;desktop_focus=Some((generation,state.browse_category,column));
-                                        select_album_info(state,column);vec![]
+                                        select_album_info(state,column);
+                                        app::details::open_album_notes(state,column);
+                                        vec![]
                                     },
                                     Some(Command::SidebarGroup{generation,title}) if title == "Radio" => {
                                         if generation == state.library_generation {
+                                            sheet_browser |= graphical && state.desktop_player_visible && !config.ui.desktop_separate_player;
                                             sidebar_group=None;
                                             let _ = actor_commands.try_send(Command::OpenLibraryRoot {generation, root: app::state::LibraryRoot::Radio});
                                         }
@@ -813,6 +841,8 @@ impl Engine {
                                     },
                                     Some(Command::SidebarGroup{generation,title})=>{
                                         if generation==state.library_generation && super::surface::sidebar_group(state,&title,0).is_some() {
+                                            sheet_browser |= graphical && state.desktop_player_visible && !config.ui.desktop_separate_player;
+                                            state.windowed_presentation.set_workspace(app::windowed_presentation::Workspace::Library);
                                             sidebar_cursor=super::catalog::sidebar(state).iter().position(|row|row.header && row.label==title);
                                             state.playlist_group_filter=None;
                                             sidebar_group=Some((generation,title,0));
@@ -862,7 +892,7 @@ impl Engine {
                                         if generation!=state.library_generation {continue;}
                                         app::dispatch::dispatch_action(app::action::SettingsAction::ToggleSidebarGroup(title.clone()).into(),state,audio,config,&events).await?;
                                         let rows=super::catalog::sidebar(state);
-                                        if sidebar_cursor.is_some_and(|i|!super::sidebar::visible_rows(&rows,&state.desktop_collapsed_sections).contains(&i)) {sidebar_cursor=rows.iter().position(|r|r.header && r.label==title);}
+                                        if sidebar_cursor.is_some_and(|i|!super::sidebar::visible_rows(&rows,&state.desktop_collapsed_sections,!state.tui_sidebar_visible).contains(&i)) {sidebar_cursor=rows.iter().position(|r|r.header && r.label==title);}
                                         vec![]
                                     },
                                     Some(Command::SidebarVisibility{generation,section,visible})=>{
@@ -873,10 +903,6 @@ impl Engine {
                                         if generation!=state.library_generation {continue;}
                                         vec![app::action::SettingsAction::SetLibraryRootVisible { root, visible }.into()]
                                     },
-                                    Some(Command::Cache{generation,choice,action})=>{
-                                        if generation!=state.library_generation || !app::sources::library_choices(state).iter().any(|c|c.artwork_key()==choice.artwork_key()) {continue;}
-                                        app::sources::options::apply(choice,action,state)
-                                    },
                                     Some(Command::ColumnOptions{generation,column,identity})=>{
                                         if generation!=state.library_generation || super::browser::columns(state).get(column).is_none_or(|c|c.identity!=identity){continue;}
                                         surface_request=surface_request.wrapping_add(1);
@@ -886,21 +912,18 @@ impl Engine {
                                         state.category_column_focused=false;state.focus=app::state::Focus::Right;
                                         vec![app::action::SearchAction::OpenSortPopup.into()]
                                     },
-                                    Some(Command::OpenPlaylist {generation,key,focus}) => {
+                                    Some(Command::OpenPlaylist {generation,key}) => {
                                         if generation!=state.library_generation {continue;}
-                                        let keep_sidebar=focus==super::sidebar::PlaylistFocus::Sidebar;
-                                        if keep_sidebar && !super::sidebar::playlist_has_focus(state,sidebar_cursor,&key) {continue;}
-                                        if !keep_sidebar {sidebar_cursor=None;}
+                                        sidebar_cursor=None;
                                         inspection.cancel(state);
                                         let already_open=super::sidebar::playlist_is_open(state,&key);
-                                        if keep_sidebar && already_open {continue;}
                                         if !already_open {
                                             app::dispatch::dispatch_action(app::action::NavigationAction::set_category(app::BrowseCategory::Playlists).into(),state,audio,config,&events).await?;
                                         }
                                         if state.select_playlist(&key) {
                                             if !already_open {state.list_filter.deactivate();}
-                                            state.focus=app::state::Focus::Right;state.category_column_focused=keep_sidebar;
-                                            desktop_focus=if keep_sidebar {None}else{Some((generation,app::BrowseCategory::Playlists,1))};
+                                            state.focus=app::state::Focus::Right;state.category_column_focused=false;
+                                            desktop_focus=Some((generation,app::BrowseCategory::Playlists,1));
                                             navigation_serial+=1;navigation_origin=super::browser::Origin::Keyboard;
                                             if already_open {vec![]}else{vec![app::action::MillerAction::LoadPlaylistTracksForMiller{playlist_key:key,replace_child:false}.into()]}
                                         }else{vec![]}
@@ -918,7 +941,7 @@ impl Engine {
                                         let mut actions=vec![];
                                         if generation==state.library_generation && super::browser::columns(state).get(column).is_some_and(|c|c.identity==identity)
                                             && let Some(c)=state.browse_nav().and_then(|n|n.columns.get(column)) {
-                                                if c.artwork_visible {
+                                                if c.artwork_visible || app::view_options::album_grid(state,column) {
                                                     let mut images=c.items.get(range.start.min(c.items.len())..range.end.min(c.items.len())).unwrap_or_default().iter().filter_map(|item|match item {
                                                         app::state::BrowseItem::Album {key,thumb:Some(thumb),..} if !state.artwork.grid_cache.contains_key(key) && !state.artwork.grid_pending.contains(key)=>Some((key.clone(),thumb.clone())),
                                                         app::state::BrowseItem::Track {key,..} if !state.artwork.grid_cache.contains_key(key) && !state.artwork.grid_pending.contains(key)=>c.tracks.iter().find(|t|&t.rating_key==key).and_then(|t|t.best_thumb().map(|thumb|(key.clone(),thumb.to_owned()))),_=>None
@@ -992,7 +1015,9 @@ impl Engine {
                                         }
                                     },
                                     Some(Command::TrackContext {target,label})=>{
-                                        if !super::browser::valid(state,&target){vec![]}else {
+                                        if !super::browser::valid(state,&target){vec![]}else if target.column == super::browser::PLAYER_QUEUE && matches!(label.as_str(), "Remove Above" | "Remove Below") {
+                                            vec![app::action::QueueAction::RemoveQueueSide { row: target.row, above: label == "Remove Above" }.into()]
+                                        }else {
                                             let track=super::browser::target_column(state,target.column).and_then(|c|c.tracks.get(target.row).cloned());
                                             if let Some(track)=track {
                                                 select_target(state,&target,super::browser::Selection::Context,super::browser::Intent::Focus);
@@ -1003,7 +1028,11 @@ impl Engine {
                                             }else{vec![]}
                                         }
                                     },
-                                    Some(Command::ToggleLargeAlbumCovers)=>vec![app::action::SettingsAction::SetLargeArtwork(!state.large_artwork).into()],
+                                    Some(Command::PreferStation(id)) => {
+                                        config.ui.library_radio_station = Some(id);
+                                        if let Err(error) = crate::config::save_config(config) { state.set_status(error.to_string()); }
+                                        vec![]
+                                    }
                                     Some(Command::ToggleQueue)=>vec![app::action::NavigationAction::ToggleQueuePanel.into()],
                                     Some(Command::QueueWindowClosed)=>{state.tui_queue_visible=false;vec![]},
                                     Some(Command::PlayerWindowVisible(visible))=>{state.desktop_player_visible=visible;if !visible {state.desktop_player_fullscreen=app::state::DesktopFullscreenView::Closed;}vec![]},
@@ -1043,9 +1072,9 @@ impl Engine {
                                         if let Some(item)=item {
                                             if config.ui.desktop_separate_player && !sessions.activate(&id,Some(revision),state) {continue;}
                                             let mut remembered = if let super::surface::Operation::Palette(command) = &item.operation {app::command_palette::remember(command,state)} else {vec![]};
-                                            let actions=if matches!(item.operation,super::surface::Operation::Palette(PaletteCommandKind::CloseColumn)) {
+                                            let actions=if let super::surface::Operation::Palette(command @ (PaletteCommandKind::CloseColumn | PaletteCommandKind::GotoQueue | PaletteCommandKind::GotoLibrary)) = item.operation {
                                                 state.palette.close();
-                                                let _=actor_commands.try_send(Command::Palette(PaletteCommandKind::CloseColumn));
+                                                let _=actor_commands.try_send(Command::Palette(command));
                                                 vec![]
                                             } else {apply_surface_operation(item.operation,state,config)};
                                             if config.ui.desktop_separate_player && !state.palette.open {
@@ -1069,7 +1098,7 @@ impl Engine {
                                                 continue;
                                             }
                                         if matches!(&operation,super::surface::Operation::Palette(PaletteCommandKind::GotoQueue)) && (active_surface.as_ref().is_some_and(|model|model.id==id && model.revision==revision) || cached_surfaces.iter().any(|model|model.id==id && model.revision==revision)) {
-                                            state.palette.close();for action in app::command_palette::run(PaletteCommandKind::GotoQueue,state) {app::dispatch::dispatch_action(action,state,audio,config,&events).await?;}continue;
+                                            state.palette.close();let _=actor_commands.try_send(Command::ToggleQueue);continue;
                                         }
                                         if super::workspace::project(state).is_some_and(|model|model.id==id && (model.revision==revision || matches!(operation,super::surface::Operation::Key(_)))) {
                                             let actions=apply_surface_operation(operation,state,config);
@@ -1104,15 +1133,15 @@ impl Engine {
                                         if generation==state.library_generation && target.as_ref().is_none_or(|t|super::browser::valid(state,t)) {actions} else {vec![]}
                                     },
                                     Some(Command::JumpLetter {generation,column,identity,letter,second}) => {
-                                        defer_inspection=true;changes=ProjectionChange::Selection;
-
-                                        let columns=super::browser::columns(state);
-                                        let target=columns.get(column).filter(|c| generation==state.library_generation && c.identity==identity)
+                                        let target=presentation.columns.get(column).filter(|c| generation==state.library_generation && c.identity==identity)
                                             .and_then(|c|super::browser::jump(c,letter,second).and_then(|row|c.target(generation,column,row)));
-                                        if let Some(target)=target {
+                                        if let Some(target)=target.filter(|target| super::browser::valid(state,target)) {
+                                            inspection.cancel(state);
+                                            changes=ProjectionChange::Selection;
+                                            sidebar_cursor=None;
                                             desktop_focus=Some((generation,state.browse_category,column));
                                             navigation_serial+=1;navigation_origin=super::browser::Origin::AlphabetJump;
-                                            select_target(state,&target,super::browser::Selection::Single,super::browser::Intent::Inspect)
+                                            select_target(state,&target,super::browser::Selection::Single,super::browser::Intent::Focus)
                                         } else {vec![]}
                                     },
                                     Some(Command::SaveConnection {owner, draft}) => super::connection::begin(owner, draft, state, &mut connection),
@@ -1153,6 +1182,15 @@ impl Engine {
                                         vec![]
                                     },
                                     Some(Command::Palette(command)) => {
+                                        if graphical && !config.ui.desktop_separate_player && (sheet_browser || state.desktop_player_visible) && matches!(command,PaletteCommandKind::GotoLibrary) {
+                                            sheet_browser=false;
+                                            state.desktop_player_fullscreen=app::state::DesktopFullscreenView::Closed;
+                                            state.desktop_player_visible=false;
+                                            state.windowed_presentation.set_workspace(app::windowed_presentation::Workspace::Library);
+                                            library_window_request=library_window_request.wrapping_add(1);
+                                            state.palette.close();
+                                            continue;
+                                        }
                                         if matches!(command,PaletteCommandKind::SetApplicationMode(_)|PaletteCommandKind::CycleApplicationMode)
                                             && let Some(actions)=inspection.take(state,std::time::Instant::now(),true) {
                                                 for action in actions {app::dispatch::dispatch_action(action,state,audio,config,&events).await?;}
@@ -1167,8 +1205,12 @@ impl Engine {
                                             let _ = actor_commands.try_send(Command::SidebarGroup{generation:state.library_generation,title:"AI".into()});
                                             continue;
                                         }
+                                        if sheet_browser && matches!(command,PaletteCommandKind::CloseColumn) {
+                                            player_window_request = player_window_request.wrapping_add(1);
+                                            sheet_root_request = Some(player_window_request);
+                                        }
                                         if matches!(command,PaletteCommandKind::CloseColumn) && sidebar_group.is_some() {sidebar_group=None;sidebar_cursor=None;continue;}
-                                        if matches!(command,PaletteCommandKind::GotoQueue) {for action in app::command_palette::run(command,state) {app::dispatch::dispatch_action(action,state,audio,config,&events).await?;}continue;}
+                                        if matches!(command,PaletteCommandKind::GotoQueue) {state.palette.close();let _=actor_commands.try_send(Command::ToggleQueue);continue;}
                                         if matches!(command,PaletteCommandKind::OpenSearch) {
                                             surface_request=surface_request.wrapping_add(1);
                                             if super::workspace::owns(state) {
@@ -1176,6 +1218,13 @@ impl Engine {
                                             }
                                         }
                                         if matches!(command,PaletteCommandKind::OpenRadioBrowser|PaletteCommandKind::ConfigureStation(_)|PaletteCommandKind::Downloads(app::downloads::Menu::Open|app::downloads::Menu::Manage)) {
+                                            if matches!(command, PaletteCommandKind::ConfigureStation(_)) {
+                                                sidebar_group = None;
+                                                if !config.ui.desktop_separate_player && (sheet_browser || state.desktop_player_visible) {
+                                                    sheet_browser = true;
+                                                    player_window_request = player_window_request.wrapping_add(1);
+                                                }
+                                            }
                                             sessions.leave_for_browse(state);
                                             library_window_request=library_window_request.wrapping_add(1);
                                         }
@@ -1205,23 +1254,35 @@ impl Engine {
                                         if let Some(index)=sidebar_cursor {let _=actor_commands.try_send(Command::SidebarOpen{generation:state.library_generation,index});continue;}
 
                                         navigation_serial+=1;navigation_origin=super::browser::Origin::Keyboard;
+                                        if !following {
+                                            desktop_focus=None;
+                                        }
                                         activate(state, following)
                                     },
-                                    Some(Command::Navigate {column_delta, row_delta}) => {
+                                    Some(Command::Navigate {column_delta, row_delta, grid_columns}) => {
                                         if super::radio::visible(state) && sidebar_cursor.is_none() && super::surface::project(state).is_none() {
                                             use crossterm::event::KeyCode;
                                             let key=if column_delta<0 {KeyCode::Left}else if column_delta>0 {KeyCode::Right}else if row_delta<0 {KeyCode::Up}else{KeyCode::Down};
                                             for action in super::radio::key(state,key) {app::dispatch::dispatch_action(action,state,audio,config,&events).await?;}
                                             continue;
                                         }
-                                        if column_delta>0 {if let Some(actions)=inspection.take(state,std::time::Instant::now(),true){for action in actions{sessions.dispatch(action,state,audio,config,&events).await?;}}}
-                                        else if column_delta<0 {inspection.cancel(state);}
+                                        if sidebar_cursor.is_none() && !state.track_pane_focused && state.view==app::View::Browse
+                                            && let Some(column)=state.browse_nav().map(|nav|nav.focused_column)
+                                            && app::view_options::album_grid(state,column)
+                                            && (move_album_grid(state,column,column_delta,row_delta,grid_columns) || row_delta!=0) {
+                                            inspection.cancel(state);
+                                            desktop_focus=Some((state.library_generation,state.browse_category,column));
+                                            navigation_serial+=1;
+                                            navigation_origin=super::browser::Origin::Keyboard;
+                                            changes=ProjectionChange::Selection;
+                                            continue;
+                                        }
+                                        if column_delta!=0 {inspection.cancel(state);}
                                         if row_delta!=0 && sidebar_cursor.is_none() && !state.list_filter.active {defer_inspection=true;changes=ProjectionChange::Selection;}
 
                                         if config.ui.desktop_separate_player {sessions.leave_for_browse(state);}
                                         if sidebar_cursor.is_some() {
                                             if let Some(command)=super::sidebar::navigate(state,&mut sidebar_cursor,column_delta,row_delta) {let _=actor_commands.try_send(command);}
-                                            sidebar_inspection.schedule(state,sidebar_cursor,std::time::Instant::now());
                                             continue;
                                         }
                                         if state.track_pane_focused && column_delta<0 {
@@ -1233,10 +1294,9 @@ impl Engine {
                                         let focused=state.browse_nav().map(|n|n.focused_column).or_else(||state.folder_state.as_ref().map(|n|n.focused_column)).unwrap_or(first);
                                         if column_delta<0 && state.view==app::View::Browse && focused<=first {
                                             let rows=super::catalog::sidebar(state);
-                                            let visible=super::sidebar::visible_rows(&rows,&state.desktop_collapsed_sections);
+                                            let visible=super::sidebar::visible_rows(&rows,&state.desktop_collapsed_sections,!state.tui_sidebar_visible);
                                             sidebar_cursor=visible.iter().find(|i|rows[**i].active).copied().or_else(||visible.first().copied());
                                             desktop_focus=None;
-                                            sidebar_inspection.schedule(state,sidebar_cursor,std::time::Instant::now());
                                             continue;
                                         }
 
@@ -1249,7 +1309,7 @@ impl Engine {
                                         let position = if matches!(state.view,app::View::Queue|app::View::NowPlaying) {Some((0,state.list_state.queue_index,state.playback_tracks().len(),1))} else if state.browse_category == app::BrowseCategory::Folders {
                                             state.folder_state.as_ref().and_then(|n| n.focused().map(|c| (n.focused_column, c.selected_index, c.items.len(), n.columns.len())))
                                         } else { state.browse_nav().and_then(|n| n.focused().map(|c| (n.focused_column, c.selected_index, c.items.len(), n.columns.len()))) };
-                                        if let Some((column, row, _count, columns)) = position {
+                                        if let Some((column, _row, _count, columns)) = position {
                                             let target = column.saturating_add_signed(column_delta as isize).min(columns.saturating_sub(1)).max(super::browser::first_content_column(state).min(columns.saturating_sub(1)));
                                             desktop_focus = Some((state.library_generation, state.browse_category, target));
                                             focus_browse_column(state,target);
@@ -1264,9 +1324,7 @@ impl Engine {
                                                     actions
                                                 }
                                             }
-                                            else if column_delta > 0 && target == column {
-                                                select(state,column,row,false)
-                                            } else { vec![] }
+                                            else { vec![] }
                                         } else {vec![]}
                                     },
                                     Some(Command::Select {target, mode, origin, intent}) => {
@@ -1277,7 +1335,10 @@ impl Engine {
                                         if !super::browser::valid(state,&target) {vec![]}
                                         else {
                                             navigation_serial+=1;navigation_origin=origin;
-                                            if target.column!=super::browser::PLAYER_QUEUE {desktop_focus=Some((target.generation,state.browse_category,target.column));}
+                                            if target.column != super::browser::PLAYER_QUEUE {
+                                                let enter_child = sheet_browser && mode == super::browser::Selection::Single && intent == super::browser::Intent::Inspect;
+                                                desktop_focus = Some((target.generation, state.browse_category, target.column + usize::from(enter_child)));
+                                            }
                                             select_target(state,&target,mode,intent)
                                         }
                                     },
@@ -1288,7 +1349,6 @@ impl Engine {
                                     changes=ProjectionChange::Playback;vec![]
                                 },
                                 _ = timer.tick() => {
-                                    if graphical&& let Some(command)=sidebar_inspection.take(state,sidebar_cursor,std::time::Instant::now()) {let _=actor_commands.try_send(command);}
                                     let polled=clock.poll(state,audio);
                                     let passive=polled.iter().all(|event| matches!(event,app::Event::Tick));
                                     let mut actions:Vec<_>=polled.into_iter().flat_map(|event|app::dispatch::handle_core_event(event,state,&events)).collect();
@@ -1311,6 +1371,34 @@ impl Engine {
                                 match &action {
                                     Action::Search(app::action::SearchAction::OpenArtistRadioPicker) => {state.desktop_library_root=app::state::LibraryRoot::Radio;state.view=app::View::Browse;state.browse_category=app::BrowseCategory::Library;state.sources.nav_collection=None;state.desktop_player_visible=false;library_window_request=library_window_request.wrapping_add(1);},
                                     Action::Search(app::action::SearchAction::OpenAdventureLauncher|app::action::SearchAction::OpenAdventureLauncherWithStart{..}) => {state.desktop_library_root=app::state::LibraryRoot::Journey;state.view=app::View::Browse;state.browse_category=app::BrowseCategory::Library;state.sources.nav_collection=None;state.desktop_player_visible=false;library_window_request=library_window_request.wrapping_add(1);},
+                                    Action::Navigation(app::action::NavigationAction::ToggleSidebar)
+                                        if !config.ui.desktop_separate_player && (sheet_browser || state.desktop_player_visible) => {
+                                        sheet_browser = !sheet_browser;
+                                        state.desktop_player_visible = !sheet_browser;
+                                        let workspace = if sheet_browser {
+                                            library_window_request=library_window_request.wrapping_add(1);
+                                            app::windowed_presentation::Workspace::Library
+                                        } else {
+                                            player_window_request=player_window_request.wrapping_add(1);
+                                            app::windowed_presentation::Workspace::NowPlaying
+                                        };
+                                        state.windowed_presentation.set_workspace(workspace);
+                                        continue;
+                                    }
+                                    Action::Navigation(app::action::NavigationAction::SetView(app::View::NowPlaying))
+                                        if !config.ui.desktop_separate_player && !state.desktop_player_visible && !sheet_browser => {
+                                        let previous = updates.borrow();
+                                        let focused_content = previous.sheet_shows_inspector() || (previous.sidebar_cursor.is_none()
+                                            && previous.columns.get(previous.focused_column).is_some_and(|column| !column.hidden)
+                                            && (desktop_focus.is_some() || previous.focused_column > 0 || (!state.category_column_focused && state.focus == app::state::Focus::Right)));
+                                        sheet_browser = state.tui_sidebar_visible;
+                                        state.desktop_player_visible=!sheet_browser;
+                                        state.windowed_presentation.set_workspace(app::windowed_presentation::Workspace::NowPlaying);
+                                        player_window_request=player_window_request.wrapping_add(1);
+                                        sheet_root_request = (sheet_browser && !focused_content).then_some(player_window_request);
+                                        state.palette.close();
+                                        continue;
+                                    },
                                     Action::Navigation(app::action::NavigationAction::SetView(app::View::Queue)) => {
                                         queue_open = true;
                                         state.tui_queue_visible = true;
@@ -1319,9 +1407,9 @@ impl Engine {
                                         continue;
                                     },
                                     Action::Navigation(app::action::NavigationAction::SetView(app::View::NowPlaying))=>{
+                                        sheet_browser=false;
                                         state.windowed_presentation.set_workspace(app::windowed_presentation::Workspace::NowPlaying);
-                                        if state.desktop_split_view {library_window_request=library_window_request.wrapping_add(1);state.desktop_player_visible=false;state.desktop_player_fullscreen=app::state::DesktopFullscreenView::Closed;state.palette.close();}
-                                        else {player_window_request=player_window_request.wrapping_add(1);state.desktop_player_visible=true;}
+                                        player_window_request=player_window_request.wrapping_add(1);state.desktop_player_visible=true;
                                         continue;
                                     },
                                     Action::Navigation(app::action::NavigationAction::ToggleFullscreen)=>{
@@ -1337,6 +1425,12 @@ impl Engine {
                                 if matches!(&action,Action::Browse(app::action::BrowseAction::OpenInLibrary{..})) {state.windowed_presentation.set_workspace(app::windowed_presentation::Workspace::Library);sidebar_cursor=None;desktop_focus=None;inspection.cancel(state);navigation_serial+=1;navigation_origin=super::browser::Origin::LibraryJump;}
                                 let jump = matches!(&action,Action::Browse(app::action::BrowseAction::OpenInLibrary{..}));
                                 let undo = matches!(&action,Action::Navigation(app::action::NavigationAction::Undo|app::action::NavigationAction::Back));
+                                if matches!(action, Action::Navigation(app::action::NavigationAction::ToggleSidebar))
+                                    && state.tui_sidebar_visible
+                                    && let Some(group) = sidebar_cursor.and_then(|index| updates.borrow().sidebar.get(index).and_then(|row| row.parent))
+                                {
+                                    sidebar_cursor = updates.borrow().sidebar.iter().position(|row| row.header && row.label == group.label());
+                                }
                                 let previous_restore = state.jump_history.restored;
                                 let previous_jump = state.jump_history.head();
                                 let playlist_revision = state.playlist_revision;
@@ -1350,7 +1444,7 @@ impl Engine {
                                 let nested_jump = !jump && state.jump_history.head()!=previous_jump && state.jump_history.restored==previous_restore;
                                 if nested_jump {sidebar_cursor=None;desktop_focus=None;inspection=Default::default();navigation_serial+=1;navigation_origin=super::browser::Origin::LibraryJump;}
                                 if jump || nested_jump {sidebar_group=None;library_window_request=library_window_request.wrapping_add(1);if !config.ui.desktop_separate_player {state.desktop_player_visible=false;state.desktop_player_fullscreen=app::state::DesktopFullscreenView::Closed;}}
-                                if undo && previous_restore!=state.jump_history.restored {navigation_serial+=1;navigation_origin=super::browser::Origin::LibraryJump;if state.desktop_player_visible && !state.desktop_split_view {player_window_request=player_window_request.wrapping_add(1);}else {library_window_request=library_window_request.wrapping_add(1);}}
+                                if undo && previous_restore!=state.jump_history.restored {navigation_serial+=1;navigation_origin=super::browser::Origin::LibraryJump;if state.desktop_player_visible {player_window_request=player_window_request.wrapping_add(1);}else {library_window_request=library_window_request.wrapping_add(1);}}
                             }
                             if state.should_quit { break; }
                         }
@@ -1415,7 +1509,7 @@ fn queue_key(
     key: crossterm::event::KeyEvent,
     config: &crate::config::Config,
 ) -> Vec<Action> {
-    if key.code == crossterm::event::KeyCode::Enter {
+    if !state.showing_queue_history && key.code == crossterm::event::KeyCode::Enter {
         return super::queue::play_at(state, state.list_state.queue_index);
     }
     let view = state.view;
@@ -1476,6 +1570,9 @@ fn select_album_info(state: &mut AppState, column: usize) {
 // A UI snapshot can still contain the previous selection during a rapid click + Enter.
 fn activate(state: &mut AppState, following: bool) -> Vec<Action> {
     if album_info_selected(state) {
+        if let Some(index) = state.browse_nav().map(|nav| nav.focused_column) {
+            app::details::open_album_notes(state, index);
+        }
         return vec![];
     }
     let column = if matches!(state.view, app::View::Queue | app::View::NowPlaying) {
@@ -1495,6 +1592,9 @@ fn activate(state: &mut AppState, following: bool) -> Vec<Action> {
     else {
         return vec![];
     };
+    if !following && state.view == app::View::Browse && projected.album_grid {
+        return select(state, column, target.row, false);
+    }
     select_target(
         state,
         &target,
@@ -1608,6 +1708,78 @@ fn select(state: &mut AppState, column: usize, row: usize, play: bool) -> Vec<Ac
     app::handlers::key_input::get_filter_drilldown_actions(state)
 }
 
+fn move_album_grid(
+    state: &mut AppState,
+    column: usize,
+    horizontal: i8,
+    vertical: i8,
+    columns: usize,
+) -> bool {
+    let Some(data) = state.browse_nav().and_then(|nav| nav.columns.get(column)) else {
+        return false;
+    };
+    let filtered = state.list_filter.results.as_ref().filter(|_| {
+        state.list_filter.active
+            && state.list_filter.column == column
+            && state.list_filter.category == state.browse_category
+    });
+    let raw = |pos: usize| filtered.map_or(Some(pos), |r| r.matched_indices.get(pos).copied());
+    let count = filtered.map_or(data.items.len(), |r| r.matched_indices.len());
+    if count == 0 {
+        return false;
+    }
+    let current = filtered
+        .map_or(data.selected_index, |r| {
+            r.matched_indices
+                .iter()
+                .position(|&i| i == data.selected_index)
+                .unwrap_or(0)
+        })
+        .min(count - 1);
+    let first = (0..count)
+        .take_while(|&p| {
+            !matches!(
+                raw(p).and_then(|i| data.items.get(i)),
+                Some(app::state::BrowseItem::Album { .. })
+            )
+        })
+        .count();
+    let grid = app::view_options::AlbumGrid { first, columns };
+    let Some(position) = grid.neighbor(current, count, horizontal, vertical) else {
+        return false;
+    };
+    let Some(index) = raw(position).filter(|&i| i < data.items.len()) else {
+        return false;
+    };
+    if filtered.is_some() {
+        state.list_filter.selected = position;
+    }
+    let Some(nav) = state.browse_nav_mut() else {
+        return false;
+    };
+    let changed = nav.columns[column].selected_index != index;
+    if changed {
+        nav.columns.truncate(column + 1);
+    }
+    let data = &mut nav.columns[column];
+    if data.playlist_editing && data.grouped_by_album {
+        data.selected_index = index;
+    } else {
+        super::browser::selection(
+            &mut data.selected_index,
+            &mut data.selected_set,
+            &mut data.selection_anchor,
+            index,
+            super::browser::Selection::Single,
+            true,
+        );
+    }
+    data.header_selection = app::state::ColumnHeaderSelection::Items;
+    state.focus = app::state::Focus::Right;
+    state.category_column_focused = false;
+    true
+}
+
 fn navigate_browser_rows(state: &mut AppState, delta: i8) -> Vec<Action> {
     let column = state
         .browse_nav()
@@ -1703,10 +1875,13 @@ fn select_target(
             .and_then(|column| column.items.get(target.row))
             .and_then(app::library_details::browse_destination)
             .map(|(track, destination)| {
-                vec![app::action::BrowseAction::OpenDetailsInLibrary {
-                    track: Box::new(track),
-                    destination,
-                }.into()]
+                vec![
+                    app::action::BrowseAction::OpenDetailsInLibrary {
+                        track: Box::new(track),
+                        destination,
+                    }
+                    .into(),
+                ]
             })
             .unwrap_or_default();
     }
@@ -1898,7 +2073,10 @@ fn close_details(state: &mut AppState) {
         nav.columns.truncate(index);
         nav.focused_column = nav.focused_column.min(index.saturating_sub(1));
     }
-    if let Some(column) = state.browse_nav_mut().and_then(|nav| nav.focused_mut()) {
+    if let Some(column) = state
+        .browse_nav_mut()
+        .and_then(|nav| nav.columns.get_mut(nav.focused_column))
+    {
         column.header_selection = app::state::ColumnHeaderSelection::Items;
     }
     state.track_pane_open = false;
@@ -2063,7 +2241,7 @@ mod tests {
             engine
                 .commands
                 .send(Command::Palette(PaletteCommandKind::SetApplicationMode(
-                    app::launch::ApplicationMode::GuiSingle,
+                    app::launch::ApplicationMode::Gui,
                 )))
                 .await
                 .unwrap();
@@ -2205,6 +2383,83 @@ mod tests {
         })
     }
 
+    #[test]
+    fn queue_sheet_keeps_the_sidebar_destination_on_dismissal() {
+        let engine = Engine::start_mode(
+            true,
+            app::launch::Mode::Windowed(app::launch::WindowedMode::Gui),
+        )
+        .unwrap();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut updates = engine.snapshot.clone();
+            let library = wait_for_sidebar(&mut updates, |s| {
+                s.sidebar
+                    .iter()
+                    .any(|row| row.header && row.label == "Albums")
+            })
+            .await;
+            engine.commands.send(Command::ToggleQueue).await.unwrap();
+            let toggled =
+                wait_for_sidebar(&mut updates, |s| s.queue_open != library.queue_open).await;
+            assert_eq!(toggled.player_window_request, library.player_window_request);
+            if !toggled.queue_open {
+                engine.commands.send(Command::ToggleQueue).await.unwrap();
+            }
+            let player = wait_for_sidebar(&mut updates, |s| s.queue_open).await;
+            engine
+                .commands
+                .send(Command::Palette(PaletteCommandKind::GotoNowPlaying))
+                .await
+                .unwrap();
+            let raised = wait_for_sidebar(&mut updates, |s| {
+                s.player_window_request != player.player_window_request
+            })
+            .await;
+            assert_eq!(Some(raised.sheet_browser), player.sidebar_visible);
+            engine
+                .commands
+                .send(Command::SidebarGroup {
+                    generation: player.generation,
+                    title: "Albums".into(),
+                })
+                .await
+                .unwrap();
+            let albums = wait_for_sidebar(&mut updates, |s| {
+                s.sheet_browser && s.workspace_title.as_deref() == Some("Albums")
+            })
+            .await;
+            for expanded in [false, true] {
+                engine
+                    .commands
+                    .send(Command::Action(
+                        app::action::NavigationAction::ToggleSidebar.into(),
+                    ))
+                    .await
+                    .unwrap();
+                let toggled = wait_for_sidebar(&mut updates, |s| s.sheet_browser == expanded).await;
+                assert!(toggled.queue_open);
+                assert_eq!(
+                    toggled.presentation.workspace(),
+                    Some(if expanded {
+                        app::windowed_presentation::Workspace::Library
+                    } else {
+                        app::windowed_presentation::Workspace::NowPlaying
+                    })
+                );
+                assert_eq!(toggled.workspace_title, albums.workspace_title);
+            }
+            engine
+                .commands
+                .send(Command::Palette(PaletteCommandKind::GotoLibrary))
+                .await
+                .unwrap();
+            let restored = wait_for_sidebar(&mut updates, |s| {
+                !s.sheet_browser && s.library_window_request != albums.library_window_request
+            })
+            .await;
+            assert_eq!(restored.workspace_title, albums.workspace_title);
+        });
+    }
     #[test]
     #[ignore = "requires an isolated XDG profile and the loopback desktop catalog fixture"]
     fn actor_leaves_audio_player_for_sidebar_destinations() {
@@ -2406,6 +2661,52 @@ mod tests {
     }
 
     #[test]
+    fn album_grid_arrows_select_and_return_opens_the_selected_group() {
+        use crate::library::models::Track;
+        use app::state::{BrowseCategory, BrowseColumn, BrowseItem, LibraryRoot};
+        let mut state = AppState::new();
+        state.view = app::View::Browse;
+        let tracks = (0..5)
+            .map(|i| Track {
+                rating_key: format!("track-{i}"),
+                parent_rating_key: Some(format!("album-{i}")),
+                parent_title: Some(format!("Album {i}")),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let mut group = BrowseColumn::new_with_tracks(
+            "Grouped albums",
+            BrowseItem::from_tracks(&tracks),
+            tracks,
+        );
+        group.group_by_album();
+        state.desktop_library_root = LibraryRoot::Downloads;
+        state.downloads.group_by_album = true;
+        state.artist_nav.columns = vec![group.clone()];
+        assert!(app::view_options::album_grid(&state, 0));
+        move_album_grid(&mut state, 0, 1, 0, 2);
+        assert!(
+            matches!(activate(&mut state,false).as_slice(),[Action::Miller(app::action::MillerAction::LoadAlbumTracksForMiller{album_key,replace_child:false})] if album_key=="album-1")
+        );
+        state.browse_category = BrowseCategory::Playlists;
+        state.playlist_nav.columns = vec![BrowseColumn::new("Playlists", vec![]), group];
+        state.playlist_nav.focused_column = 1;
+        assert!(app::view_options::album_grid(&state, 1));
+        for (x, y, index) in [(1, 0, 1), (0, 1, 3), (-1, 0, 2), (0, 1, 4)] {
+            move_album_grid(&mut state, 1, x, y, 2);
+            assert_eq!(state.playlist_nav.columns[1].selected_index, index);
+            assert_eq!(state.playlist_nav.columns.len(), 2);
+        }
+        assert!(activate(&mut state, false).is_empty());
+        assert_eq!(state.playlist_nav.focused_column, 2);
+        assert_eq!(
+            state.playlist_nav.columns[2].tracks[0].rating_key,
+            "track-4"
+        );
+        assert!(state.queue.tracks.is_empty());
+    }
+
+    #[test]
     fn album_arrows_ignore_unrelated_workflow_and_terminal_detail_focus() {
         use app::state::{BrowseColumn, BrowseItem};
         let mut state = AppState::new();
@@ -2484,6 +2785,7 @@ mod tests {
             "Album"
         );
         assert!(activate(&mut state, false).is_empty());
+        assert!(state.popups.take_text().is_some());
         for expected in [0, 1] {
             focus_browse_column(&mut state, 1);
             let actions = app::handlers::key_input::handle_key(
@@ -2506,11 +2808,8 @@ mod tests {
             focused_column: 1,
             ..Default::default()
         };
-        assert_eq!(
-            super::super::filter::album_info_index(&snapshot, 1),
-            Some(0)
-        );
-        assert_eq!(super::super::filter::row(&snapshot, 1, 1), Some(0));
+        assert_eq!(super::super::filter::album_info_index(&snapshot, 1), None);
+        assert_eq!(super::super::filter::row(&snapshot, 1, 0), Some(0));
         assert!(state.queue.tracks.is_empty());
         assert!(album_info_selected(&state));
     }
@@ -2852,7 +3151,7 @@ mod tests {
     }
 
     #[test]
-    fn album_track_column_exposes_play_and_append_with_next_as_a_modifier() {
+    fn album_track_column_exposes_play_next_and_append() {
         use app::state::{BrowseColumn, PlayAllRow};
         let mut state = AppState::new();
         let mut tracks = BrowseColumn::new("tracks — Album", vec![]);
@@ -2868,7 +3167,7 @@ mod tests {
                 .iter()
                 .map(|control| control.label.as_str())
                 .collect::<Vec<_>>(),
-            ["Play Album", "Add Album to Queue"]
+            ["Play Album", "Play Album Next", "Add Album to Queue"]
         );
         assert!(state.artist_nav.columns[0].play_all_row.is_some());
     }

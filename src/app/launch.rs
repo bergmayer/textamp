@@ -9,45 +9,22 @@ pub enum WindowedMode {
     Gui,
     Text,
 }
-/// User-facing application modes; saved GUI arrangement remains compatible with existing profiles.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ApplicationMode {
-    Text,
-    GuiSingle,
-    GuiMultiple,
-}
-impl ApplicationMode {
-    /// Choices exposed by a windowed Settings host.
-    pub const ALL: [Self; 3] = [Self::GuiMultiple, Self::GuiSingle, Self::Text];
-    /// Canonical setting label shared by the frontends.
+pub use WindowedMode as ApplicationMode;
+
+impl WindowedMode {
+    pub const ALL: [Self; 2] = [Self::Gui, Self::Text];
+
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Gui => "GUI",
             Self::Text => "Text",
-            Self::GuiSingle => "GUI: Single Window",
-            Self::GuiMultiple => "GUI: Multiple Windows",
         }
     }
-    /// Next mode in the application-window cycle.
+
     pub const fn next(self) -> Self {
         match self {
-            Self::GuiMultiple => Self::GuiSingle,
-            Self::GuiSingle => Self::Text,
-            Self::Text => Self::GuiMultiple,
-        }
-    }
-    /// Renderer required by this choice, independent of GUI window arrangement.
-    pub const fn presentation(self) -> WindowedMode {
-        match self {
-            Self::Text => WindowedMode::Text,
-            Self::GuiSingle | Self::GuiMultiple => WindowedMode::Gui,
-        }
-    }
-    /// GUI arrangement to apply; Text retains the remembered GUI arrangement.
-    pub const fn gui_multiple_windows(self) -> Option<bool> {
-        match self {
-            Self::Text => None,
-            Self::GuiSingle => Some(false),
-            Self::GuiMultiple => Some(true),
+            Self::Gui => Self::Text,
+            Self::Text => Self::Gui,
         }
     }
 }

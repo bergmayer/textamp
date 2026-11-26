@@ -112,7 +112,6 @@ async fn clearing_cache_without_a_library_does_not_request_a_reload() {
                 textamp::app::Event::Effect(Action::Settings(
                     textamp::app::action::SettingsAction::CacheSizes { .. }
                 )) | textamp::app::Event::Artwork(_)
-                    | textamp::app::Event::Cache(_)
             ),
             "Only disk statistics may be refreshed: {event:?}"
         );

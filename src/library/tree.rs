@@ -1,4 +1,4 @@
-//! Atomic, directory-only index. Album file listings remain demand-loaded.
+//! Directory index and tagged radio samples. Album listings load on demand.
 use super::{FolderEntry, FolderSource};
 use anyhow::{Context, Result};
 use futures::{StreamExt, stream::FuturesUnordered};
@@ -7,8 +7,11 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 
 pub const KEY: &str = "folder-tree-v1";
 
+pub use super::radio::FolderRadio;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Tree {
+    #[serde(default, rename = "tagged_radio")]
+    pub radio: Option<FolderRadio>,
     /// Leaves are recorded as empty directory lists, never as cached track lists.
     pub directories: BTreeMap<String, Vec<FolderEntry>>,
     /// Mixed folders need a normal listing so loose tracks are not hidden.
@@ -28,6 +31,7 @@ impl Tree {
 pub async fn scan(source: &FolderSource) -> Result<Tree> {
     tokio::time::timeout(std::time::Duration::from_secs(600), async {
         let mut tree = Tree::default();
+        let mut radio = FolderRadio::default();
         let mut pending = VecDeque::from([(String::new(), 0usize)]);
         let mut seen = HashSet::from([String::new()]);
         let mut requests = FuturesUnordered::new();
@@ -38,14 +42,39 @@ pub async fn scan(source: &FolderSource) -> Result<Tree> {
                 };
                 requests.push(async move {
                     let entries = source.list(&path).await.context("Read folder tree")?;
-                    Ok::<_, anyhow::Error>((path, depth, entries))
+                    let mut tagged = None;
+                    if matches!(source.location, super::FolderLocation::Local { .. }) {
+                        use rand::prelude::IteratorRandom;
+                        let entry = entries
+                            .iter()
+                            .filter(|e| !e.directory)
+                            .choose(&mut rand::rng());
+                        if let Some(entry) = entry
+                            && let Ok(file) = source.file(&entry.path).await
+                        {
+                            let mut track =
+                                super::track::Track::from_folder(&source.id, &entry.path);
+                            tagged = tokio::task::spawn_blocking(move || {
+                                track.parent_title = None;
+                                if !track.read_tags(&file.path, false).ok()?.1 {
+                                    return None;
+                                }
+                                Some(track)
+                            })
+                            .await?;
+                        }
+                    }
+                    Ok::<_, anyhow::Error>((path, depth, entries, tagged))
                 });
             }
             let Some(listing) = requests.next().await else {
                 break;
             };
-            let (path, depth, entries) = listing?;
-            let has_files = entries.iter().any(|entry| !entry.directory);
+            let (path, depth, entries, tagged) = listing?;
+            if let Some(track) = tagged {
+                radio.observe(track);
+            }
+            let has_files = entries.iter().any(|e| !e.directory);
             let directories: Vec<_> = entries
                 .into_iter()
                 .filter(|entry| entry.directory)
@@ -71,6 +100,7 @@ pub async fn scan(source: &FolderSource) -> Result<Tree> {
             }
             tree.directories.insert(path, directories);
         }
+        tree.radio = Some(radio);
         Ok(tree)
     })
     .await

@@ -101,8 +101,7 @@ async fn terminal_export_uses_the_captured_queue_and_rejects_an_old_library() {
             &tx,
             QueueAction::ExportPlaylist {
                 generation: state.library_generation.wrapping_add(1),
-                tracks: state.queue.tracks.clone(),
-                format: Format::Csv,
+                contents: std::sync::Arc::new(b"stale".to_vec()),
                 path: stale.clone(),
             },
             &mut state,
@@ -151,5 +150,56 @@ fn playlist_export_rejects_a_retained_column_from_another_playlist() {
     assert_eq!(
         state.notifications.last_error.as_deref(),
         Some("Open a complete playlist before exporting")
+    );
+}
+
+#[test]
+fn imported_playlists_preserve_order_repeats_and_quoted_metadata() {
+    use textamp::services::playlist_export::{encode, read_playlist};
+    let directory = tempfile::tempdir().unwrap();
+    let mut first = Track::from_folder("fixture", "Artist/Album/#1.flac");
+    first.title = "Song, \"part one\"\nand two".into();
+    let second = Track::from_folder("fixture", "日本/track.flac");
+    let catalog = [first.clone(), second.clone()];
+    let order = [second.clone(), first.clone(), second.clone()];
+    for format in [Format::M3u8, Format::Csv] {
+        let file = directory.path().join(format!("Mix.{}", format.extension()));
+        std::fs::write(&file, encode(&order, format).unwrap()).unwrap();
+        let (name, ids) = read_playlist(&file, &catalog).unwrap();
+        assert_eq!(name, "Mix");
+        assert_eq!(
+            ids,
+            [&second.rating_key, &first.rating_key, &second.rating_key].map(Clone::clone)
+        );
+    }
+    let file = directory.path().join("external.csv");
+    std::fs::write(
+        &file,
+        "Album,Title,Artist\r\n,\"Song, \"\"part one\"\"\nand two\",\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read_playlist(&file, &catalog).unwrap().1,
+        [first.rating_key.clone()]
+    );
+    let mut another = first.clone();
+    another.rating_key = "distinct".into();
+    assert!(
+        read_playlist(&file, &[first, another])
+            .unwrap_err()
+            .to_string()
+            .contains("multiple")
+    );
+    let file = directory.path().join("Bad.m3u");
+    std::fs::write(
+        &file,
+        "\u{feff}#EXTM3U\r\n日本/track.flac\r\nmissing.flac\r\n",
+    )
+    .unwrap();
+    assert!(
+        read_playlist(&file, &catalog)
+            .unwrap_err()
+            .to_string()
+            .contains("entry 2")
     );
 }

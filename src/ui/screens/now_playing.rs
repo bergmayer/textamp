@@ -3,7 +3,7 @@
 //! Queue view: shows the track list with queue-type and tool menus.
 //! Now Playing view: shows artwork, track info, and waveform seekbar.
 
-use crate::app::state::{NowPlayingFocus, PlaybackMode, QueueSortMode, View, VisualizerTab};
+use crate::app::state::{NowPlayingFocus, PlaybackMode, View, VisualizerTab};
 use crate::services::NavigationService;
 use crate::ui::RenderState as AppState;
 use crate::ui::artwork::ArtworkRenderer;
@@ -57,12 +57,11 @@ fn format_artist_album(track: &crate::library::models::Track) -> String {
     format!("{} · {}", track.track_artist(), track.album_name())
 }
 
-/// Queue menus share the list header, leaving the rest of the pane for tracks.
+/// The queue content and right shortcut rail have independent hit regions.
 pub fn render_queue_mode(frame: &mut Frame, state: &AppState, area: Rect) {
-    let block = Block::default().borders(Borders::TOP | Borders::LEFT | Borders::RIGHT);
     state.hit_regions.borrow_mut().queue_content = Some(crate::app::presentation::QueueRegions {
         track_list: area,
-        track_list_inner: block.inner(area),
+        track_list_inner: area,
         art_area: Rect::default(),
     });
     render_track_list(frame, state, area);
@@ -113,6 +112,7 @@ pub fn render_current_track(frame: &mut Frame, state: &AppState, area: Rect) {
     if let Some(regions) = state.hit_regions.borrow_mut().queue_content.as_mut() {
         regions.art_area = columns[0];
     }
+    state.hit_regions.borrow_mut().player_artwork = Some(columns[0]);
     render_current_artwork(frame, state, columns[0]);
     let inner = Rect::new(
         columns[1].x + 3.min(columns[1].width),
@@ -280,99 +280,93 @@ fn render_artwork_placeholder(frame: &mut Frame, area: Rect, message: &str) {
 fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     let t = theme();
 
-    // Title depends on playback mode
-    // A candidate station is not the active queue until its request succeeds.
-    let title = if let Some(start) = &state.station_starting {
-        format!(" Loading {}… (current queue) ", start.title)
+    if area.is_empty() {
+        return;
+    }
+    frame.render_widget(Block::default().bg(t.colors.bg_secondary), area);
+    let title = if state.showing_queue_history {
+        "History"
     } else {
-        match state.playback_mode {
-            PlaybackMode::Radio => {
-                let suffix = if state.queue.sort_mode == QueueSortMode::Shuffle {
-                    " (shuffled)"
-                } else {
-                    ""
-                };
-                if let Some(ref station) = state.radio.active_station {
-                    format!(" {}{} ", station.title, suffix)
-                } else if let Some(ref seed) = state.radio.seed {
-                    format!(" {}{} ", seed.title, suffix)
-                } else {
-                    format!(" radio{} ", suffix)
-                }
-            }
-            PlaybackMode::Queue | PlaybackMode::None => {
-                let mut parts = vec!["Play Queue".to_string()];
-
-                if state.queue.sort_mode == QueueSortMode::Shuffle {
-                    parts.push("(shuffled)".to_string());
-                }
-                format!(" {} ", parts.join(" "))
-            }
-        }
+        "Next"
     };
-
-    let color = if state.view == View::Queue && state.now_playing_focus == NowPlayingFocus::Tracks {
-        t.colors.border_focused
+    frame.render_widget(
+        Paragraph::new(title)
+            .right_aligned()
+            .bold()
+            .fg(if state.view == View::Queue {
+                t.colors.fg_accent
+            } else {
+                t.colors.fg_secondary
+            }),
+        Rect::new(area.x, area.y, area.width.saturating_sub(1), 1),
+    );
+    let body = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
+    let count = if state.showing_queue_history {
+        state.listening_history.len()
     } else {
-        t.colors.fg_muted
+        state.playback_tracks().len()
     };
-    let block = Block::default()
-        .title(crate::util::truncate_middle(
-            &title,
-            area.width.saturating_sub(10) as usize,
-        ))
-        .title_style(Style::default().fg(if state.view == View::Queue {
-            t.colors.fg_accent
-        } else {
-            t.colors.fg_secondary
-        }))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Thick)
-        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-        .border_style(Style::default().fg(color))
-        .style(Style::default().bg(t.colors.bg_secondary));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if area.width >= 10 {
-        use crate::app::queue_controls::Menu;
-        for (offset, menu, focused) in [
-            (8, Menu::QueueType, state.tui_queue_type_focused),
-            (
-                4,
-                Menu::Tools,
-                state.view == View::Queue && state.now_playing_focus == NowPlayingFocus::Tools,
-            ),
-        ] {
-            let rect = Rect::new(area.right() - offset, area.y, 3, 1);
-            let active = menu == Menu::QueueType
-                && crate::app::queue_modes::current(state) != crate::app::queue_modes::Mode::Manual;
-            let style = if focused {
+    let mut inner = body;
+    if count > usize::from(inner.height / 2) {
+        inner.width = inner.width.saturating_sub(1);
+    }
+    if state.showing_queue_history {
+        state.hit_regions.borrow_mut().queue_content = None;
+        let rows = inner.height as usize / 2;
+        let offset = state
+            .scroll
+            .history_offset
+            .unwrap_or_else(|| {
+                NavigationService::calc_scroll_offset(
+                    state.history_cursor,
+                    rows.max(1),
+                    state.listening_history.len(),
+                )
+            })
+            .min(state.listening_history.len().saturating_sub(rows));
+        for (i, play) in state
+            .listening_history
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(rows)
+        {
+            let row = Rect::new(inner.x, inner.y + (2 * (i - offset)) as u16, inner.width, 2);
+            state.hit_regions.borrow_mut().history_rows.push((row, i));
+            let selected = state.history_cursor == i;
+            let base = if selected {
                 t.colors.focused_row()
             } else {
-                Style::default().bg(t.colors.bg_secondary).fg(if active {
-                    t.colors.fg_accent
-                } else {
-                    t.colors.fg_secondary
-                })
+                Style::default().fg(t.colors.fg_primary)
+            };
+            let sub = if selected {
+                base
+            } else {
+                base.fg(t.colors.fg_muted)
             };
             frame.render_widget(
-                Paragraph::new(format!(
-                    "{}{}▾",
-                    queue_menu_symbol(menu),
-                    if active { "•" } else { " " }
-                ))
-                .style(style),
-                rect,
+                Paragraph::new(vec![
+                    Line::from(play.title.as_str()),
+                    Line::styled(format!("{} · {}", play.artist, play.album), sub),
+                ])
+                .style(base),
+                row,
             );
-            state
-                .hit_regions
-                .borrow_mut()
-                .queue_menus
-                .push((rect, menu));
         }
+        if state.listening_history.len() > rows && rows > 0 {
+            crate::ui::widgets::render_scrollbar_borderless(
+                frame,
+                body,
+                state.listening_history.len(),
+                rows,
+                offset,
+            );
+        }
+        return;
     }
-
+    if let Some(region) = state.hit_regions.borrow_mut().queue_content.as_mut() {
+        region.track_list_inner = inner;
+    }
     // Get tracks and current index based on mode
     let (tracks, current_idx) = match state.playback_mode {
         PlaybackMode::Radio => (&state.radio.tracks, state.radio.track_index),
@@ -390,7 +384,15 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         let empty = Paragraph::new(msg)
             .style(Style::default().fg(t.colors.fg_muted))
             .alignment(Alignment::Center);
-        frame.render_widget(empty, inner);
+        frame.render_widget(
+            empty,
+            Rect::new(
+                inner.x,
+                inner.y + inner.height / 2,
+                inner.width,
+                inner.height.min(1),
+            ),
+        );
         return;
     }
 
@@ -399,8 +401,8 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // 2-row layout: each track takes 2 rows (title + artist-album subtitle)
     let visible_item_count = visible_height / 2;
-    let max_text_width = inner.width.saturating_sub(4) as usize;
-    let subtitle_width = (inner.width as usize).saturating_sub(7);
+    let max_text_width = inner.width.saturating_sub(2) as usize;
+    let subtitle_width = max_text_width;
 
     let total_display = tracks.len();
 
@@ -415,11 +417,12 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
     let mut items: Vec<ListItem> = Vec::new();
 
     // Add tracks
-    for (i, track) in tracks.iter().enumerate() {
-        if i < scroll_offset || i >= scroll_offset + visible_item_count {
-            continue;
-        }
-
+    for (i, track) in tracks
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_item_count)
+    {
         let is_current = current_idx == Some(i);
         let is_selected = i == selected_idx;
         let is_multi_selected = state.queue.selected.contains(&i);
@@ -445,7 +448,10 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         let title_display = if is_selected && state.view == crate::app::state::View::NowPlaying {
             let marquee_key = format!("np:{}", i);
             let mut marquee = state.marquee.borrow_mut();
-            if marquee.selection_key != marquee_key {
+            if marquee.selection_key != marquee_key
+                || marquee.display_width != max_text_width
+                || marquee.full_text != track_title
+            {
                 marquee.reset(marquee_key, track_title.to_string(), max_text_width);
             }
             if marquee.phase == crate::app::state::MarqueePhase::Inactive {
@@ -467,7 +473,10 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
         {
             let sub_key = format!("np:{}:sub", i);
             let mut sub_marquee = state.marquee_subtitle.borrow_mut();
-            if sub_marquee.selection_key != sub_key {
+            if sub_marquee.selection_key != sub_key
+                || sub_marquee.display_width != subtitle_width
+                || sub_marquee.full_text != subtitle_content
+            {
                 sub_marquee.reset(sub_key, subtitle_content.clone(), subtitle_width);
             }
             if sub_marquee.phase == crate::app::state::MarqueePhase::Inactive {
@@ -530,14 +539,14 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
                 format!("{}{}", prefix, title_display),
                 line1_fg,
             )),
-            Line::from(Span::styled(format!("     {}", subtitle_display), line2_fg)),
+            Line::from(Span::styled(format!("  {}", subtitle_display), line2_fg)),
         ]);
         crate::ui::artist_links::text(
             state,
             Rect::new(
-                inner.x + 5,
+                inner.x + 2,
                 inner.y + ((i - scroll_offset) * 2 + 1) as u16,
-                inner.width.saturating_sub(5),
+                inner.width.saturating_sub(2),
                 1,
             ),
             &subtitle_display,
@@ -568,49 +577,14 @@ fn render_track_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Scrollbar for long lists
     if total_display > visible_item_count {
-        crate::ui::widgets::render_scrollbar(
+        crate::ui::widgets::render_scrollbar_borderless(
             frame,
-            area,
+            body,
             total_display,
             visible_item_count,
             scroll_offset,
-            None,
         );
     }
-
-    // Footer: position and mode info
-    let mode_indicator = match state.playback_mode {
-        PlaybackMode::Radio => {
-            if state.radio.refill != crate::app::state::RadioRefill::Idle {
-                "Radio (loading...)"
-            } else {
-                "Radio"
-            }
-        }
-        // Queue mode is the default — no footer label, just the row
-        // counter so "1/6 | Queue" becomes "1/6". Radio mode keeps
-        // its label because it's a meaningful distinction.
-        PlaybackMode::Queue | PlaybackMode::None => "",
-    };
-
-    let footer = if tracks.is_empty() {
-        mode_indicator.to_string()
-    } else if mode_indicator.is_empty() {
-        format!("{}/{}", selected_idx + 1, tracks.len())
-    } else {
-        format!("{}/{} | {}", selected_idx + 1, tracks.len(), mode_indicator)
-    };
-
-    let footer_area = Rect::new(
-        area.x + area.width.saturating_sub(footer.len() as u16 + 2),
-        area.y + area.height.saturating_sub(1),
-        footer.len() as u16 + 1,
-        1,
-    );
-    frame.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(t.colors.fg_muted)),
-        footer_area,
-    );
 }
 
 /// Render the six-mode visualizer panel. Tabs occupy one row above the canvas.
@@ -1438,5 +1412,150 @@ fn intensity_color(value: u8) -> Color {
             let t = (value - 201) as u16;
             Color::Rgb(255, 255, (t * 255 / 54) as u8)
         }
+    }
+}
+
+pub(crate) fn queue_rail(frame: &mut Frame, state: &AppState, area: Rect) {
+    use crate::app::{queue_controls::Menu, tui_navigation::RailControl};
+    let focus = state.tui_rail_focus;
+    let colors = &theme().colors;
+    frame.render_widget(
+        Block::default().style(Style::default().bg(colors.bg_secondary)),
+        area,
+    );
+    let button_width = area.width.min(3);
+    let row = |y| Rect::new(area.x + (area.width - button_width) / 2, y, button_width, 1);
+    let paint = |frame: &mut Frame, rect, label: &str, selected, enabled: bool| {
+        let style = if !enabled {
+            Style::default()
+                .fg(colors.fg_muted)
+                .bg(colors.bg_secondary)
+                .add_modifier(Modifier::DIM)
+        } else if selected {
+            colors.focused_row()
+        } else {
+            Style::default()
+                .fg(colors.fg_secondary)
+                .bg(colors.bg_secondary)
+        };
+        frame.render_widget(Paragraph::new(label).centered().style(style), rect);
+    };
+    for (offset, history, label) in [(0, false, "♫"), (1, true, "◷")] {
+        if offset >= area.height {
+            break;
+        }
+        let rect = row(area.y + offset);
+        paint(
+            frame,
+            rect,
+            label,
+            focus.map_or(
+                state.tui_queue_visible && state.showing_queue_history == history,
+                |control| {
+                    control
+                        == if history {
+                            RailControl::History
+                        } else {
+                            RailControl::Next
+                        }
+                },
+            ),
+            true,
+        );
+        state
+            .hit_regions
+            .borrow_mut()
+            .queue_tabs
+            .push((rect, history));
+    }
+    let bottom = area.bottom();
+    let clear = state.tui_queue_visible && area.height >= 5;
+    let tools_end = bottom - u16::from(clear);
+    if clear {
+        let rect = row(bottom - 1);
+        paint(
+            frame,
+            rect,
+            "×",
+            focus == Some(RailControl::Clear)
+                || state.tui_transport_focus
+                    == Some(crate::app::transport_controls::TransportControl::Clear),
+            crate::app::queue_controls::can_clear_tab(state),
+        );
+        state.hit_regions.borrow_mut().queue_clear = Some(rect);
+    }
+    if tools_end.saturating_sub(area.y) < 4 {
+        return;
+    }
+    for (y, menu, focused) in [
+        (
+            tools_end - 2,
+            Menu::QueueType,
+            state.tui_queue_type_focused
+                || crate::app::queue_modes::current(state) != crate::app::queue_modes::Mode::Manual,
+        ),
+        (
+            tools_end - 1,
+            Menu::Tools,
+            state.view == View::Queue && state.now_playing_focus == NowPlayingFocus::Tools,
+        ),
+    ] {
+        let rect = row(y);
+        let control = match menu {
+            Menu::QueueType => RailControl::QueueType,
+            Menu::Tools => RailControl::QueueTools,
+        };
+        paint(
+            frame,
+            rect,
+            queue_menu_symbol(menu),
+            focus.map_or(focused, |item| item == control),
+            true,
+        );
+        state
+            .hit_regions
+            .borrow_mut()
+            .queue_menus
+            .push((rect, menu));
+    }
+    for (index, (key, icon, _)) in crate::app::tui_navigation::FOOTER.iter().enumerate() {
+        use crossterm::event::KeyCode;
+        let (offset, control) = match key {
+            KeyCode::Char(',') => (3, RailControl::Settings),
+            KeyCode::Char('f') => (4, RailControl::Search),
+            KeyCode::Char(':') => (5, RailControl::Commands),
+            _ => continue,
+        };
+        if area.y + offset >= tools_end - 2 {
+            continue;
+        }
+        let rect = row(area.y + offset);
+        paint(
+            frame,
+            rect,
+            icon.trim(),
+            focus == Some(control) || state.tui_footer_focus == Some(index),
+            true,
+        );
+        state
+            .hit_regions
+            .borrow_mut()
+            .footer_controls
+            .push((rect, index));
+    }
+    if area.y + 6 < tools_end - 2 {
+        let rect = row(area.y + 6);
+        paint(
+            frame,
+            rect,
+            "≋",
+            focus == Some(RailControl::Radio),
+            state
+                .station_nav
+                .columns
+                .first()
+                .is_some_and(|c| !c.stations().is_empty()),
+        );
+        state.hit_regions.borrow_mut().rail_radio = Some(rect);
     }
 }

@@ -45,6 +45,10 @@ pub fn handle(event: RadioEvent, state: &mut AppState) -> Vec<Action> {
                 state.set_status("Sonic Mix cancelled: playback changed while loading".into());
                 return vec![];
             }
+            let introduced_albums = tracks
+                .iter()
+                .filter_map(crate::library::radio::album_key)
+                .collect();
             let preserve_current =
                 continue_playback.is_some() && state.playback.status != PlayStatus::Stopped;
             // If the final song ended while discovery was loading, start the
@@ -69,6 +73,7 @@ pub fn handle(event: RadioEvent, state: &mut AppState) -> Vec<Action> {
                 state.queue.selected.clear();
                 state.radio.clear();
                 state.radio.active_station = Some(station);
+                state.radio.introduced_albums = introduced_albums;
                 state.radio.tracks = tracks;
                 state.radio.track_index = Some(0);
                 state.radio.time_travel_index = time_travel_index.unwrap_or(0);
@@ -121,6 +126,13 @@ pub fn handle(event: RadioEvent, state: &mut AppState) -> Vec<Action> {
         } => {
             state.station_nav.loading = false;
 
+            if children.is_empty() && station_key == "nav-radio/mood" {
+                if let Some(root) = state.station_nav.columns.first_mut() {
+                    root.retain_stations(|s| s.key != station_key);
+                }
+                state.set_status("No matching mood stations in this library".into());
+                return vec![];
+            }
             // Cache children for instant loading next time
             state
                 .station_children_cache
@@ -156,21 +168,13 @@ pub fn handle(event: RadioEvent, state: &mut AppState) -> Vec<Action> {
                     return vec![];
                 }
             };
-            // Keep the audible and upcoming tracks unique; earlier songs may recur.
-            let mut existing_keys: std::collections::HashSet<_> = state
-                .radio
-                .tracks
-                .iter()
-                .skip(state.radio.track_index.unwrap_or(0))
-                .map(|t| t.rating_key.clone())
-                .collect();
-
-            let album_station = state.radio.active_station.as_ref().is_some_and(|s| matches!(&s.source, crate::library::station::RadioSource::Station(key) if key.ends_with("/randomAlbum")));
             let unique_tracks: Vec<_> = tracks
                 .into_iter()
-                .filter(|t| album_station || existing_keys.insert(t.rating_key.clone()))
+                .filter(|t| {
+                    crate::library::radio::album_key(t)
+                        .is_some_and(|a| state.radio.introduced_albums.insert(a))
+                })
                 .collect();
-
             let added = unique_tracks.len();
             if added > 0 {
                 tracing::info!("Radio: adding {} new unique tracks", added);

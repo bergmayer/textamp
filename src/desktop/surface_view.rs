@@ -414,6 +414,10 @@ impl SurfaceView {
             let _ = self
                 .commands
                 .try_send(Command::CloseSurface(self.model.id.clone()));
+        } else if self.embedded && self.model.player_reader && !window.has_active_dialog(cx) {
+            let _ = self
+                .commands
+                .try_send(Command::CloseSurface(self.model.id.clone()));
         } else if self.embedded {
             window.close_dialog(cx);
         } else {
@@ -858,7 +862,11 @@ impl Render for SurfaceView {
                                 }
                                 Some(
                                     ListItem::new(index)
-                                        .bg(cx.theme().background)
+                                        .bg(super::theme::aluminum_list_stripe(
+                                            this.updates.borrow().theme,
+                                            index,
+                                        )
+                                        .unwrap_or(cx.theme().background))
                                         .role(Role::ListItem)
                                         .accessibility_label(row.label.clone())
                                         .aria_selected(row.selected)
@@ -873,7 +881,17 @@ impl Render for SurfaceView {
                                         .h(row_height(&this.model))
                                         .text_size(px(13.))
                                         .line_height(px(18.))
-                                        .child(row.label)
+                                        .map(|item| match row.glyph {
+                                            Some(glyph) => item.child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(Icon::new(glyph).small())
+                                                    .child(row.label),
+                                            ),
+                                            None => item.child(row.label),
+                                        })
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.reveal_selection = false;
                                             this.send(op.clone());
@@ -1353,7 +1371,12 @@ impl Render for SurfaceView {
                     ),
             )
             .when_some(photo, |d, image| {
-                d.child(img(image).max_h(px(180.)).object_fit(ObjectFit::Contain))
+                d.child(
+                    img(image)
+                        .size(px(180.))
+                        .max_w_full()
+                        .object_fit(ObjectFit::Contain),
+                )
             })
             .when_some(self.model.lyrics.as_ref(), |view, lyrics| {
                 let lines = lyrics
@@ -1390,7 +1413,9 @@ impl Render for SurfaceView {
                             } else {
                                 cx.theme().foreground
                             })
-                            .when(line.active, |row| row.font_weight(FontWeight::SEMIBOLD))
+                            .when(line.active, |row| {
+                                row.text_xl().font_weight(FontWeight::SEMIBOLD)
+                            })
                             .child(
                                 gpui::StyledText::new(line.value.clone()).with_highlights(ranges),
                             )
@@ -1475,14 +1500,19 @@ impl Render for SurfaceView {
                     view.child(
                         div()
                             .flex_none()
-                            .h(px(32.))
+                            .h(super::theme::column_header_height(
+                                self.updates.borrow().theme,
+                            ))
                             .px_3()
                             .flex()
                             .items_center()
                             .justify_between()
                             .bg(cx.theme().muted.opacity(0.35))
-                            .border_b_1()
-                            .border_color(cx.theme().border)
+                            .when(
+                                self.updates.borrow().theme
+                                    != crate::app::theme::ThemeName::BrushedAluminum,
+                                |header| header.border_b_1().border_color(cx.theme().border),
+                            )
                             .child(
                                 div()
                                     .text_size(px(12.))
@@ -1554,6 +1584,22 @@ impl Render for SurfaceView {
                         } else {
                             "Loading…"
                         }),
+                )
+            })
+            .when_some(self.model.bio_search, |root, provider| {
+                root.child(
+                    div().flex().justify_end().px_4().child(
+                        Button::new("biography-search")
+                            .ghost()
+                            .child(super::provider_logo(provider))
+                            .accessibility_label(provider.search_label())
+                            .tooltip(provider.search_label())
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                this.send(Operation::Actions(vec![
+                                    crate::app::action::SearchAction::SearchBiographyOnWeb.into(),
+                                ]));
+                            })),
+                    ),
                 )
             })
             .child(content)
@@ -1892,32 +1938,66 @@ pub fn open_native(
 }
 
 /// macOS owns filename entry, location selection and overwrite confirmation.
-pub(super) fn prompt_export(model: &Surface, commands: super::engine::CommandPort, cx: &mut App) {
-    let Some(save) = model.save_file.clone() else {
+pub(super) fn prompt_playlist_file(
+    model: &Surface,
+    commands: super::engine::CommandPort,
+    cx: &mut App,
+) {
+    use super::surface::PlaylistFile;
+    use crate::app::action::QueueAction;
+    use futures::FutureExt;
+    let Some(request) = model.playlist_file.clone() else {
         return;
     };
-    let directory = dirs::download_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let chosen = cx.prompt_for_new_path(&directory, Some(&save.suggested_name));
+    let chosen = match request {
+        PlaylistFile::Import { generation } => {
+            let result = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: Some("Import Playlist".into()),
+            });
+            async move {
+                Ok::<_, anyhow::Error>(
+                    result
+                        .await??
+                        .and_then(|paths| paths.into_iter().next())
+                        .map(|path| QueueAction::ImportPlaylist { generation, path }.into()),
+                )
+            }
+            .boxed_local()
+        }
+        PlaylistFile::Export {
+            suggested_name,
+            mut action,
+        } => {
+            let directory = dirs::download_dir()
+                .or_else(dirs::home_dir)
+                .unwrap_or_else(|| ".".into());
+            let result = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+            async move {
+                Ok(result.await??.map(|path| {
+                    if let crate::app::Action::Queue(QueueAction::ExportPlaylist {
+                        path: target,
+                        ..
+                    }) = &mut action
+                    {
+                        *target = path;
+                    }
+                    action
+                }))
+            }
+            .boxed_local()
+        }
+    };
     let id = model.id.clone();
     let revision = model.revision;
     cx.spawn(async move |_| {
         let action = match chosen.await {
-            Ok(Ok(Some(path))) => {
-                let mut action = save.action;
-                if let crate::app::Action::Queue(
-                    crate::app::action::QueueAction::ExportPlaylist { path: target, .. },
-                ) = &mut action
-                {
-                    *target = path;
-                }
-                Some(action)
-            }
-            Ok(Ok(None)) => None,
-            result => Some(
+            Ok(action) => action,
+            Err(error) => Some(
                 crate::app::action::SystemAction::ShowError(format!(
-                    "Unable to choose export file: {result:?}"
+                    "Unable to choose playlist file: {error}"
                 ))
                 .into(),
             ),
@@ -2013,6 +2093,7 @@ mod sizing_tests {
         browser.layout = WindowLayout::Browser;
         browser.rows = (0..9)
             .map(|index| super::super::surface::Item {
+                glyph: None,
                 key: index.to_string(),
                 label: "Result".into(),
                 selected: false,

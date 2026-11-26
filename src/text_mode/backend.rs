@@ -1,6 +1,8 @@
 //! Ratatui's Crossterm VT encoder with an in-process sink and explicit host metrics.
 use super::vt::{self, Vt};
-use crate::app::{AppState, View};
+use crate::app::AppState;
+#[cfg(test)]
+use crate::app::View;
 use ratatui::{
     Terminal,
     backend::{Backend, ClearType, CrosstermBackend, WindowSize},
@@ -102,6 +104,7 @@ impl Backend for Output {
 
 /// A disposable presentation adapter; application state and playback are borrowed.
 pub struct Renderer {
+    pub(crate) picker: crate::ui::playlist_picker::PlaylistPicker,
     terminal: Terminal<Output>,
     vt: Vt,
     motion: crate::ui::motion::SceneMotion,
@@ -135,6 +138,7 @@ impl Renderer {
         })?;
         initialize_artwork(metrics);
         Ok(Self {
+            picker: Default::default(),
             terminal,
             vt,
             metrics,
@@ -200,9 +204,7 @@ impl Renderer {
         state.terminal_width = self.metrics.columns;
         state.terminal_height = self.metrics.rows;
         let now = Instant::now();
-        let player = state.view == View::NowPlaying
-            || (state.view == View::Queue
-                && state.tui_queue_workspace == crate::app::state::TuiWorkspace::NowPlaying);
+        let player = state.tui_player_raised();
         if !self.motion_initialized {
             state.tui_motion.initialize(
                 state.tui_sidebar_visible,
@@ -218,26 +220,35 @@ impl Renderer {
             player,
             now,
         );
+        self.picker.sync(state);
         let host = crate::ui::OutputHost::Embedded {
             cell_width: self.metrics.cell_width,
             cell_height: self.metrics.cell_height,
             geometry: self.geometry,
         };
-        let artwork_mode = crate::ui::effective_artwork_mode(state, self.motion.active(now), host);
+        let artwork_mode =
+            crate::ui::effective_artwork_mode(state, self.motion.structural_motion(now), host);
         if self.artwork_mode != Some(artwork_mode) {
             self.vt.write(b"\x1b_Ga=d,d=A,q=2;\x1b\\");
             initialize_artwork(self.metrics);
             self.artwork_mode = Some(artwork_mode);
         }
         let mut feedback = None;
-        self.terminal.draw(|frame| {
-            feedback = Some(crate::ui::render_with_motion(
-                frame,
-                state,
-                &mut self.motion,
-                host,
-            ));
-        })?;
+        let (draw, uploads) = crate::ui::artwork::with_kitty_uploads(|| {
+            self.terminal.draw(|frame| {
+                feedback = Some(crate::ui::render_with_motion(
+                    frame,
+                    state,
+                    &mut self.motion,
+                    host,
+                ));
+                self.picker.draw(frame, state);
+            })
+        });
+        draw?;
+        if !uploads.is_empty() {
+            self.vt.write(&uploads);
+        }
         if let Some(feedback) = feedback {
             state.apply_render_feedback(feedback);
         }
@@ -291,6 +302,77 @@ mod tests {
                 "large placeholder and transport thumbnail must both be placed"
             );
         }
+    }
+
+    #[test]
+    fn navigating_to_albums_publishes_covers_before_selecting_an_album() {
+        use crate::app::state::{AllTracksScope, BrowseColumn, BrowseItem};
+        let mut state = AppState::new();
+        state.tui_sidebar_visible = false;
+        state.tui_queue_visible = false;
+        state.category_column_focused = false;
+        state.artist_nav.columns = vec![BrowseColumn::new(
+            "Artists",
+            vec![BrowseItem::Artist {
+                key: "artist".into(),
+                title: "Artist".into(),
+                thumb: None,
+                is_placeholder: false,
+            }],
+        )];
+        let mut renderer = Renderer::new(Metrics {
+            columns: 90,
+            rows: 36,
+            cell_width: 16,
+            cell_height: 32,
+        })
+        .unwrap();
+        renderer.draw(&mut state).unwrap();
+        let mut items = vec![
+            BrowseItem::AllTracks {
+                scope: AllTracksScope::Library,
+                thumb: None,
+            },
+            BrowseItem::Compilations,
+        ];
+        for n in 0..12 {
+            items.push(BrowseItem::Album {
+                key: format!("album{n}"),
+                title: format!("Release {n}"),
+                artist: "Artist".into(),
+                year: None,
+                thumb: None,
+                is_placeholder: false,
+            });
+        }
+        state
+            .artist_nav
+            .push_column(BrowseColumn::new("Albums", items));
+        renderer.draw(&mut state).unwrap();
+        renderer.settle_motion();
+        let frame = renderer.draw(&mut state).unwrap();
+        let rows = &state.hit_regions.miller_item_rows;
+        let covers: Vec<_> = rows
+            .iter()
+            .filter(|(col, _, index)| *col == 1 && *index >= 2)
+            .collect();
+        assert!(covers.len() >= 2);
+        for (_, tile, _) in covers {
+            assert!(
+                frame
+                    .images
+                    .iter()
+                    .any(|image| tile.contains((image.column as u16, image.row as u16).into())),
+                "missing cover in {tile:?}"
+            );
+        }
+        let original_rows = rows.clone();
+        state.artist_nav.columns[1].selected_index = 2;
+        renderer.draw(&mut state).unwrap();
+        assert_eq!(
+            state.hit_regions.miller_item_rows, original_rows,
+            "selecting a fully visible album must preserve the pinned rows and covers"
+        );
     }
 
     #[test]

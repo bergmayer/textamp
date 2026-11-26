@@ -29,7 +29,6 @@ pub enum Phase {
         volume: String,
         rows: std::sync::Arc<service::Report>,
     },
-    Ejecting,
     Copying(Progress),
     Cancelling,
     Complete(Summary),
@@ -54,7 +53,6 @@ impl Phase {
                 | Self::LoadingInventory
                 | Self::Review { .. }
                 | Self::Preparing
-                | Self::Ejecting
                 | Self::Copying(_)
                 | Self::Cancelling
         )
@@ -62,6 +60,8 @@ impl Phase {
 }
 #[derive(Debug, Default)]
 pub struct State {
+    mtp_players: Vec<String>,
+    pub(super) history: BTreeMap<String, crate::config::DeviceSync>,
     approval: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) report_group: Option<String>,
     pub(crate) report_query: String,
@@ -144,8 +144,6 @@ enum PreviewStatus {
     Unavailable,
 }
 
-pub const DESCRIPTION: &str = "Copies files to the audio player from the music server.";
-
 #[derive(Clone, Debug)]
 pub enum Failure {
     Cancelled,
@@ -153,6 +151,7 @@ pub enum Failure {
 }
 #[derive(Clone, Debug)]
 pub enum Command {
+    ClearSyncHistory,
     ReviewReady {
         operation: u64,
         title: String,
@@ -219,8 +218,8 @@ pub enum Command {
         create_playlist: bool,
     },
     Cancel,
-    Eject,
     Discovered {
+        mtp_players: Vec<String>,
         operation: u64,
         result: Result<Vec<(Volume, Profile, SyncedFolders)>, String>,
     },
@@ -231,10 +230,6 @@ pub enum Command {
     Finished {
         operation: u64,
         result: Result<Summary, Failure>,
-    },
-    Ejected {
-        operation: u64,
-        result: Result<(), String>,
     },
 }
 impl From<Command> for Action {
@@ -247,7 +242,6 @@ pub enum Menu {
     Refresh,
     Sync,
     Cancel,
-    Eject,
 }
 impl Menu {
     pub fn label(self) -> &'static str {
@@ -255,7 +249,6 @@ impl Menu {
             Self::Refresh => "Refresh Audio Player",
             Self::Sync => "Sync Audio Player",
             Self::Cancel => "Cancel Player Sync",
-            Self::Eject => "Eject Audio Player",
         }
     }
     pub fn command(self) -> Command {
@@ -265,7 +258,6 @@ impl Menu {
                 create_playlist: false,
             },
             Self::Cancel => Command::Cancel,
-            Self::Eject => Command::Eject,
         }
     }
 }
@@ -678,7 +670,7 @@ fn start_webdav(
         .context("Select a WebDAV library")?
         .clone();
     let volume = selected(&state.player_sync)
-        .context("Choose a mounted player")?
+        .context("Choose a connected player")?
         .clone();
     let selection = webdav_selection(&state.player_sync, &volume.uuid, &source.id)
         .context("Choose WebDAV folders to sync")?
@@ -704,7 +696,7 @@ fn start_webdav(
     let task = super::tasks::spawn(async move {
         let run = async {
             service::volumes::verify(&volume).await?;
-            let target = service::volumes::Target::open(&volume.mount).await?;
+            let target = service::volumes::Target::for_volume(&volume, Some(&device_id)).await?;
             service::review_webdav(
                 &source,
                 &device_id,
@@ -901,6 +893,14 @@ fn dispatch_command(
     events: &mpsc::Sender<Event>,
 ) -> anyhow::Result<Vec<Action>> {
     match command {
+        Command::ClearSyncHistory => {
+            let previous = std::mem::take(&mut config.player_sync_history);
+            if let Err(error) = crate::config::save_config(config) {
+                config.player_sync_history = previous;
+                return Err(error);
+            }
+            state.player_sync.history.clear();
+        }
         Command::ReviewReady {
             operation,
             title,
@@ -931,7 +931,7 @@ fn dispatch_command(
         Command::Inventory => {
             let sync = &mut state.player_sync;
             anyhow::ensure!(!sync.phase.busy(), "A player operation is running");
-            let volume = selected(sync).context("Choose a mounted player")?.clone();
+            let volume = selected(sync).context("Choose a connected player")?.clone();
             let keys = accounts(config);
             let mut names = BTreeMap::new();
             for (id, name) in config
@@ -1221,8 +1221,10 @@ fn dispatch_command(
             sync.phase = Phase::Discovering { previous, quiet };
             let events = events.clone();
             let task = super::tasks::spawn(async move {
+                let mut mtp_players = Vec::new();
                 let result = async {
-                    let volumes = service::volumes::discover().await?;
+                    let (players, volumes) = service::mtp::volumes().await?;
+                    mtp_players = players;
                     super::tasks::spawn_blocking(move || {
                         volumes
                             .into_iter()
@@ -1239,7 +1241,12 @@ fn dispatch_command(
                 .map_err(|error| format!("{error:#}"));
                 let _ = events
                     .send(Event::Effect(
-                        Command::Discovered { operation, result }.into(),
+                        Command::Discovered {
+                            operation,
+                            result,
+                            mtp_players,
+                        }
+                        .into(),
                     ))
                     .await;
             });
@@ -1284,7 +1291,7 @@ fn dispatch_command(
                 player(&state.player_sync).is_none(),
                 "This player is already set up"
             );
-            let volume = selected(&state.player_sync).context("Choose a mounted player")?;
+            let volume = selected(&state.player_sync).context("Choose a connected player")?;
             anyhow::ensure!(
                 volume.uuid == volume_uuid,
                 "The selected player changed; choose it again"
@@ -1354,7 +1361,7 @@ fn dispatch_command(
                 "Go online to sync the player"
             );
             let volume = selected(&state.player_sync)
-                .context("Choose a mounted player")?
+                .context("Choose a connected player")?
                 .clone();
             let player = player(&state.player_sync)
                 .context("Set up this player first")?
@@ -1393,7 +1400,9 @@ fn dispatch_command(
             let task = super::tasks::spawn(async move {
                 let run = async {
                     service::volumes::verify(&volume).await?;
-                    let target = service::volumes::Target::open(&volume.mount).await?;
+                    let target =
+                        service::volumes::Target::for_volume(&volume, Some(&player.source_id))
+                            .await?;
                     let session = sync_session(active, Some(source)).await?;
                     let mut playlists = Vec::new();
                     for playlist in
@@ -1452,36 +1461,18 @@ fn dispatch_command(
                 state.player_sync.phase = Phase::Cancelling;
             }
         }
-        Command::Eject => {
-            anyhow::ensure!(
-                !state.player_sync.phase.busy(),
-                "Wait for the player sync to finish before ejecting"
-            );
-            let volume = selected(&state.player_sync)
-                .context("Choose a mounted player")?
-                .clone();
-            let sync = &mut state.player_sync;
-            sync.operation = sync.operation.wrapping_add(1);
-            let operation = sync.operation;
-            sync.phase = Phase::Ejecting;
-            let events = events.clone();
-            let task = super::tasks::spawn(async move {
-                let result = service::volumes::eject(&volume)
-                    .await
-                    .map_err(|error| format!("{error:#}"));
-                let _ = events
-                    .send(Event::Effect(Command::Ejected { operation, result }.into()))
-                    .await;
-            });
-            sync.task = Some(TaskLease::new(&task));
-        }
-        Command::Discovered { operation, result } => {
+        Command::Discovered {
+            operation,
+            result,
+            mtp_players,
+        } => {
             let webdav_id = active_webdav(state).map(|s| s.id.clone());
             let sync = &mut state.player_sync;
             if sync.operation != operation || !matches!(sync.phase, Phase::Discovering { .. }) {
                 return Ok(vec![]);
             }
             sync.task = None;
+            sync.mtp_players = mtp_players;
             let previous = match std::mem::take(&mut sync.phase) {
                 Phase::Discovering { previous, .. } => *previous,
                 phase => phase,
@@ -1599,6 +1590,9 @@ fn dispatch_command(
             }
         }
         Command::Finished { operation, result } => {
+            if result.as_ref().is_ok_and(|s| s.listens > 0) {
+                state.listening_history = crate::app::listening_history::load()?;
+            }
             let sync = &mut state.player_sync;
             if sync.operation != operation
                 || !matches!(
@@ -1617,6 +1611,29 @@ fn dispatch_command(
                 Err(Failure::Error(error)) => Phase::Failed(error),
             };
             let mut actions = vec![];
+            if matches!(sync.phase, Phase::Complete(_))
+                && let Some(volume) = selected(sync)
+            {
+                let record = crate::config::DeviceSync {
+                    name: player(sync)
+                        .filter(|p| p.volume_uuid == volume.uuid)
+                        .map_or_else(|| volume.name.clone(), |p| p.name.clone()),
+                    completed_at: time::OffsetDateTime::now_utc().unix_timestamp(),
+                };
+                config
+                    .player_sync_history
+                    .insert(volume.uuid.clone(), record);
+                sync.history.clone_from(&config.player_sync_history);
+                if let Err(error) = crate::config::save_config(config) {
+                    tracing::warn!("Could not save player sync history: {error}");
+                    actions.push(
+                        super::action::SystemAction::SetStatus(format!(
+                            "Sync completed, but its history could not be saved: {error}"
+                        ))
+                        .into(),
+                    );
+                }
+            }
             if let Some(player) = player(sync)
                 && state
                     .sources
@@ -1634,20 +1651,6 @@ fn dispatch_command(
                 actions.push(super::action::DataAction::LoadPlaylists.into());
             }
             return Ok(actions);
-        }
-        Command::Ejected { operation, result } => {
-            let sync = &mut state.player_sync;
-            if sync.operation != operation || !matches!(sync.phase, Phase::Ejecting) {
-                return Ok(vec![]);
-            }
-            sync.task = None;
-            match result {
-                Ok(()) => {
-                    sync.phase = Phase::Idle;
-                    return Ok(vec![Command::Discover { quiet: false }.into()]);
-                }
-                Err(error) => sync.phase = Phase::Failed(error),
-            }
         }
     }
     Ok(vec![])
@@ -1738,6 +1741,8 @@ use anyhow::Context;
 
 #[derive(Clone, Debug, Default)]
 pub struct View {
+    pub connection: String,
+    pub history: Vec<String>,
     pub busy: bool,
     pub report_query: String,
     pub report_group: Option<String>,
@@ -1848,8 +1853,31 @@ fn webdav_view(state: &AppState) -> Option<WebdavView> {
         }),
     })
 }
+fn history_rows(sync: &State) -> Vec<String> {
+    let mut records: Vec<_> = sync.history.values().collect();
+    records.sort_by_key(|record| std::cmp::Reverse(record.completed_at));
+    records
+        .into_iter()
+        .filter_map(|record| {
+            let utc = time::OffsetDateTime::from_unix_timestamp(record.completed_at).ok()?;
+            let offset = time::UtcOffset::local_offset_at(utc).unwrap_or(time::UtcOffset::UTC);
+            let local = utc.to_offset(offset);
+            Some(format!(
+                "{} · {} {:02}:{:02} {}",
+                record.name,
+                local.date(),
+                local.hour(),
+                local.minute(),
+                offset
+            ))
+        })
+        .collect()
+}
+
 pub fn project(state: &AppState) -> View {
     View {
+        connection: connection(&state.player_sync),
+        history: history_rows(&state.player_sync),
         busy: state.player_sync.phase.busy(),
         report_query: state.player_sync.report_query.clone(),
         report_group: state.player_sync.report_group.clone(),
@@ -1895,7 +1923,7 @@ pub fn disabled(state: &AppState, menu: Menu) -> Option<&'static str> {
         Menu::Cancel => None,
         _ if sync.phase.busy() => Some("A player operation is running"),
         Menu::Refresh => None,
-        _ if selected(sync).is_none() => Some("Choose a mounted player"),
+        _ if selected(sync).is_none() => Some("Choose a connected player"),
         Menu::Sync
             if let Some(source) = active_webdav(state)
                 && selected(sync)
@@ -2115,14 +2143,6 @@ pub(crate) fn column_rows(state: &AppState) -> Vec<(String, Option<Command>)> {
             (!sync.phase.busy()).then_some(Command::Inventory),
         ));
     }
-    if mounted.is_some() {
-        rows.push((
-            "Eject".into(),
-            disabled(state, Menu::Eject)
-                .is_none()
-                .then_some(Command::Eject),
-        ));
-    }
     if disabled(state, Menu::Cancel).is_none() {
         rows.push(("Cancel Sync".into(), Some(Command::Cancel)));
     }
@@ -2141,7 +2161,25 @@ pub(crate) fn column_rows(state: &AppState) -> Vec<(String, Option<Command>)> {
             (!sync.phase.busy()).then(|| Command::Select(volume.uuid.clone())),
         )
     }));
+    if !sync.history.is_empty() {
+        rows.push(("Last successful sync".into(), None));
+        rows.extend(history_rows(sync).into_iter().map(|row| (row, None)));
+        rows.push(("Clear Sync History".into(), Some(Command::ClearSyncHistory)));
+    }
     rows
+}
+
+pub(crate) fn connection(sync: &State) -> String {
+    if !sync.mtp_players.is_empty() {
+        format!(
+            "{} connected via MTP. No Textamp player profile found.",
+            sync.mtp_players.join(", ")
+        )
+    } else if sync.volumes.is_empty() {
+        "Connect a player in MTP (file transfer) mode.".into()
+    } else {
+        String::new()
+    }
 }
 
 pub(crate) fn status(state: &AppState) -> String {
@@ -2151,9 +2189,7 @@ pub(crate) fn status(state: &AppState) -> String {
         {
             "Choose a storage volume before syncing.".into()
         }
-        Phase::Idle if state.player_sync.volumes.is_empty() => {
-            "Connect a player and enable USB storage.".into()
-        }
+        Phase::Idle if state.player_sync.volumes.is_empty() => String::new(),
         Phase::Idle
             if state.sources.active.navidrome().is_none()
                 && player(&state.player_sync).is_none() =>
@@ -2166,16 +2202,27 @@ pub(crate) fn status(state: &AppState) -> String {
         Phase::Inventory { .. } => "On this player".into(),
         Phase::Review { .. } => "Review sync changes".into(),
         Phase::Preparing => "Preparing sync…".into(),
-        Phase::Ejecting => "Ejecting player…".into(),
         Phase::Copying(progress) => format!(
             "{} of {} · {}",
             progress.completed, progress.total, progress.title
         ),
         Phase::Cancelling => "Stopping the transfer…".into(),
-        Phase::Complete(summary) => format!(
-            "Sync complete · {} copied · {} unchanged · {} removed",
-            summary.copied, summary.reused, summary.removed
-        ),
+        Phase::Complete(summary) => {
+            let mut text = format!(
+                "Sync complete · {} copied · {} unchanged · {} removed",
+                summary.copied, summary.reused, summary.removed
+            );
+            if summary.listens > 0 {
+                text.push_str(&format!(" · {} listens imported", summary.listens));
+            }
+            if summary.unconfirmed_listens > 0 {
+                text.push_str(&format!(
+                    " · {} unconfirmed submissions",
+                    summary.unconfirmed_listens
+                ));
+            }
+            text
+        }
         Phase::Cancelled => "Sync stopped.".into(),
         Phase::Failed(error) | Phase::DiscoveryFailed(error) => error.clone(),
     }
@@ -2595,6 +2642,60 @@ mod tests {
     }
 
     #[test]
+    fn device_history_survives_disconnect_and_clears_independently() {
+        let mut state = AppState::new();
+        let mut config = Config::default();
+        state.player_sync.volumes = vec![volume("portable")];
+        state.player_sync.selected = Some("portable".into());
+        for result in [
+            Err(Failure::Cancelled),
+            Ok(Summary::default()),
+            Ok(Summary::default()),
+        ] {
+            state.player_sync.phase = Phase::Preparing;
+            let cancelled = result.is_err();
+            dispatch(
+                Command::Finished {
+                    operation: 0,
+                    result,
+                },
+                &mut state,
+                &mut config,
+                &events(),
+            )
+            .unwrap();
+            assert_eq!(config.player_sync_history.len(), usize::from(!cancelled));
+        }
+        state.player_sync.volumes.clear();
+        state.player_sync.selected = None;
+        assert_eq!(
+            crate::config::load_config().unwrap().player_sync_history,
+            config.player_sync_history
+        );
+        let history = project(&state).history;
+        assert_eq!(history.len(), 1);
+        assert!(history[0].contains("portable"));
+        assert!(
+            column_rows(&state)
+                .iter()
+                .any(|(row, _)| row == &history[0])
+        );
+        dispatch(
+            Command::ClearSyncHistory,
+            &mut state,
+            &mut config,
+            &events(),
+        )
+        .unwrap();
+        assert!(project(&state).history.is_empty());
+        assert!(
+            crate::config::load_config()
+                .unwrap()
+                .player_sync_history
+                .is_empty()
+        );
+    }
+    #[test]
     fn stale_results_cannot_replace_a_newer_transfer_or_reopen_a_finished_job() {
         let mut state = AppState::new();
         let mut config = Config::default();
@@ -2660,10 +2761,11 @@ mod tests {
         state.player_sync.selected = Some("player".into());
         state.player_sync.phase = Phase::Discovering {
             quiet: true,
-            previous: Box::new(Phase::DiscoveryFailed("USB storage check timed out".into())),
+            previous: Box::new(Phase::DiscoveryFailed("MTP discovery timed out".into())),
         };
         let actions = dispatch(
             Command::Discovered {
+                mtp_players: vec![],
                 operation: 0,
                 result: Ok(vec![]),
             },
@@ -2702,6 +2804,7 @@ mod tests {
             };
             dispatch(
                 Command::Discovered {
+                    mtp_players: vec![],
                     operation: 0,
                     result: Ok(volumes
                         .into_iter()

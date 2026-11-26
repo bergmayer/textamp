@@ -80,7 +80,9 @@ pub fn disabled_reason(
         {
             Some("No synchronized lyrics")
         }
-        Navidrome(_) if state.downloads.is_offline() => Some("Unavailable offline"),
+        Navidrome(_) | ImportPlaylist if state.downloads.is_offline() => {
+            Some("Unavailable offline")
+        }
         Navidrome(
             super::sources::navidrome::commands::Command::SaveQueue
             | super::sources::navidrome::commands::Command::ConfirmReplacePlaylist(_)
@@ -156,6 +158,14 @@ pub fn disabled_reason(
         MoveQueueSelectionDown if state.list_state.queue_index + 1 >= queue_len => {
             Some("Already at the end")
         }
+        ImportPlaylist
+            if !matches!(
+                state.library.catalog_loading,
+                crate::app::catalog_loading::State::Ready
+            ) =>
+        {
+            Some("The full track catalog is required")
+        }
         ExportPlaylist { queue: true, .. } if queue_len == 0 => Some("The queue is empty"),
         ExportPlaylist { queue: false, .. }
             if !column
@@ -177,6 +187,17 @@ pub fn disabled_reason(
         {
             Some("Focus a library column")
         }
+        SetAlbumLayout(_)
+            if !matches!(
+                column_kind,
+                Some(SortColumnType::Album | SortColumnType::RecentAlbums)
+            ) =>
+        {
+            Some("Focus an album list")
+        }
+        ReverseSort if column.is_some_and(|c| c.sort_mode == ColumnSortMode::Shuffled) => {
+            Some("Choose an ordered sort first")
+        }
         OpenSort | ReverseSort if column_kind.is_none() => Some("No sortable column"),
         ApplySort(mode)
             if column_kind.is_none_or(|kind| !kind.available_modes().contains(mode)) =>
@@ -189,12 +210,7 @@ pub fn disabled_reason(
         ToggleArtwork
             if !matches!(
                 column_kind,
-                Some(
-                    SortColumnType::Album
-                        | SortColumnType::RecentAlbums
-                        | SortColumnType::Track
-                        | SortColumnType::AllTracks
-                )
+                Some(SortColumnType::Track | SortColumnType::AllTracks)
             ) =>
         {
             Some("This column has no artwork option")
@@ -268,6 +284,7 @@ pub fn menu(command: &PaletteCommandKind) -> &'static str {
         SearchAppleMusic | SearchSpotify | SearchYouTube | ArtistDetail(_) => "Discover",
         Navidrome(
             super::sources::navidrome::commands::Command::ChoosePlaylist(_)
+            | super::sources::navidrome::commands::Command::Rating(_)
             | super::sources::navidrome::commands::Command::EditEntry { .. },
         ) => "Edit",
         PlayerSync(_)
@@ -277,7 +294,7 @@ pub fn menu(command: &PaletteCommandKind) -> &'static str {
         Quit | OpenSettings | SwitchLibrary | Refresh => "Textamp",
         Downloads(_) => "File",
         QueueTool(_) => "Queue",
-        SaveQueue | ExportPlaylist { .. } => "File",
+        SaveQueue | ImportPlaylist | ExportPlaylist { .. } => "File",
         VolumeUp | VolumeDown | SeekForward | SeekBackward | PlayPause | StopPlayback
         | NextTrack | PrevTrack | ToggleMute | ShowLyrics => "Playback",
         RemixGemini
@@ -325,6 +342,7 @@ pub fn submenu_for(menu: &str, command: &PaletteCommandKind) -> Option<&'static 
     use crate::app::sources::navidrome::commands::{CollectionKind, Command};
     use PaletteCommandKind::*;
     match (menu, command) {
+        ("Edit", Navidrome(Command::Rating(_))) => Some("Track Rating"),
         ("File", PlayerSync(_)) => Some("Devices"),
         ("Playback", ShowLyrics | LyricsControl(_)) => Some("Lyrics"),
         (
@@ -357,10 +375,16 @@ pub fn submenu_for(menu: &str, command: &PaletteCommandKind) -> Option<&'static 
         ("File", ExportPlaylist { queue: true, .. }) => Some("Export Queue"),
         ("File", ExportPlaylist { queue: false, .. }) => Some("Export Playlist"),
         ("View", SetApplicationMode(_)) => Some("Modes"),
-        ("View", ApplySort(_) | ReverseSort | ToggleGroupByAlbum | OpenSort) => Some("Sort"),
-        ("View", ToggleFilter | ToggleArtwork | ToggleCompilationArtists | ToggleSplitView) => {
-            Some("View Options")
-        }
+        (
+            "View",
+            ApplySort(_)
+            | ReverseSort
+            | ToggleGroupByAlbum
+            | SetAlbumLayout(_)
+            | ToggleArtwork
+            | ToggleCompilationArtists,
+        ) => Some("View Options"),
+        ("View", ToggleFilter) => Some("Browse"),
         ("View", GotoGenres | GotoFolders | GotoSingles | OpenInLibrary | GotoQueue) => {
             Some("Browse")
         }
@@ -384,7 +408,9 @@ pub fn submenu_for(menu: &str, command: &PaletteCommandKind) -> Option<&'static 
         ) => Some("Queue Type"),
         ("Queue", MoveQueueSelectionUp | MoveQueueSelectionDown) => Some("Reorder"),
         ("Queue", Navidrome(Command::SaveQueue | Command::RestoreQueue)) => Some("Saved Queue"),
-        ("Discover", Navidrome(Command::Collection(CollectionKind::AudioMuse(_)))) => Some("Search"),
+        ("Discover", Navidrome(Command::Collection(CollectionKind::AudioMuse(_)))) => {
+            Some("Search")
+        }
 
         _ => None,
     }
@@ -422,7 +448,6 @@ pub fn contextual(command: &PaletteCommandKind) -> bool {
             | MoveQueueSelectionDown
             | Navidrome(
                 super::sources::navidrome::commands::Command::Star(_)
-                    | super::sources::navidrome::commands::Command::Rating(_)
                     | super::sources::navidrome::commands::Command::ChoosePlaylist(_)
                     | super::sources::navidrome::commands::Command::EditEntry { .. }
                     | super::sources::navidrome::commands::Command::RenamePlaylist(_)
@@ -445,6 +470,12 @@ pub fn palette_priority(
     available: bool,
     history: &super::command_history::History,
 ) -> PalettePriority {
+    if matches!(
+        command,
+        PaletteCommandKind::Navidrome(super::sources::navidrome::commands::Command::Rating(_))
+    ) {
+        return PalettePriority::Menu;
+    }
     if available
         && let Some(rank) = super::command_history::key(command).and_then(|key| history.rank(&key))
     {
@@ -503,9 +534,8 @@ pub fn label(command: &PaletteCommandKind, fallback: &str) -> String {
         ToggleFilter => "Filter Column…",
         ToggleArtwork => "Show Artwork",
         ToggleGroupByAlbum => "Group by Album",
-        ToggleSplitView => "Split View",
         ToggleFullscreen => "Toggle Full Screen",
-        ShowArtistBio => "Show Artist Details",
+        ShowArtistBio => "Artist Biography",
         EnqueueSelectionEnd => "Add to Queue",
         EnqueueSelectionNext => "Play Next",
         PlayPause => "Play/Pause",
@@ -654,6 +684,9 @@ pub fn prepare(entry: &mut PaletteEntry) {
     if old != entry.label {
         entry.aliases.push(old);
     }
+    if matches!(entry.command, PaletteCommandKind::ApplySort(_)) {
+        entry.aliases.push(format!("View Sort {}", entry.label));
+    }
     let mut full_path = path(&entry.command);
     full_path.push(entry.label.clone());
     let qualified = full_path.join(" ");
@@ -685,13 +718,32 @@ pub fn groups(paths: impl IntoIterator<Item = Vec<String>>) -> Vec<Vec<String>> 
     groups
 }
 
+pub fn group_aliases(path: &[String]) -> Vec<String> {
+    if path == ["Edit", "Track Rating"] {
+        ["rate track", "rate song", "stars", "clear rating"]
+            .map(String::from)
+            .into()
+    } else {
+        vec![]
+    }
+}
+
 pub fn visible(
     command: &PaletteCommandKind,
     label: &str,
     current: &[String],
     searching: bool,
 ) -> bool {
+    if matches!(
+        command,
+        PaletteCommandKind::Navidrome(super::sources::navidrome::commands::Command::Rating(_))
+    ) {
+        return current == ["Edit", "Track Rating"];
+    }
     if let PaletteCommandKind::OpenCommandGroup(target) = command {
+        if searching && label != "Back" && target.as_slice() == ["Edit", "Track Rating"] {
+            return current != target;
+        }
         return !searching
             && if label == "Back" {
                 !current.is_empty() && target == &current[..current.len() - 1]

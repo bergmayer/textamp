@@ -229,7 +229,7 @@ fn render_in(frame: &mut Frame, state: &RenderState<'_>, area: Rect, inline: boo
     controls.push((result_area, Control::Results));
     let mut rows = Vec::new();
     match &launcher.stage {
-        JourneyStage::Generating => frame.render_widget(
+        JourneyStage::Generating { .. } => frame.render_widget(
             Paragraph::new("Building your journey…").style(Style::default().fg(colors.fg_accent)),
             result_area,
         ),

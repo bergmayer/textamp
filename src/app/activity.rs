@@ -7,7 +7,6 @@ pub fn message(state: &AppState) -> Option<&str> {
         super::player_sync::Phase::Preparing => return Some("Preparing player sync…"),
         super::player_sync::Phase::Copying(_) => return Some("Syncing MP3 player…"),
         super::player_sync::Phase::Cancelling => return Some("Stopping player sync…"),
-        super::player_sync::Phase::Ejecting => return Some("Ejecting player…"),
         _ => {}
     }
 
@@ -36,9 +35,6 @@ pub fn message(state: &AppState) -> Option<&str> {
         {
             return Some(label);
         }
-    }
-    if state.library.right_panel_loading {
-        return Some("Loading details…");
     }
     if state.list_filter.loading {
         return Some("Filtering…");

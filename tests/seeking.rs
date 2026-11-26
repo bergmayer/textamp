@@ -80,20 +80,17 @@ fn exercise_drag(state: &mut AppState, area: Rect) {
 }
 
 #[test]
-fn scrubber_click_and_drag_work_in_every_visualizer_and_split_layout() {
+fn scrubber_click_and_drag_work_in_every_visualizer() {
     for view in [View::Browse, View::Queue, View::NowPlaying] {
-        for tall in [false, true] {
-            for tab in VisualizerTab::ALL {
-                let mut state = AppState::new();
-                state.view = view;
-                state.desktop_split_view = tall;
-                state.visualizer_tab = tab;
-                state.playback.duration_ms = 60_000;
-                state.playback.status = PlayStatus::Playing;
-                render(&mut state);
-                let area = state.hit_regions.transport.as_ref().unwrap().seekbar;
-                exercise_drag(&mut state, area);
-            }
+        for tab in VisualizerTab::ALL {
+            let mut state = AppState::new();
+            state.view = view;
+            state.visualizer_tab = tab;
+            state.playback.duration_ms = 60_000;
+            state.playback.status = PlayStatus::Playing;
+            render(&mut state);
+            let area = state.hit_regions.transport.as_ref().unwrap().seekbar;
+            exercise_drag(&mut state, area);
         }
     }
 }

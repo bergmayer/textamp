@@ -228,7 +228,7 @@ on disk per library (including AudioMuse), not estimated from in-memory structs.
 
 Browse uses Miller columns. Ctrl+L opens Library, Ctrl+G genres, Ctrl+O folders,
 Ctrl+F search, Ctrl+U queue, Ctrl+N Now Playing, F1 help. Tab switches Library /
-Now Playing focus, including split mode. `:` is the command palette; `:q` quits.
+Now Playing focus. `:` is the command palette; `:q` quits.
 Keep the help text authoritative for all other bindings.
 Describe music uses Enter for its prompt and arrow keys for browsing history/results.
 Keep successful description history scoped to the exact library; results use the

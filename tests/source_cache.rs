@@ -341,6 +341,7 @@ async fn cache_sizes_are_request_scoped_and_clear_confirmation_names_the_library
     for request in [1, 2] {
         textamp::app::dispatch::dispatch_action(
             SettingsAction::CacheSizes {
+                catalog_sync_times: Default::default(),
                 request,
                 entries: vec![(choice.clone(), Ok(1234))],
                 artwork: vec![("folder:fixture-target".into(), 2, 1024)],

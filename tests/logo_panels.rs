@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use textamp::app::AppState;
 use textamp::app::handlers::{key_input, mouse_input};
-use textamp::app::state::{CategoryRow, SettingsFocus, SettingsSection, TextampSetting, View};
+use textamp::app::state::{SettingsFocus, SettingsSection, TextampSetting, View};
 use textamp::app::theme::ThemeName;
 use textamp::config::Config;
 use textamp::ui::theme::Theme;
@@ -17,62 +17,64 @@ fn draw(state: &mut AppState, width: u16, height: u16) -> Terminal<TestBackend> 
 
 #[test]
 fn search_landing_replaces_content_without_receiving_hidden_content_input() {
-    for _ in [()] {
-        for tall in [false, true] {
-            let mut state = AppState::new();
-            assert!(matches!(
-                state.category_rows()[state.category_column_index],
-                CategoryRow::Category(_)
-            ));
-            state.view = View::Browse;
-            state.category_column_focused = true;
-            state.category_column_index = 0;
+    let mut state = AppState::new();
+    use textamp::app::state::LibraryRoot;
+    state.hidden_sections = state
+        .sidebar_sections()
+        .into_iter()
+        .filter_map(|section| match section {
+            textamp::app::state::SidebarSection::Category(category) => Some(category),
+            _ => None,
+        })
+        .collect();
+    state.desktop_hidden_library_roots = LibraryRoot::ALL
+        .into_iter()
+        .chain([LibraryRoot::Mp3Players])
+        .collect();
+    state.view = View::Browse;
+    state.category_column_focused = true;
+    state.category_column_index = 0;
 
-            state.desktop_split_view = tall;
-            let category = state.browse_category;
-            let terminal = draw(&mut state, 150, 50);
-            let text: String = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|c| c.symbol())
-                .collect();
-            assert!(text.contains("press enter for search"));
-            assert_eq!(state.browse_category, category);
-            assert!(state.hit_regions.miller_columns.is_none());
-            assert!(state.hit_regions.alphabet_strip.is_none());
-            assert!(state.hit_regions.track_pane.is_none());
-            let pane = state.hit_regions.search_landing.unwrap();
-            for kind in [
-                MouseEventKind::Down(MouseButton::Left),
-                MouseEventKind::Down(MouseButton::Right),
-                MouseEventKind::ScrollDown,
-            ] {
-                assert!(
-                    mouse_input::handle_mouse(
-                        MouseEvent {
-                            kind,
-                            column: pane.x + 2,
-                            row: pane.y + 2,
-                            modifiers: KeyModifiers::NONE,
-                        },
-                        &mut state
-                    )
-                    .is_empty()
-                );
-                assert_eq!(state.category_column_index, 0);
-                assert_eq!(state.browse_category, category);
-            }
-            key_input::handle_key(
-                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-                &mut state,
-                &Config::default(),
-            );
-            draw(&mut state, 150, 50);
-            assert!(state.hit_regions.search_landing.is_none());
-        }
+    let category = state.browse_category;
+    let terminal = draw(&mut state, 150, 50);
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(text.contains("press enter for search"));
+    assert_eq!(state.browse_category, category);
+    assert!(state.hit_regions.miller_columns.is_none());
+    assert!(state.hit_regions.alphabet_strip.is_none());
+    assert!(state.hit_regions.track_pane.is_none());
+    let pane = state.hit_regions.search_landing.unwrap();
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Down(MouseButton::Right),
+        MouseEventKind::ScrollDown,
+    ] {
+        assert!(
+            mouse_input::handle_mouse(
+                MouseEvent {
+                    kind,
+                    column: pane.x + 2,
+                    row: pane.y + 2,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &mut state
+            )
+            .is_empty()
+        );
+        assert_eq!(state.category_column_index, 0);
+        assert_eq!(state.browse_category, category);
     }
+    state
+        .desktop_hidden_library_roots
+        .retain(|root| *root != LibraryRoot::Downloads);
+    draw(&mut state, 150, 50);
+    assert!(state.hit_regions.search_landing.is_none());
 }
 
 #[test]

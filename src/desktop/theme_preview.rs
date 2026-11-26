@@ -4,6 +4,7 @@ use gpui_kit::component::{
     IndexPath,
     list::{ListDelegate, ListEvent, ListItem, ListState},
 };
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window};
 
 pub(super) struct Choices;
@@ -63,6 +64,12 @@ pub(super) fn sample(name: ThemeName) -> impl IntoElement {
         .gap_2()
         .p_3()
         .bg(colors.background)
+        .when(name == ThemeName::BrushedAluminum, |preview| {
+            preview
+                .relative()
+                .overflow_hidden()
+                .child(super::theme::aluminum_surface())
+        })
         .text_color(colors.foreground)
         .border_1()
         .border_color(colors.border)

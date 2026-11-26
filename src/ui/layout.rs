@@ -4,14 +4,32 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 /// Windowed chrome measurements shared by the graphical and terminal adapters.
 pub const TRANSPORT_HEIGHT: f32 = 100.;
-pub const FOOTER_HEIGHT: f32 = 40.;
 pub const SIDEBAR_WIDTH: f32 = 280.;
+/// Four artwork rows and up to three caption lines in a terminal album tile.
+pub const ALBUM_TILE_ROWS: u16 = 7;
 pub const SMALL_ARTWORK: f32 = 48.;
-pub const LARGE_ARTWORK: f32 = 128.;
+
+/// Earliest whole band that fits together with the band ending at `end`.
+pub(in crate::ui) fn first_fitting_band(
+    end: usize,
+    viewport: usize,
+    band_y: impl Fn(usize) -> usize,
+) -> usize {
+    let minimum = band_y(end).saturating_sub(viewport);
+    let (mut first, mut last) = (0, end);
+    while first < last {
+        let mid = first + (last - first) / 2;
+        if band_y(mid) < minimum {
+            first = mid + 1;
+        } else {
+            last = mid;
+        }
+    }
+    first.min(end.saturating_sub(1))
+}
 
 /// Responsive widths of the transport's track card and control groups.
-pub fn transport_widths(window: f32, queue: f32) -> (f32, f32) {
-    let available = (window - queue).max(0.);
+pub fn transport_widths(available: f32) -> (f32, f32) {
     let wing = if available < 460. {
         80.
     } else if available < 620. {
@@ -139,7 +157,7 @@ mod transport_tests {
     #[test]
     fn narrow_workspaces_keep_both_control_groups_outside_the_track_card() {
         for available in [350., 460., 500., 620., 720., 1200.] {
-            let (wing, card) = transport_widths(available + 280., 280.);
+            let (wing, card) = transport_widths(available);
             assert!(wing > 0. && card > 0.);
             assert!(wing * 2. + card + 64. <= available);
         }

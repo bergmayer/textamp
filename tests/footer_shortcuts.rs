@@ -21,7 +21,9 @@ fn draw(app: &mut AppState, width: u16) {
 fn footer_search_is_keyboard_and_mouse_accessible_and_modals_block_click_through() {
     let mut app = AppState::new();
     app.view = View::Browse;
-    app.tui_footer_focus = Some(3);
+    app.tui_footer_focus = textamp::app::tui_navigation::FOOTER
+        .iter()
+        .position(|entry| entry.0 == KeyCode::Char('f'));
     let actions = key_input::handle_key(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut app,
@@ -36,7 +38,7 @@ fn footer_search_is_keyboard_and_mouse_accessible_and_modals_block_click_through
         .hit_regions
         .footer_controls
         .iter()
-        .find(|(_, index)| *index == 3)
+        .find(|(_, index)| textamp::app::tui_navigation::FOOTER[*index].0 == KeyCode::Char('f'))
         .unwrap()
         .0;
     let click = MouseEvent {
@@ -61,32 +63,17 @@ fn narrow_footer_keeps_navigation_and_status_out_of_each_others_hit_targets() {
         let mut app = AppState::new();
         app.set_status("Loading album details…".into());
         draw(&mut app, width);
-        let left = app
-            .hit_regions
-            .footer_controls
-            .iter()
-            .find(|(_, index)| *index == 0)
-            .unwrap()
-            .0;
-        let right = app
-            .hit_regions
-            .footer_controls
-            .iter()
-            .find(|(_, index)| *index == 5)
-            .unwrap()
-            .0;
-        assert_eq!(
-            left.x + 1,
-            width - 1 - (right.x + 1),
-            "bracket glyphs need equal edge insets"
-        );
-        let mut controls = app.hit_regions.footer_controls.clone();
-        controls.sort_by_key(|(rect, _)| rect.x);
-        assert!(
-            controls
-                .windows(2)
-                .all(|pair| pair[0].0.right() <= pair[1].0.x)
-        );
+        let left = app.hit_regions.sidebar_toggle.unwrap();
+        let right = app.hit_regions.queue_tabs[0].0;
+        assert!(left.right() <= right.x && right.right() <= width);
+        let controls = &app.hit_regions.footer_controls;
+        for (i, (rect, _)) in controls.iter().enumerate() {
+            assert!(
+                controls[i + 1..]
+                    .iter()
+                    .all(|(other, _)| rect.intersection(*other).is_empty())
+            );
+        }
         assert!(controls.iter().all(|(rect, _)| rect.right() <= width));
     }
 }
@@ -102,10 +89,11 @@ fn queue_rows_are_centered_and_footer_has_its_own_separator() {
         terminal
             .draw(|frame| app.apply_render_feedback(textamp::ui::render(frame, &app)))
             .unwrap();
+        let transport = app.hit_regions.transport.as_ref().unwrap();
         let controls = &app.hit_regions.queue_menus;
         assert_eq!(controls.len(), 2);
-        assert_eq!(controls[0].0.y, controls[1].0.y);
-        assert!(controls[0].0.right() < controls[1].0.x);
+        assert_eq!(controls[0].0.x, controls[1].0.x);
+        assert!(controls[0].0.y < controls[1].0.y);
         assert_eq!(
             app.hit_regions
                 .queue_content
@@ -113,18 +101,14 @@ fn queue_rows_are_centered_and_footer_has_its_own_separator() {
                 .unwrap()
                 .track_list
                 .bottom(),
-            30
+            transport.area.y
         );
         let buffer = terminal.backend().buffer();
         assert!((0..width).all(|x| matches!(buffer[(x, 30)].symbol(), "─" | "┴" | "┘")));
-        let transport = app.hit_regions.transport.as_ref().unwrap();
         assert_eq!(transport.area.bottom(), 30);
-        assert!(
-            app.hit_regions
-                .footer_controls
-                .iter()
-                .all(|(rect, _)| rect.y == 31)
-        );
+        assert!(app.hit_regions.footer_controls.iter().all(
+            |(rect, _)| rect.y == 31 || (rect.x == controls[0].0.x && rect.y < controls[0].0.y)
+        ));
     }
 }
 
@@ -171,6 +155,73 @@ fn numbered_navigation_and_queue_shortcuts_work_from_every_workspace() {
                 ))]
             ));
         }
+    }
+}
+
+#[test]
+fn sidebar_trash_targets_the_visible_queue_tab() {
+    use textamp::app::action::QueueAction;
+    let mut app = AppState::new();
+    app.tui_queue_visible = true;
+    app.set_view(View::Queue);
+    app.queue.tracks = vec![Default::default()].into();
+    app.listening_history = vec![textamp::app::listening_history::Play::from_track(
+        &app.queue.tracks[0],
+    )]
+    .into();
+    for history in [false, true] {
+        app.showing_queue_history = history;
+        draw(&mut app, 120);
+        let rect = app.hit_regions.queue_clear.unwrap();
+        let actions = mouse_input::handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + 1,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut app,
+        );
+        assert!(matches!(
+            (history, actions.as_slice()),
+            (false, [Action::Queue(QueueAction::ClearQueue)])
+                | (true, [Action::Queue(QueueAction::ClearHistory)])
+        ));
+    }
+}
+
+#[test]
+fn history_track_click_selects_the_occurrence_for_keyboard_commands() {
+    use textamp::app::{action::QueueAction, listening_history::Play, track_context::ContextKind};
+    let mut app = AppState::new();
+    app.tui_queue_visible = true;
+    app.showing_queue_history = true;
+    let plays = vec![
+        Play::from_track(&Default::default()),
+        Play::from_track(&Default::default()),
+    ];
+    let id = plays[1].id.clone();
+    app.listening_history = plays.into();
+    draw(&mut app, 120);
+    let rect = app.hit_regions.history_rows[1].0;
+    mouse_input::handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        &mut app,
+    );
+    for key in [KeyCode::Enter, KeyCode::Right, KeyCode::Char('+')] {
+        let actions = key_input::handle_key(
+            KeyEvent::new(key, KeyModifiers::NONE),
+            &mut app,
+            &Config::default(),
+        );
+        assert!(
+            matches!(actions.as_slice(),[Action::Queue(QueueAction::HistoryTrack(target,command))] if target==&id && matches!((key,command),(KeyCode::Enter,ContextKind::PlayTrack)|(KeyCode::Right,ContextKind::ShowDetails(textamp::app::library_details::Destination::Track))|(KeyCode::Char('+'),ContextKind::PlayNextInQueue)))
+        );
     }
 }
 
@@ -352,7 +403,9 @@ fn pending_download_rows_and_notification_have_distinct_click_targets() {
                 textamp::app::action::SystemAction::Downloads(downloads::Command::Cancel(_))
             )]
         ));
-        app.tui_footer_focus = Some(3);
+        app.tui_footer_focus = textamp::app::tui_navigation::FOOTER
+            .iter()
+            .position(|entry| entry.0 == KeyCode::Char('f'));
         draw(&mut app, width);
         assert!(app.hit_regions.download_status.is_none());
     }

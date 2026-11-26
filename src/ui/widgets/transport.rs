@@ -54,10 +54,8 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         ratatui::widgets::Block::default().style(Style::default().bg(colors.transport_bg)),
         area,
     );
-    let (_, info_width) = crate::ui::layout::transport_widths(
-        f32::from(state.terminal_width) * state.cell_width(),
-        f32::from(state.queue_width()) * state.cell_width(),
-    );
+    let (_, info_width) =
+        crate::ui::layout::transport_widths(f32::from(area.width) * state.cell_width());
     let center_width = ((info_width / state.cell_width()).round() as u16)
         .min(
             area.width
@@ -77,8 +75,13 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         center,
     );
     let row = area.y + u16::from(area.height > 1);
-    let button_style = |control| {
-        if state.tui_transport_focus == Some(control) {
+    let button_style = |control: Control| {
+        if !control.enabled(state) {
+            Style::default()
+                .fg(colors.fg_muted)
+                .bg(colors.transport_bg)
+                .add_modifier(Modifier::DIM)
+        } else if state.tui_transport_focus == Some(control) {
             colors.focused_row()
         } else {
             Style::default()
@@ -158,6 +161,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             art_width,
             2.min(area.height),
         );
+        state.hit_regions.borrow_mut().transport_artwork = Some(art);
         if let Some(data) = state.current_artwork_bytes() {
             crate::ui::artwork::render_grid_image(frame, art, "transport-artwork", data);
         } else {
@@ -179,13 +183,6 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
                 }),
             title_area,
         );
-        crate::ui::detail_links::field(
-            frame,
-            state,
-            title_area,
-            track,
-            crate::app::library_details::Destination::Track,
-        );
         let artist = track.track_artist();
         let metadata = truncate_to_width(
             &format!("{artist} · {}", track.album_name()),
@@ -205,35 +202,6 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
                     },
                 ),
             artist_area,
-        );
-        let metadata_width = UnicodeWidthStr::width(metadata.as_str()) as u16;
-        let text_area = Rect::new(
-            artist_area.x + artist_area.width.saturating_sub(metadata_width) / 2,
-            artist_area.y,
-            metadata_width.min(artist_area.width),
-            artist_area.height,
-        );
-        let album_start = UnicodeWidthStr::width(artist) as u16 + 3;
-        if text_area.width > album_start {
-            crate::ui::detail_links::field(
-                frame,
-                state,
-                Rect::new(
-                    text_area.x + album_start,
-                    text_area.y,
-                    text_area.width - album_start,
-                    text_area.height,
-                ),
-                track,
-                crate::app::library_details::Destination::Album,
-            );
-        }
-        crate::ui::artist_links::visible(
-            frame,
-            state,
-            artist_area,
-            artist,
-            track.grandparent_rating_key.as_deref(),
         );
     } else {
         frame.render_widget(
@@ -257,7 +225,11 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
     if seekbar.height > 0 {
         frame.render_widget(
             Paragraph::new(build_progress_bar(progress, seekbar.width as usize)).style(
-                if state.tui_transport_focus == Some(Control::Seek) {
+                if !Control::Seek.enabled(state) {
+                    colors
+                        .track_card_secondary_style()
+                        .add_modifier(Modifier::DIM)
+                } else if state.tui_transport_focus == Some(Control::Seek) {
                     colors.focused_row()
                 } else {
                     colors.track_card_style()
@@ -286,43 +258,32 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             time_area,
         );
     }
+    let right_edge = state
+        .hit_regions
+        .borrow()
+        .queue_tabs
+        .first()
+        .map_or(area.right(), |(r, _)| r.x);
     let right = Rect::new(
         center.right() + 1,
         area.y,
-        area.right().saturating_sub(center.right() + 1),
+        right_edge.saturating_sub(center.right() + 1),
         area.height,
     );
     let mut controls = vec![
         (previous, Control::Previous),
         (play, Control::Play),
         (next, Control::Next),
-        (title_area, Control::Track),
     ];
-    for (area, control) in state
-        .hit_regions
-        .borrow()
-        .artist_links
-        .iter()
-        .filter(|link| artist_area.intersection(link.area) == link.area)
-        .map(|link| (link.area, Control::Artist))
-        .chain(
-            state
-                .hit_regions
-                .borrow()
-                .detail_links
-                .iter()
-                .filter(|link| {
-                    link.destination == crate::app::library_details::Destination::Album
-                        && artist_area.intersection(link.area) == link.area
-                })
-                .map(|link| (link.area, Control::Album)),
-        )
-    {
-        if !controls.iter().any(|(_, visible)| *visible == control) {
-            controls.push((area, control));
+    if let Some(track) = state.current_track() {
+        controls.push((title_area, Control::Track));
+        if !track.track_artist().is_empty() {
+            controls.push((artist_area, Control::Artist));
+        }
+        if !track.album_name().is_empty() {
+            controls.push((artist_area, Control::Album));
         }
     }
-
     controls.push((seekbar, Control::Seek));
     let mut speaker = None;
     let mut volume = None;
@@ -344,7 +305,15 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         }
         speaker = Some(mute);
         if right.width >= 12 {
-            let slider = Rect::new(right.x + 9, row, right.width.saturating_sub(9), 1);
+            let slider = Rect::new(
+                right.x + 9,
+                row,
+                right
+                    .width
+                    .saturating_sub(9)
+                    .min((84. / state.cell_width()).round() as u16),
+                1,
+            );
             frame.render_widget(
                 Paragraph::new(build_progress_bar(
                     if state.playback.muted {
@@ -361,23 +330,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             volume = Some(slider);
         }
     }
-    let player =
-        Rect::new(area.right().saturating_sub(3), area.y, 2.min(area.width), 1).intersection(area);
-    let workspace = if matches!(state.view, View::Settings | View::Similar | View::Related) {
-        state.previous_view.unwrap_or(state.view)
-    } else {
-        state.view
-    };
-    let active = workspace == View::NowPlaying
-        || (workspace == View::Queue
-            && state.tui_queue_workspace == crate::app::state::TuiWorkspace::NowPlaying);
-    if !active {
-        frame.render_widget(
-            Paragraph::new("⌃ ").style(button_style(Control::Player)),
-            player,
-        );
-        controls.push((player, Control::Player));
-    }
+    controls.push((center, Control::Player));
     controls.retain(|(rect, _)| !rect.is_empty());
     state.hit_regions.borrow_mut().transport = Some(crate::app::presentation::TransportRegions {
         area: outer,
@@ -405,25 +358,21 @@ pub fn render_footer(frame: &mut Frame, state: &AppState, area: Rect) {
         .style(Style::default().bg(colors.transport_bg));
     let inner = border.inner(area);
     frame.render_widget(border, area);
-    if let Some(queue) = &state.hit_regions.borrow().queue_content {
-        for (x, symbol) in [
-            (queue.track_list.x, "┴"),
-            (queue.track_list.right().saturating_sub(1), "┘"),
-        ] {
-            if x >= area.x && x < area.right() {
-                frame.render_widget(
-                    Paragraph::new(symbol).style(Style::default().fg(colors.border)),
-                    Rect::new(x, area.y, 1, 1),
-                );
-            }
-        }
-    }
     let area = inner;
     if area.is_empty() {
         return;
     }
     let mut x = area.x + u16::from(area.width > 2);
     for (index, (key, icon, _)) in crate::app::tui_navigation::FOOTER.iter().enumerate() {
+        if state
+            .hit_regions
+            .borrow()
+            .footer_controls
+            .iter()
+            .any(|(_, i)| *i == index)
+        {
+            continue;
+        }
         let rect = if *key == crossterm::event::KeyCode::Char(']') {
             Rect::new(area.right().saturating_sub(4), area.y, 3.min(area.width), 1)
         } else {
@@ -466,7 +415,9 @@ pub fn render_footer(frame: &mut Frame, state: &AppState, area: Rect) {
             .is_some_and(|n| n.target.is_some());
     let count = state.browse_item_summary().unwrap_or_default();
     let count_width = UnicodeWidthStr::width(count.as_str()) as u16;
-    let right = area.right().saturating_sub(7);
+    let right = area
+        .right()
+        .saturating_sub(if cfg!(target_os = "macos") { 2 } else { 7 });
     let count_width = if right.saturating_sub(x) >= count_width + 3 {
         count_width
     } else {

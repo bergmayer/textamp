@@ -99,7 +99,9 @@ pub fn loaded(
             tracing::warn!("Preload random albums: {error}");
             if visible {
                 state.artist_nav.loading = false;
-                state.set_error(format!("Load random albums: {error}. Choose Refresh Library to retry."));
+                state.set_error(format!(
+                    "Load random albums: {error}. Choose Refresh Library to retry."
+                ));
             }
         }
     }

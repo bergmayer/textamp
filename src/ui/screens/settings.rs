@@ -395,7 +395,7 @@ fn render_about(frame: &mut Frame, state: &AppState, area: Rect) {
         return;
     }
     state.hit_regions.borrow_mut().settings_apply = Some(rows[0]);
-    crate::ui::widgets::logo::render_original(frame, rows[0], &theme().colors);
+    crate::ui::widgets::logo::render_themed(frame, rows[0], &theme().colors);
     let inner = rows[1];
     let lines = vec![
         Line::styled(

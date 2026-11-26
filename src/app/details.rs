@@ -49,11 +49,20 @@ pub fn track_rows(track: &Track) -> Vec<(String, String)> {
         if let Some(channels) = media.audio_channels {
             rows.push(("Channels".into(), channels.to_string()));
         }
-        if let Some(container) = &media.container {
-            rows.push(("Container".into(), container.clone()));
-        }
-        if let Some(codec) = &media.audio_codec {
-            rows.push(("Codec".into(), codec.clone()));
+        if let Some(format) = media.container.as_deref().filter(|container| {
+            media
+                .audio_codec
+                .as_deref()
+                .is_some_and(|codec| codec.eq_ignore_ascii_case(container))
+        }) {
+            rows.push(("Format".into(), format.to_owned()));
+        } else {
+            if let Some(container) = &media.container {
+                rows.push(("Container".into(), container.clone()));
+            }
+            if let Some(codec) = &media.audio_codec {
+                rows.push(("Codec".into(), codec.clone()));
+            }
         }
     }
     rows.retain(|(_, v)| !v.is_empty());
@@ -75,6 +84,9 @@ impl Kind {
 #[derive(Clone, Default)]
 pub struct Document {
     pub kind: Kind,
+    pub artist_bio: Option<Control>,
+    pub track_artwork: bool,
+    pub lyrics: Option<String>,
     pub artist_artwork_visible: bool,
     pub title: String,
     pub subtitle: String,
@@ -134,11 +146,33 @@ pub struct Similar {
     pub message: String,
     pub tracks: Vec<Track>,
 }
+/// The album page requests its cover independently of list-thumbnail preferences.
+pub fn album_cover(state: &AppState, column: &BrowseColumn) -> Option<(String, String)> {
+    let PlayAllRow::Album { rating_key, .. } = column.play_all_row.as_ref()? else {
+        return None;
+    };
+    let thumb = column
+        .tracks
+        .iter()
+        .find_map(|track| track.parent_thumb.clone())
+        .or_else(|| {
+            state
+                .library
+                .albums
+                .iter()
+                .find(|album| &album.rating_key == rating_key)
+                .and_then(|album| album.thumb.clone())
+        })
+        .or_else(|| super::downloads::is_root_column(state, 0).then(String::new))?;
+    Some((rating_key.clone(), thumb))
+}
+
 /// Selected album details and their catalog identity.
 pub fn album_info_selection(state: &AppState) -> Option<(&str, &str)> {
     let column = state.browse_nav()?.focused()?;
-    if column.header_selection != ColumnHeaderSelection::AlbumDetails
-        && !matches!(column.details, Some(BrowseDetails::Album { .. }))
+    if state.view != View::Browse
+        || state.sonic_details.is_some()
+        || (state.track_pane_open && column.header_selection != ColumnHeaderSelection::AlbumDetails)
     {
         return None;
     }
@@ -148,7 +182,11 @@ pub fn album_info_selection(state: &AppState) -> Option<(&str, &str)> {
     }
 }
 fn album_info_preview(state: &AppState, key: &str, title: &str) -> Document {
-    let track = album_navigation_track(state, key);
+    let track = album_navigation_track(state, key).or_else(|| {
+        state.browse_nav()?.columns.iter().find(|c|
+            matches!(&c.play_all_row, Some(PlayAllRow::Album { rating_key, .. }) if rating_key == key)
+        )?.tracks.first().cloned()
+    });
     let mut rows = vec![];
     if let Some(year) = track.as_ref().and_then(|t| t.parent_year.or(t.year)) {
         rows.push(("Year".into(), year.to_string()));
@@ -194,27 +232,31 @@ fn album_info_preview(state: &AppState, key: &str, title: &str) -> Document {
 }
 /// Resolve related-music ownership from the selected library destination.
 pub fn similar_seed(state: &AppState) -> Option<(Track, bool)> {
-    if state.view != View::Browse
-        || state.desktop_player_visible
-        || crate::app::sources::audiomuse::connection(state).is_none()
-        || (!state.track_pane_open
-            && state.sonic_details.is_none()
-            && album_info_selection(state).is_none())
-    {
+    if !crate::app::sources::navidrome::recommendations::available(state) {
+        return None;
+    }
+    if state.view == View::NowPlaying && state.now_playing_details_visible {
+        return state.current_track().cloned().map(|track| (track, false));
+    }
+    if state.view != View::Browse || state.desktop_player_visible {
         return None;
     }
     if let Some(track) = crate::app::sonic_details::selected_track(state) {
         return Some((track.clone(), false));
     }
-    if let Some((key, _)) = album_info_selection(state) {
-        return state
-            .browse_nav()?
-            .columns
-            .iter()
-            .flat_map(|column| column.tracks.iter())
-            .chain(state.library.all_tracks.iter())
-            .find(|t| t.parent_rating_key.as_deref() == Some(key))
-            .map(|t| (t.clone(), true));
+    let nav = state.browse_nav();
+    let album = nav.and_then(|nav| {
+        nav.focused()
+            .filter(|c| c.has_album_details())
+            .or_else(|| nav.columns.last().filter(|c| c.has_album_details()))
+    });
+    if (!state.track_pane_open || album_info_selection(state).is_some())
+        && let Some(column) = album
+    {
+        return column.tracks.first().cloned().map(|track| (track, true));
+    }
+    if !state.track_pane_open {
+        return None;
     }
     if state.browse_category == BrowseCategory::Folders {
         let column = state.folder_state.as_ref()?.focused()?;
@@ -235,16 +277,34 @@ pub fn related_message(
     pending: bool,
 ) -> Option<std::borrow::Cow<'_, str>> {
     use std::borrow::Cow;
+    if pending {
+        return Some(Cow::Borrowed("Loading similar music…"));
+    }
     match result {
         Some(Ok(tracks)) if !tracks.is_empty() => None,
         Some(Ok(_)) => Some(Cow::Borrowed("No similar music found.")),
-        Some(Err(error)) => Some(Cow::Owned(format!("{error} · Choose Refresh Library to retry."))),
-        None if pending => Some(Cow::Borrowed("Loading similar music…")),
+        Some(Err(error)) => Some(Cow::Owned(format!(
+            "{error} · Choose Refresh Library to retry."
+        ))),
         None => Some(Cow::Borrowed("Similar music is unavailable.")),
     }
 }
 
 /// Keep a cached biography readable while its owned refresh is pending.
+impl ArtistInfoDetails {
+    pub fn needs_web_search(&self) -> bool {
+        !self.document.has_prose()
+    }
+    pub fn excerpt(&self) -> &str {
+        if self.needs_web_search() {
+            return "";
+        }
+        let text = artist_text(self).trim();
+        text.split_once('\n')
+            .filter(|(heading, _)| heading.trim().eq_ignore_ascii_case(&self.artist_name))
+            .map_or(text, |(_, body)| body.trim_start())
+    }
+}
 pub fn artist_text(info: &ArtistInfoDetails) -> &str {
     if info.document.text.is_empty() && info.task.is_some() {
         "Loading artist details…"
@@ -256,6 +316,12 @@ pub fn artist_text(info: &ArtistInfoDetails) -> &str {
 /// Project the selected document and the commands available for it.
 pub fn project(state: &AppState) -> Option<Document> {
     let mut preview = preview_details(state)?;
+    if preview.kind == Kind::Track
+        && let Some(track) = &preview.track
+    {
+        preview.track_artwork = track_cover(state, track).is_some();
+        preview.lyrics = super::lyrics::inline_text(state, track).map(str::to_owned);
+    }
     let download = match preview.kind {
         Kind::Album => album_info_selection(state).map(|(key, _)| {
             Control::new(
@@ -281,37 +347,208 @@ pub fn project(state: &AppState) -> Option<Document> {
     if let Some(control) = download {
         preview.controls.push(control);
     }
+    Some(with_related(state, preview, similar_seed(state)))
+}
+
+/// Metadata, inline lyrics and recommendations for the current playback item.
+pub fn now_playing_details(state: &AppState) -> Option<Document> {
+    if state.view != View::NowPlaying || !state.now_playing_details_visible {
+        return None;
+    }
+    let track = state.current_track()?;
+    let doc = Document {
+        title: track.title.clone(),
+        subtitle: track.track_artist().into(),
+        rows: now_playing_rows(track),
+        lyrics: super::lyrics::inline_text(state, track).map(str::to_owned),
+        track: Some(track.clone()),
+        ..Default::default()
+    };
+    Some(with_related(state, doc, Some((track.clone(), false))))
+}
+
+/// Resolve the biography for the credited album artist.
+pub fn album_artist(state: &AppState, column: &BrowseColumn) -> Option<(String, String)> {
+    let PlayAllRow::Album { rating_key, .. } = column.play_all_row.as_ref()? else {
+        return None;
+    };
+    let track =
+        album_navigation_track(state, rating_key).or_else(|| column.tracks.first().cloned())?;
+    let name = track
+        .grandparent_title
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())?;
+    let artist_key = track.grandparent_rating_key.clone().or_else(|| {
+        state
+            .library
+            .artists
+            .iter()
+            .find(|artist| artist.title.eq_ignore_ascii_case(name))
+            .map(|artist| artist.rating_key.clone())
+    })?;
+    Some((artist_key, name.to_owned()))
+}
+
+pub fn album_bio(state: &AppState, column: &BrowseColumn) -> Option<Control> {
+    let (artist_key, name) = album_artist(state, column)?;
+    if !super::handlers::helpers::biography::known(state, &artist_key)
+        .is_some_and(crate::services::biography::Biography::has_prose)
+    {
+        let provider = state.web_search_provider;
+        let mut control = Control::new(
+            provider.search_label(),
+            SystemAction::OpenBrowser(provider.artist_url(&name)),
+        );
+        control.search_provider = Some(provider);
+        return Some(control);
+    }
+    Some(Control::new(
+        "Artist Biography",
+        SearchAction::ShowArtistBio {
+            artist_key,
+            artist_name: name.to_owned(),
+        },
+    ))
+}
+
+/// Cover identifiers distinguish track art before both images are cached.
+pub fn track_cover<'a>(state: &AppState, track: &'a Track) -> Option<&'a str> {
+    let thumb = track.thumb.as_deref().filter(|thumb| !thumb.is_empty())?;
+    let album_thumb = track.parent_thumb.as_deref().or_else(|| {
+        state
+            .library
+            .albums
+            .iter()
+            .find(|album| Some(&album.rating_key) == track.parent_rating_key.as_ref())
+            .and_then(|album| album.thumb.as_deref())
+    });
+    if album_thumb.is_none_or(|cover| cover == thumb)
+        || Some(thumb) == track.parent_rating_key.as_deref()
+    {
+        return None;
+    }
+    let cached = &state.artwork.grid_cache;
+    if let Some((track_image, album_image)) = cached.get(&track.rating_key).zip(
+        track
+            .parent_rating_key
+            .as_ref()
+            .and_then(|key| cached.get(key)),
+    ) && track_image == album_image
+    {
+        return None;
+    }
+    Some(thumb)
+}
+
+/// Project the album owned by this column independently of keyboard focus.
+pub fn album_page(state: &AppState, column: &BrowseColumn) -> Option<Document> {
+    let PlayAllRow::Album { rating_key, title } = column.play_all_row.as_ref()? else {
+        return None;
+    };
+    let mut page = album_info_preview(state, rating_key, title);
+    page.artist_bio = album_bio(state, column);
+    if let Some(related) = &state.sources.album_artists
+        && related.generation == state.library_generation
+        && related.album == *rating_key
+    {
+        page.related_artists = related
+            .document
+            .as_ref()
+            .map(|doc| doc.related_artists.clone());
+    }
+    page.controls.push(Control::new(
+        "Download Album",
+        super::downloads::Command::Album(rating_key.clone()),
+    ));
+    Some(with_related(
+        state,
+        page,
+        column.tracks.first().cloned().map(|track| (track, true)),
+    ))
+}
+
+pub fn open_album_notes(state: &mut AppState, index: usize) {
+    let Some(column) = state.browse_nav().and_then(|nav| nav.columns.get(index)) else {
+        return;
+    };
+    let Some(PlayAllRow::Album { rating_key, title }) = &column.play_all_row else {
+        return;
+    };
+    let info = state
+        .sources
+        .album_notes
+        .as_ref()
+        .filter(|notes| notes.matches(state.library_generation, rating_key));
+    let mut text = info
+        .map(|notes| {
+            notes
+                .info
+                .review
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    if let Some(url) = info.and_then(|notes| notes.info.display_link()) {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(url.as_str());
+    }
+    if text.is_empty() {
+        text = "No album notes available.".into();
+    }
+    state.popups.set_text(Some(crate::app::state::TextPopup {
+        album_notes: true,
+        title: format!("Album Notes · {title}"),
+        text,
+        scroll: 0,
+        request_id: 0,
+        lyrics_query: None,
+    }));
+}
+
+pub(crate) fn recommendation_tracks<'a>(
+    seed: &'a Track,
+    tracks: &'a [Track],
+    albums: bool,
+) -> impl Iterator<Item = &'a Track> {
+    let mut seen = std::collections::HashSet::new();
+    tracks
+        .iter()
+        .filter(move |track| !super::track_context::same_artist(seed, track))
+        .filter(move |track| {
+            !albums
+                || (track.parent_rating_key != seed.parent_rating_key
+                    && track
+                        .parent_rating_key
+                        .as_deref()
+                        .is_some_and(|key| seen.insert(key)))
+        })
+        .take(12)
+}
+
+fn with_related(state: &AppState, mut preview: Document, seed: Option<(Track, bool)>) -> Document {
     if state.downloads.is_offline() {
         if preview.kind == Kind::Artist {
-            return Some(preview);
+            return preview;
         }
         preview.similar = Some(Similar {
             message: "Unavailable offline".into(),
             ..Default::default()
         });
-        return Some(preview);
+        return preview;
     }
-    if crate::app::sources::audiomuse::connection(state).is_some()
-        && crate::app::sources::sonic::enabled(state)
-        && let Some((seed, albums)) = similar_seed(state)
+    if crate::app::sources::navidrome::recommendations::available(state)
+        && let Some((seed, albums)) = seed
     {
         let mut similar = Similar {
             albums,
             ..Default::default()
         };
         match state.track_pane_similar.get(&seed.rating_key) {
-            Some(Ok(tracks)) => {
-                let mut seen = std::collections::HashSet::new();
-                similar.tracks = tracks
-                    .iter()
-                    .filter(|t| !crate::app::track_context::same_artist(&seed, t))
-                    .filter(|t| {
-                        !albums
-                            || (t.parent_rating_key.is_some()
-                                && t.parent_rating_key != seed.parent_rating_key
-                                && seen.insert(t.parent_rating_key.clone()))
-                    })
-                    .take(12)
+            Some(Ok(tracks)) if !state.track_pane_similar_loading.contains(&seed.rating_key) => {
+                similar.tracks = recommendation_tracks(&seed, tracks, albums)
                     .cloned()
                     .collect();
                 if similar.tracks.is_empty() {
@@ -321,7 +558,10 @@ pub fn project(state: &AppState) -> Option<Document> {
             result => {
                 similar.message = related_message(
                     result,
-                    state.track_pane_similar_loading.contains(&seed.rating_key),
+                    state.track_pane_similar_loading.contains(&seed.rating_key)
+                        || (result.is_none()
+                            && similar_seed(state)
+                                .is_some_and(|(visible, _)| visible.rating_key == seed.rating_key)),
                 )
                 .map(|message| message.into_owned())
                 .unwrap_or_default()
@@ -329,7 +569,7 @@ pub fn project(state: &AppState) -> Option<Document> {
         }
         preview.similar = Some(similar);
     }
-    Some(preview)
+    preview
 }
 fn preview_details(state: &AppState) -> Option<Document> {
     if let Some((key, title)) = album_info_selection(state) {
@@ -341,34 +581,21 @@ fn preview_details(state: &AppState) -> Option<Document> {
             .and_then(|nav| nav.columns.get(index))
             .and_then(|column| column.details.as_ref())
     {
-        let mut controls = Vec::new();
-        if !state.downloads.is_offline()
-            && state
-                .sources
-                .active
-                .capabilities()
-                .supports(crate::library::capabilities::Feature::ArtistRadio)
-        {
-            controls.push(Control::new(
-                "Artist Mix",
-                crate::app::action::RadioAction::StartArtistRadio {
-                    key: info.artist_key.clone(),
-                    title: info.artist_name.clone(),
-                },
-            ));
-        }
-        controls.extend(artist_commands(info).into_iter().map(|command| {
-            let label = if command == ArtistCommand::SearchWeb {
-                state.web_search_provider.search_label()
-            } else {
-                command.label()
-            };
-            let mut control = Control::new(label, command.action());
-            if command == ArtistCommand::SearchWeb {
-                control.mark = Some(state.web_search_provider.mark());
-            }
-            control
-        }));
+        let controls = artist_commands(info)
+            .into_iter()
+            .map(|command| {
+                let label = if command == ArtistCommand::SearchWeb {
+                    state.web_search_provider.search_label()
+                } else {
+                    command.label()
+                };
+                let mut control = Control::new(label, command.action());
+                if command == ArtistCommand::SearchWeb {
+                    control.search_provider = Some(state.web_search_provider);
+                }
+                control
+            })
+            .collect();
         return Some(Document {
             title: info.artist_name.clone(),
             subtitle: String::new(),
@@ -584,6 +811,11 @@ mod tests {
         assert_eq!(artist_text(&info), "Cached biography");
         assert!(!related_message(None, false).unwrap().contains("Loading"));
         assert!(related_message(None, true).unwrap().contains("Loading"));
+        assert!(
+            related_message(Some(&Ok(vec![])), true)
+                .unwrap()
+                .contains("Loading")
+        );
         work.abort();
     }
     #[test]

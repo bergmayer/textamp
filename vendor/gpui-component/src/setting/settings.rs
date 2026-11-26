@@ -11,7 +11,7 @@ use crate::{
     sidebar::{Sidebar, SidebarMenu, SidebarMenuItem},
 };
 use gpui::{
-    App, AppContext as _, Axis, ElementId, Entity, InteractiveElement as _, IntoElement,
+    App, AppContext as _, Axis, ElementId, Entity, FocusHandle, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, RenderOnce, StyleRefinement, Styled, Window, container_query, div,
     prelude::FluentBuilder as _, px, relative,
 };
@@ -43,6 +43,7 @@ pub struct Settings {
     default_selected_index: SelectIndex,
     on_select: Option<std::rc::Rc<dyn Fn(SelectIndex, &mut Window, &mut App)>>,
     header_style: StyleRefinement,
+    pane_focus: Option<[FocusHandle; 2]>,
 }
 
 impl Settings {
@@ -59,6 +60,7 @@ impl Settings {
             default_selected_index: SelectIndex::default(),
             on_select: None,
             header_style: StyleRefinement::default(),
+            pane_focus: None,
         }
     }
 
@@ -118,6 +120,12 @@ impl Settings {
     /// Set the style refinement for the header.
     pub fn header_style(mut self, style: &StyleRefinement) -> Self {
         self.header_style = style.clone();
+        self
+    }
+
+    /// Attach focus scopes to the category sidebar and active page for keyboard navigation.
+    pub fn pane_focus(mut self, sidebar: &FocusHandle, content: &FocusHandle) -> Self {
+        self.pane_focus = Some([sidebar.clone(), content.clone()]);
         self
     }
 
@@ -468,6 +476,10 @@ impl RenderOnce for Settings {
             .render_sidebar(&state, &filter, window, cx)
             .into_any_element();
 
+        let focus = self.pane_focus.clone();
+        let sidebar = div().size_full().when_some(focus.as_ref(), |pane, focus| {
+            pane.track_focus(&focus[0]).tab_group()
+        }).child(sidebar);
         h_resizable(self.id.clone())
             .child(
                 resizable_panel()
@@ -476,14 +488,17 @@ impl RenderOnce for Settings {
                     .child(sidebar),
             )
             .child(
-                resizable_panel().child(container_query(move |size, window, cx| {
+                resizable_panel().child(
+                    div().size_full().when_some(focus.as_ref(), |pane, focus| {
+                        pane.track_focus(&focus[1]).tab_group()
+                    }).child(container_query(move |size, window, cx| {
                     let options = options.with_layout(if size.width <= STACKED_LAYOUT_MAX_WIDTH {
                         Axis::Vertical
                     } else {
                         Axis::Horizontal
                     });
                     self.render_active_page(&state, &filter, &options, window, cx)
-                })),
+                }))),
             )
     }
 }

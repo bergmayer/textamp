@@ -8,6 +8,9 @@ use tokio::sync::mpsc;
 
 /// Refresh the current view's category and return actions.
 pub fn refresh_current_view(state: &mut AppState) -> Vec<Action> {
+    state.artist_bios.clear();
+    state.sources.album_artists = None;
+    state.sources.nav_tasks.remove("album-artists");
     use crate::app::state::RefreshCategory;
 
     if state.view == View::Browse

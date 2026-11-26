@@ -226,24 +226,35 @@ impl Client {
         let rows = centroids[mood]
             .as_array()
             .context("AudioMuse mood unavailable")?;
-        let indices: Vec<_> = rows.iter().filter_map(|r| r["index"].as_u64()).collect();
-        use rand::prelude::IndexedRandom;
-        let index = *indices
-            .choose(&mut rand::rng())
-            .context("No analyzed mood centroids yet")?;
-        let result = self
-            .request(
-                "api/similar_tracks",
-                &[
-                    ("mood", mood.into()),
-                    ("centroid_index", index.to_string()),
-                    ("n", "100".into()),
-                    ("eliminate_duplicates", "true".into()),
-                ],
-                None,
-            )
+        use futures::{StreamExt, TryStreamExt, stream};
+        let indices: std::collections::BTreeSet<_> =
+            rows.iter().filter_map(|r| r["index"].as_u64()).collect();
+        ensure!(!indices.is_empty(), "No analyzed mood centroids yet");
+        let groups: Vec<Vec<String>> = stream::iter(indices)
+            .map(|index| async move {
+                let result = self
+                    .request(
+                        "api/similar_tracks",
+                        &[
+                            ("mood", mood.into()),
+                            ("centroid_index", index.to_string()),
+                            ("n", "100".into()),
+                            ("eliminate_duplicates", "true".into()),
+                        ],
+                        None,
+                    )
+                    .await?;
+                track_ids(&result, 100)
+            })
+            .buffered(3)
+            .try_collect()
             .await?;
-        track_ids(&result, 100)
+        let mut seen = std::collections::HashSet::new();
+        Ok(groups
+            .into_iter()
+            .flatten()
+            .filter(|id| seen.insert(id.clone()))
+            .collect())
     }
     pub async fn moods(&self) -> Result<Vec<String>> {
         let value = self.request("api/mood_centroids", &[], None).await?;

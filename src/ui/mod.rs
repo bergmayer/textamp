@@ -10,6 +10,7 @@ pub(crate) mod detail_links;
 mod fullscreen;
 pub mod layout;
 pub(crate) mod motion;
+pub(crate) mod playlist_picker;
 pub mod screens;
 pub mod theme;
 pub mod widgets;
@@ -137,7 +138,9 @@ fn render_inner(
     }
     sync_appearance(
         state,
-        motion.as_ref().is_some_and(|motion| motion.active(now)),
+        motion
+            .as_ref()
+            .is_some_and(|motion| motion.structural_motion(now)),
         host,
     );
     let mut input = RenderState {

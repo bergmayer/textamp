@@ -102,7 +102,6 @@ private struct KeyboardSwipeDismissal: UIViewRepresentable {
 }
 
 extension EnvironmentValues {
-  @Entry fileprivate var tabletColumnDividerTop: CGFloat = 0
   @Entry fileprivate var queueColumn: Binding<Bool>? = nil
 }
 
@@ -121,10 +120,6 @@ struct ContentView: View {
         UIDevice.current.userInterfaceIdiom == .pad && sizeClass == .regular
         && geometry.size.width >= 820
       workspace(wide: wide, width: geometry.size.width)
-        .environment(
-          \.tabletColumnDividerTop,
-          geometry.frame(in: .global).minY + tabletColumnHeaderHeight
-        )
         .environment(\.queueColumn, wide ? $queueVisible : nil)
         .onChange(of: wide && model.tab == "queue", initial: true) { _, requested in
           if requested {
@@ -136,6 +131,52 @@ struct ContentView: View {
   }
 
   private func workspace(wide: Bool, width: CGFloat) -> some View {
+    VStack(spacing: 0) {
+      let rim: CGFloat = model.theme.isBrushedAluminum ? (wide ? 4 : 2) : 0
+      workspacePanels(wide: wide, width: width - 2 * rim)
+        .overlay {
+          if model.theme.isBrushedAluminum {
+            Rectangle().strokeBorder(model.theme.columnDivider, lineWidth: 1)
+              .allowsHitTesting(false).accessibilityHidden(true)
+          }
+        }
+        .padding(.horizontal, rim)
+        .padding(.vertical, rim / 2)
+      if model.settings || model.sheet != nil {
+        Color.clear.frame(height: 54)
+      } else {
+        MainBottomBar()
+      }
+    }
+    .background { Rectangle().fill(model.theme.baseFill).ignoresSafeArea() }
+    .onChange(of: model.libraryTab) { _, _ in
+      UIApplication.shared.sendAction(
+        #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+    .sheet(isPresented: Binding(
+      get: { !model.settings && model.sheet != nil },
+      set: { if !$0 && !model.settings { model.utilitySheetDismissed() } }
+    )) {
+      PresentedUtilitySheet().environment(model).environment(\.textampTheme, model.theme)
+    }
+    .fullScreenCover(
+      isPresented: Binding(
+        get: { model.settings },
+        set: { if !$0 && model.settings { model.closeSheet() } })
+    ) {
+      SettingsScreen().environment(model).environment(\.textampTheme, model.theme)
+    }
+    .alert(
+      "Textamp",
+      isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })
+    ) {
+      Button("OK", role: .cancel) { model.error = nil }
+    } message: {
+      Text(model.error ?? "")
+    }
+  }
+
+  private func workspacePanels(wide: Bool, width: CGFloat) -> some View {
     let expanded = !wide && model.tab == "now_playing"
     return HStack(spacing: 0) {
       VStack(spacing: 0) {
@@ -180,6 +221,7 @@ struct ContentView: View {
                   }
                 })
         }
+        if !wide && !expanded { ActivityStatus() }
       }
       if wide && queueVisible {
         TabletColumnDivider()
@@ -199,42 +241,6 @@ struct ContentView: View {
             size: geometry.size, origin: origin)
         }
       }
-    }
-    .safeAreaInset(edge: .bottom, spacing: 0) {
-      VStack(spacing: 0) {
-        if !wide { ActivityStatus() }
-        if model.settings || model.sheet != nil {
-          Color.clear.frame(height: 54)
-        } else {
-          MainBottomBar()
-        }
-      }
-    }
-    .background(model.theme.bg.ignoresSafeArea())
-    .onChange(of: model.libraryTab) { _, _ in
-      UIApplication.shared.sendAction(
-        #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-    }
-    .sheet(isPresented: Binding(
-      get: { !model.settings && model.sheet != nil },
-      set: { if !$0 && !model.settings && model.sheet != nil { model.closeSheet() } }
-    )) {
-      SearchSheet().environment(model).environment(\.textampTheme, model.theme)
-    }
-    .fullScreenCover(
-      isPresented: Binding(
-        get: { model.settings },
-        set: { if !$0 && model.settings { model.closeSheet() } })
-    ) {
-      SettingsScreen().environment(model).environment(\.textampTheme, model.theme)
-    }
-    .alert(
-      "Textamp",
-      isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })
-    ) {
-      Button("OK", role: .cancel) { model.error = nil }
-    } message: {
-      Text(model.error ?? "")
     }
   }
 }
@@ -256,13 +262,10 @@ private struct LibraryBrowser: View {
 private let tabletColumnHeaderHeight: CGFloat = 44
 
 private struct TabletColumnDivider: View {
-  @Environment(\.tabletColumnDividerTop) private var headerBottom
   @Environment(\.textampTheme) private var theme
   var body: some View {
-    GeometryReader { geometry in
-      Rectangle().fill(theme.columnDivider)
-        .padding(.top, max(0, headerBottom - geometry.frame(in: .global).minY))
-    }.frame(width: 1).accessibilityHidden(true).allowsHitTesting(false)
+    Rectangle().fill(theme.columnDivider)
+      .frame(width: 1).accessibilityHidden(true).allowsHitTesting(false)
   }
 }
 
@@ -283,7 +286,7 @@ private struct TabletLibrary: View {
         .overlay(alignment: .trailing) {
           TabletColumnDivider().ignoresSafeArea(.container, edges: .top)
         }
-        .navigationSplitViewColumnWidth(min: 200, ideal: rootWidth, max: 300)
+        .navigationSplitViewColumnWidth(min: 208, ideal: rootWidth, max: 300)
     } detail: {
       GeometryReader { geometry in
         let path = model.path
@@ -296,7 +299,7 @@ private struct TabletLibrary: View {
             ScrollView(.horizontal) {
               HStack(spacing: 0) {
                 ForEach(path, id: \.self) { owner in
-                  column(owner, selected: owner != path.last)
+                  LibraryDestination(owner: owner, showsSelection: owner != path.last, inWorkspace: true)
                     .frame(width: width, height: geometry.size.height)
                     .overlay(alignment: .trailing) {
                       if owner != path.last { TabletColumnDivider() }
@@ -316,32 +319,36 @@ private struct TabletLibrary: View {
           }
         }
       }
-      .background(model.theme.bg)
+      .background(model.theme.baseFill)
       .navigationBarTitleDisplayMode(.inline)
       .toolbar(sidebarVisible ? .hidden : .visible, for: .navigationBar)
     }
     .navigationSplitViewStyle(.balanced)
   }
 
-  @ViewBuilder private func column(_ owner: String, selected: Bool) -> some View {
-    let column = model.snapshot?.columns.first { $0.id == owner }
-    if let column, !column.detail, column.radio != true {
-      ColumnScreen(owner: owner, showsSelection: selected, inWorkspace: true)
-    } else {
-      let title = column?.radio == true ? (column?.title ?? "Radio") : "Details"
-      VStack(spacing: 0) {
-        HStack {
-          ColumnHeading(title: title).font(.headline).accessibilityAddTraits(.isHeader)
-          Spacer()
-          CloseLibraryColumn(owner: owner)
-        }.padding(.leading, 12).padding(.trailing, 4)
-          .accessibilityElement(children: .contain)
-          .accessibilityIdentifier("workspace-column-header-\(title)")
-          .background(model.theme.bg)
-        Divider()
-        LibraryDestination(owner: owner, showsSelection: selected)
-      }
-    }
+}
+
+private struct LibraryControlIcon: View {
+  let symbol: String
+  var title: String?
+  var compact = false
+  var body: some View {
+    Group {
+      if let title { Label(title, systemImage: symbol).labelStyle(.iconOnly) }
+      else { Image(systemName: symbol) }
+    }.font(compact ? .title3 : .title2)
+      .frame(width: compact ? 44 : 48, height: compact ? 44 : 48)
+      .contentShape(Rectangle())
+  }
+}
+
+private struct LibraryHeaderRow<Content: View>: View {
+  @ViewBuilder var content: Content
+
+  var body: some View {
+    HStack(spacing: 0) { content }
+      .frame(minHeight: tabletColumnHeaderHeight)
+      .padding(.leading, 12).padding(.trailing, 4)
   }
 }
 
@@ -370,19 +377,37 @@ private struct LibraryDestination: View {
   @Environment(AppModel.self) private var model
   let owner: String
   var showsSelection = false
+  var inWorkspace = false
 
   var body: some View {
     if let column = model.snapshot?.columns.first(where: { $0.id == owner }) {
       if column.radio == true {
-        RadioScreen(column: column, showsSelection: showsSelection)
+        titledColumn(column.compactTitle ?? column.title, namedDestination: column.namedDestination == true) {
+          RadioScreen(column: column, showsSelection: showsSelection)
+        }
       } else if column.detail {
-        DetailScreen()
+        titledColumn("Details") { DetailScreen() }
       } else {
-        ColumnScreen(owner: owner, showsSelection: showsSelection)
+        ColumnScreen(owner: owner, showsSelection: showsSelection, inWorkspace: inWorkspace)
       }
     } else if owner.hasPrefix("track:") {
-      DetailScreen()
+      titledColumn("Details") { DetailScreen() }
     }
+  }
+
+  private func titledColumn(_ title: String, namedDestination: Bool = false, @ViewBuilder content: () -> some View) -> some View {
+    VStack(spacing: 0) {
+      LibraryHeaderRow {
+        ColumnHeading(title: title, namedDestination: namedDestination)
+        if inWorkspace { CloseLibraryColumn(owner: owner) }
+      }
+      .accessibilityElement(children: .contain)
+      .accessibilityIdentifier("workspace-column-header-\(title)")
+      if inWorkspace { Divider() }
+      content()
+    }
+    .background(model.theme.baseFill)
+    .navigationTitle("").navigationBarTitleDisplayMode(.inline)
   }
 }
 
@@ -408,7 +433,7 @@ struct MainBottomBar: View {
     }
     .font(.system(size: 22)).buttonStyle(.plain).foregroundStyle(model.theme.text)
     .padding(.horizontal, 12).padding(.vertical, 5)
-    .background(model.theme.system ? AnyShapeStyle(.bar) : AnyShapeStyle(model.theme.bg)).overlay(
+    .background(model.theme.system ? AnyShapeStyle(.bar) : model.theme.baseFill).overlay(
       alignment: .top
     ) { Divider() }
     .accessibilityElement(children: .contain)
@@ -427,8 +452,10 @@ struct MainBottomBar: View {
           dock.wrappedValue.toggle()
         }
       } else {
+        let reselectingLibrary = tab == "library" && model.tab == "library"
+          && model.sheet == nil && !model.settings
         model.selectTab(tab)
-        if tab == "library" {
+        if reselectingLibrary {
           model.setPath([])
         }
       }
@@ -475,28 +502,72 @@ private func categorySymbol(_ title: String, section: String? = nil) -> String {
 struct LibraryHome: View {
   @Environment(AppModel.self) var model
   var sidebar = false
+  @AppStorage("libraryRadioStation") private var preferredStation = "randomAlbum"
   @State private var expandedGroups = Set<String>()
+  private var stations: [CommandButton] { model.snapshot?.libraryStations ?? [] }
+  private var station: CommandButton? {
+    stations.first { $0.value == preferredStation } ?? stations.first { $0.value == "randomAlbum" } ?? stations.first
+  }
   var body: some View {
-    ScrollViewReader { reader in
-      Group {
-        if sidebar {
-          destinations.listStyle(.sidebar).contentMargins(.horizontal, 6, for: .scrollContent)
-        } else {
-          destinations.listStyle(.plain)
+    VStack(spacing: 0) {
+      LibraryHeaderRow {
+        Group {
+          if sidebar {
+            Text("Library").font(.headline).lineLimit(1)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .accessibilityAddTraits(.isHeader)
+          } else {
+            ColumnHeading(title: "Library", namedDestination: false)
+          }
+        }.accessibilityIdentifier("library-heading")
+        if let station {
+          Menu {
+            Picker("Radio Station", selection: Binding(get: { station.value ?? "" }, set: { preferredStation = $0 })) {
+              ForEach(stations) { option in
+                Text(option.label).tag(option.value ?? "")
+              }
+            }
+          } label: {
+            LibraryControlIcon(symbol: "dot.radiowaves.left.and.right", compact: sidebar)
+          } primaryAction: {
+            model.invoke(station.token)
+          }
+          .menuIndicator(.hidden)
+          .accessibilityLabel("Radio")
+          .accessibilityValue(station.label)
+          .accessibilityHint("Touch and hold to choose a station")
+          .accessibilityIdentifier("library-radio")
         }
+        Button { model.open("library_picker") } label: {
+          LibraryControlIcon(symbol: "books.vertical", compact: sidebar)
+        }.accessibilityLabel("Switch Library")
+        Button { model.open("settings") } label: {
+          LibraryControlIcon(symbol: "gearshape", compact: sidebar)
+        }.accessibilityLabel("Settings")
       }
-      .onChange(of: expandedGroups) { previous, current in
-        if let title = current.subtracting(previous).first,
-          let first = groups.first(where: { $0.title == title })?.destinations.first
-        {
-          reader.scrollTo(first.id)
+      .font(.title2)
+      if sidebar { Divider() }
+      ScrollViewReader { reader in
+        Group {
+          if sidebar {
+            destinations.listStyle(.sidebar).contentMargins(.horizontal, 6, for: .scrollContent)
+          } else {
+            destinations.listStyle(.plain)
+          }
+        }
+        .onChange(of: expandedGroups) { previous, current in
+          if let title = current.subtracting(previous).first,
+            let first = groups.first(where: { $0.title == title })?.destinations.first
+          {
+            reader.scrollTo(first.id)
+          }
         }
       }
     }
     .font(.body).foregroundStyle(model.theme.text)
     .environment(\.defaultMinListRowHeight, 44)
-    .scrollIndicators(.visible).scrollContentBackground(.hidden).background(libraryBackground)
-    .navigationTitle("Library").navigationBarTitleDisplayMode(.large)
+    .scrollIndicators(.visible).scrollContentBackground(.hidden).background(model.theme.isBrushedAluminum ? model.theme.baseFill : AnyShapeStyle(libraryBackground))
+    .navigationTitle("").navigationBarTitleDisplayMode(.inline)
   }
   private var destinations: some View {
     List {
@@ -518,7 +589,7 @@ struct LibraryHome: View {
             .tint(model.theme.tint)
             .foregroundStyle(model.theme.onTint)
         }
-        .listRowBackground(libraryBackground)
+        .listRowBackground(model.theme.isBrushedAluminum ? Color.clear : libraryBackground)
       }
       ForEach(model.snapshot?.libraryLoading == false ? groups : []) { group in
         if let title = group.title,
@@ -724,25 +795,23 @@ struct ColumnScreen: View {
   @State private var filtering = false
   @State private var query = ""
   @State private var selectionOwner: String?
+  @State private var readingAlbumNotes = false
   @State private var descriptionQuery = ""
   @FocusState private var filterFocus: Bool
   var column: Column? { model.snapshot?.columns.first { $0.id == owner } }
   var body: some View {
     Group {
       if let column {
-        let albumDetailsSelected =
-          showsSelection && column.albumDetails != nil && model.snapshot?.detail?.kind == "album"
-          && model.snapshot?.columns.last?.detail == true
         VStack(spacing: 0) {
-          HStack(spacing: 0) {
-            columnTitle(column)
-            if !filtering {
-              playlistControls(column)
-              viewOptions(column)
+          if inWorkspace || filtering || column.albumArtworkKey == nil {
+            LibraryHeaderRow {
+              if filtering || column.albumArtworkKey == nil { columnTitle(column) }
+              if inWorkspace {
+                if !filtering { columnActions(column) }
+                CloseLibraryColumn(owner: owner)
+              }
             }
-            if inWorkspace { CloseLibraryColumn(owner: owner) }
           }
-          .padding(.leading, 12).padding(.trailing, 4)
           if inWorkspace { Divider() }
           if column.descriptionPrompt == true {
             HStack {
@@ -756,40 +825,15 @@ struct ColumnScreen: View {
               }.disabled(descriptionQuery.isEmpty).accessibilityLabel("Search description")
             }.padding().background(model.theme.card)
           }
-          if let details = column.albumDetails {
-            Button {
-              model.invoke(details.token)
-            } label: {
-              HStack(spacing: 12) {
-                if let art = column.albumDetailsArtwork {
-                  Artwork(id: art).frame(width: 52, height: 52).clipShape(
-                    RoundedRectangle(cornerRadius: 6))
-                } else {
-                  Image(systemName: "info.circle").frame(width: 24)
-                }
-                Text(details.label).fontWeight(albumDetailsSelected ? .semibold : .regular)
-                Spacer()
-                Image(systemName: "chevron.right").font(.caption)
-                  .accessibilityHidden(true)
-              }.foregroundStyle(albumDetailsSelected ? model.theme.onTint : model.theme.text)
-                .padding(.horizontal, 18).frame(minHeight: 60).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityAddTraits(albumDetailsSelected ? .isSelected : [])
-            .background(albumDetailsSelected ? model.theme.tint : model.theme.card)
-            .task(id: column.albumArtworkKey) {
-              if let key = column.albumArtworkKey, column.albumDetailsArtwork != nil {
-                model.send("artwork", ["owner": column.id, "keys": [key]])
-              }
-            }
-            Divider()
+          GeometryReader { pane in
+            ColumnList(
+              column: column, paneWidth: pane.size.width, showsSelection: showsSelection,
+              keyboardTarget: model.path.last == owner && !filterFocus && model.sheet == nil,
+              selecting: selectionOwner == owner,
+              beginSelecting: { selectionOwner = owner },
+              showAlbumNotes: { readingAlbumNotes = true },
+              dismissFilterKeyboard: { filterFocus = false })
           }
-          ColumnList(
-            column: column, showsSelection: showsSelection && !albumDetailsSelected,
-            keyboardTarget: model.path.last == owner && !filterFocus && model.sheet == nil,
-            selecting: selectionOwner == owner,
-            beginSelecting: { selectionOwner = owner },
-            dismissFilterKeyboard: { filterFocus = false })
           if let summary = column.summary {
             Text(summary).font(.footnote).foregroundStyle(model.theme.muted)
               .accessibilityIdentifier("download-summary")
@@ -799,20 +843,20 @@ struct ColumnScreen: View {
             Text(query.isEmpty ? "No items" : "No matches").foregroundStyle(model.theme.muted)
               .padding()
           }
-        }.background(model.theme.bg)
+        }.background(model.theme.baseFill)
           .navigationTitle("").navigationBarTitleDisplayMode(.inline)
-          .onAppear {
-            query = column.filter
-            filtering = column.filterActive == true
+          .toolbar {
+            if !inWorkspace && !filtering {
+              ToolbarItemGroup(placement: .topBarTrailing) { columnActions(column) }
+            }
           }
-          .onChange(of: column.filter) { _, value in
-            if !filterFocus { query = value }
-            if !value.isEmpty { filtering = true }
+          .sheet(isPresented: $readingAlbumNotes) {
+            if let detail = column.albumPage { AlbumNotesReader(detail: detail) }
           }
-          .onChange(of: column.filterActive) { _, active in
-            if active == true {
+          .onChange(of: column.filterActive, initial: true) { _, active in
+            if active == true && !filtering && column.albumArtworkKey == nil {
+              query = column.filter
               filtering = true
-              filterFocus = true
             }
           }
       } else {
@@ -820,24 +864,44 @@ struct ColumnScreen: View {
       }
     }
   }
+  @ViewBuilder private func columnActions(_ column: Column) -> some View {
+    if let detail = column.albumPage {
+      ForEach((column.playback ?? []).dropFirst()) { action in
+        Button { model.invoke(action.token) } label: {
+          LibraryControlIcon(symbol: action.symbol ?? "plus", title: action.label)
+        }.accessibilityLabel(action.label)
+      }
+      if let download = detail.actions.first(where: { $0.symbol == "arrow.down.circle" }) {
+        Button { model.invoke(download.token) } label: {
+          LibraryControlIcon(symbol: "arrow.down.circle", title: download.label)
+        }.accessibilityLabel(download.label)
+      }
+    }
+    if let mix = column.artistHeader?.mix {
+      Button { model.invoke(mix.token) } label: {
+        LibraryControlIcon(symbol: "dot.radiowaves.left.and.right")
+      }.accessibilityLabel(mix.label)
+    }
+    playlistControls(column)
+    viewOptions(column)
+  }
   @ViewBuilder private func playlistControls(_ column: Column) -> some View {
     if selectionOwner == column.id {
       Button {
         model.send("clear_selection", ["owner": column.id])
         selectionOwner = nil
       } label: {
-        Image(systemName: "checkmark").frame(width: 44, height: 44)
+        LibraryControlIcon(symbol: "checkmark")
       }.accessibilityLabel("Done")
         .accessibilityIdentifier("selection-done")
-    } else if column.playlistEditing != true {
+    } else if column.playlistEditing != true && column.albumArtworkKey == nil {
       ActionButtons(actions: column.playback ?? [], compact: true)
     }
     if let controls = column.playlistEditControls, let toggle = controls.first {
       Button {
         model.invoke(toggle.token)
       } label: {
-        Image(systemName: column.playlistEditing == true ? "checkmark" : "pencil")
-          .frame(width: 44, height: 44)
+        LibraryControlIcon(symbol: column.playlistEditing == true ? "checkmark" : "pencil")
       }.accessibilityLabel(toggle.label)
         .accessibilityIdentifier("playlist-edit")
       if column.playlistEditing == true {
@@ -845,7 +909,7 @@ struct ColumnScreen: View {
         Button(role: .destructive) {
           if let removal { model.invoke(removal.token) }
         } label: {
-          Image(systemName: "trash").frame(width: 44, height: 44)
+          LibraryControlIcon(symbol: "trash")
         }
         .disabled(removal == nil)
         .accessibilityLabel("Remove from Playlist")
@@ -857,7 +921,7 @@ struct ColumnScreen: View {
               Button(action.label) { model.invoke(action.token) }
             }
           } label: {
-            Image(systemName: "ellipsis.circle").frame(width: 44, height: 44)
+            LibraryControlIcon(symbol: "ellipsis.circle")
           }.accessibilityLabel("Selected Tracks")
         }
       }
@@ -866,30 +930,34 @@ struct ColumnScreen: View {
   @ViewBuilder private func columnTitle(_ column: Column) -> some View {
     if filtering {
       HStack {
-        TextField("Filter \(column.title)", text: $query).textInputAutocapitalization(
+        TextField("Filter \(column.title)", text: Binding(
+          get: { query },
+          set: { value in
+            guard value != query else { return }
+            query = value
+            model.send("filter", ["owner": owner, "query": value])
+          }
+        )).textInputAutocapitalization(
           .never
         )
         .autocorrectionDisabled().focused($filterFocus)
         .submitLabel(.done).onSubmit { filterFocus = false }
-        .onChange(of: query) { _, value in
-          model.send("filter", ["owner": owner, "query": value])
-        }
+        .onAppear { filterFocus = true }
         Button {
           query = ""
           filtering = false
           filterFocus = false
           model.send("filter", ["owner": owner, "query": ""])
         } label: {
-          Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44)
+          LibraryControlIcon(symbol: "xmark.circle.fill")
         }.accessibilityLabel("Close Filter")
       }.frame(minHeight: 44)
     } else {
       Button {
+        query = column.filter
         filtering = true
-        filterFocus = true
       } label: {
-        ColumnHeading(title: column.compactTitle ?? column.title)
-          .font(.headline)
+        ColumnHeading(title: column.compactTitle ?? column.title, namedDestination: column.namedDestination == true || column.artistHeader != nil, artistHeading: column.artistHeader != nil)
           .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
           .contentShape(Rectangle())
       }.buttonStyle(.plain).accessibilityLabel(column.title).accessibilityIdentifier("column-title")
@@ -897,7 +965,7 @@ struct ColumnScreen: View {
     }
   }
   @ViewBuilder private func viewOptions(_ column: Column) -> some View {
-    if column.sidebar != true {
+    if column.sidebar != true && !column.options.isEmpty {
       Menu {
         ForEach(column.options.menuSections.indices, id: \.self) { index in
           Section {
@@ -911,7 +979,7 @@ struct ColumnScreen: View {
           }
         }
       } label: {
-        Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44)
+        LibraryControlIcon(symbol: "slider.horizontal.3", title: "View Options")
       }.accessibilityLabel("View Options")
     }
   }
@@ -920,18 +988,38 @@ struct ColumnScreen: View {
 /// Only an overflowing title owns an animation task. SwiftUI cancels it on navigation or resize.
 struct ColumnHeading: View {
   let title: String
+  let namedDestination: Bool
+  var artistHeading = false
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var textWidth: CGFloat = 0
   @State private var offset: CGFloat? = nil
 
   var body: some View {
-    Text(title).lineLimit(1).truncationMode(.middle)
+    let heading = title.prefix(1).uppercased() + title.dropFirst()
+    Group {
+      if namedDestination {
+        ViewThatFits(in: .horizontal) {
+          Text(heading).font(artistHeading ? .largeTitle.bold() : .headline)
+            .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+          scrollingTitle(heading).font(.subheadline.weight(artistHeading ? .bold : .semibold))
+        }
+      } else {
+        scrollingTitle(heading).font(.largeTitle.bold())
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .accessibilityRepresentation { Text(heading).accessibilityAddTraits(.isHeader) }
+    .id(title)
+  }
+
+  private func scrollingTitle(_ heading: String) -> some View {
+    Text(heading).lineLimit(1).truncationMode(.middle)
       .frame(maxWidth: .infinity, alignment: .leading)
       .opacity(offset == nil ? 1 : 0)
       .overlay {
         GeometryReader { geometry in
           let distance = max(0, textWidth - geometry.size.width)
-          Text(title).lineLimit(1).fixedSize()
+          Text(heading).lineLimit(1).fixedSize()
             .onGeometryChange(for: CGFloat.self) {
               $0.size.width
             } action: {
@@ -954,9 +1042,8 @@ struct ColumnHeading: View {
                 }
               } catch { /* The replacement task starts at the centered truncation. */  }
             }
-        }.clipped().allowsHitTesting(false)
+        }.clipped().allowsHitTesting(false).accessibilityHidden(true)
       }
-      .id(title)
   }
 }
 
@@ -967,23 +1054,20 @@ struct RadioScreen: View {
   var body: some View {
     Group {
       if let detail = column.stationDetails, let input = detail.input {
-        VStack(spacing: 0) {
-          Text(detail.text).font(.subheadline).foregroundStyle(model.theme.muted)
-            .frame(maxWidth: .infinity, alignment: .leading).padding()
-          if input == "artists" { UtilitySheet() } else { JourneyFormView() }
+        if input == "artists" {
+          UtilitySheet()
+        } else {
+          VStack(spacing: 0) {
+            Text(detail.text).font(.subheadline).foregroundStyle(model.theme.muted)
+              .frame(maxWidth: .infinity, alignment: .leading).padding()
+            JourneyFormView()
+          }
         }
       } else {
         stationList
       }
-    }.background(model.theme.bg)
-      .navigationTitle(column.title)
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        ToolbarItem(placement: .principal) {
-          ColumnHeading(title: column.compactTitle ?? column.title)
-            .font(.headline).accessibilityAddTraits(.isHeader)
-        }
-      }
+    }.background(model.theme.baseFill)
+
   }
   private var stationList: some View {
     List {
@@ -1018,63 +1102,222 @@ struct RadioScreen: View {
         }
 
       }
-    }.scrollContentBackground(.hidden).background(model.theme.bg)
+    }.scrollContentBackground(.hidden).background(model.theme.baseFill)
   }
 }
 struct MusicRowView: View {
   @Environment(AppModel.self) var model
   let row: MusicRow
-  var large = false
   var selected = false
   private var text: Color { selected ? model.theme.onTint : model.theme.text }
   private var secondary: Color { selected ? model.theme.onTint : model.theme.muted }
   var body: some View {
-    if large {
-      VStack(alignment: .leading, spacing: 10) {
-        Artwork(id: row.artwork).frame(maxWidth: 240, maxHeight: 240).clipShape(
-          RoundedRectangle(cornerRadius: 8))
-        Text(title).font(.headline).foregroundStyle(text).lineLimit(3)
-      }.padding(.vertical, 8)
-    } else {
-      HStack(spacing: 12) {
-        if let art = row.artwork {
-          Artwork(id: art).frame(width: 52, height: 52).clipShape(RoundedRectangle(cornerRadius: 6))
-            .opacity(row.pending == nil ? 1 : 0.45)
-        } else {
-          Image(
-            systemName: row.kind == "category"
-              ? categorySymbol(row.title)
-              : row.kind == "artist"
-                ? "person" : row.kind == "track" ? "music.note" : "folder"
-          ).frame(width: 24).foregroundStyle(secondary).accessibilityHidden(true)
+    HStack(spacing: 12) {
+      if let art = row.artwork {
+        Artwork(id: art).frame(width: 52, height: 52).clipShape(RoundedRectangle(cornerRadius: 6))
+          .opacity(row.pending == nil ? 1 : 0.45)
+      } else {
+        Image(
+          systemName: row.kind == "category"
+            ? categorySymbol(row.title)
+            : row.kind == "artist"
+              ? "person" : row.kind == "track" ? "music.note" : "folder"
+        ).frame(width: 24).foregroundStyle(secondary).accessibilityHidden(true)
+      }
+      VStack(alignment: .leading, spacing: 4) {
+        Text(title).fontWeight(selected ? .semibold : .regular).foregroundStyle(
+          row.pending == nil ? text : secondary
+        )
+        .lineLimit(2)
+        if let pending = row.pending {
+          Text(pending).font(.subheadline).foregroundStyle(secondary).lineLimit(2)
+        } else if !row.subtitle.isEmpty {
+          Text(row.subtitle).font(.subheadline).foregroundStyle(secondary).lineLimit(1)
         }
-        VStack(alignment: .leading, spacing: 4) {
-          Text(title).fontWeight(selected ? .semibold : .regular).foregroundStyle(
-            row.pending == nil ? text : secondary
-          )
-          .lineLimit(2)
-          if let pending = row.pending {
-            Text(pending).font(.subheadline).foregroundStyle(secondary).lineLimit(2)
-          } else if !row.subtitle.isEmpty {
-            Text(row.subtitle).font(.subheadline).foregroundStyle(secondary).lineLimit(1)
+      }
+      Spacer(minLength: 0)
+      if let cancel = row.cancel {
+        Button {
+          model.invoke(cancel.token)
+        } label: {
+          Image(systemName: "xmark").font(.body).frame(width: 44, height: 44)
+        }.buttonStyle(.borderless).accessibilityLabel("Cancel Download \(row.title)")
+          .accessibilityIdentifier("download-cancel-\(row.key)")
+      } else {
+        Image(systemName: "chevron.right").font(.caption).foregroundStyle(secondary)
+          .accessibilityHidden(true)
+      }
+    }.padding(.vertical, 4).contentShape(Rectangle())
+  }
+  var title: String { row.albumCaption }
+}
+private struct AlbumArtistBiographyButton: View {
+  @Environment(AppModel.self) private var model
+  let columnID: String
+  let side: CGFloat
+
+  var body: some View {
+    let command = model.snapshot?.columns.first { $0.id == columnID }?.albumPage?.artistBio
+    Group {
+      if let command, command.mark != nil {
+        ArtistWebSearchButton(command: command).buttonStyle(.plain)
+      } else if let command {
+        Button { model.invoke(command.token) } label: {
+          Image(systemName: "person").font(.title).frame(width: side, height: side)
+            .contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityLabel(command.label)
+      } else { Color.clear }
+    }.frame(width: side, height: side)
+  }
+}
+
+struct AlbumPageHeader: View {
+  @Environment(AppModel.self) private var model
+  @ScaledMetric(relativeTo: .body) private var infoButtonSide: CGFloat = 52
+  let column: Column
+  let detail: Details?
+  let showAlbumNotes: () -> Void
+
+  var body: some View {
+    VStack(spacing: 8) {
+      Artwork(id: column.albumDetailsArtwork)
+        .aspectRatio(1, contentMode: .fit).frame(maxWidth: 340)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .accessibilityLabel("Album artwork")
+        .task(id: column.albumArtworkKey) {
+          if let key = column.albumArtworkKey { model.send("artwork", ["owner": column.id, "keys": [key]]) }
+        }
+      if let detail {
+        Text(detail.title).font(.title2.bold()).multilineTextAlignment(.center).padding(.top, 8)
+        if let artist = detail.albumArtist {
+          Button(artist.label) { model.invoke(artist.token) }.font(.title3)
+        } else if !detail.subtitle.isEmpty { Text(detail.subtitle).font(.title3) }
+        let metadata = ["Genres", "Year"].compactMap { label in
+          detail.rows.first { $0.first == label }?.dropFirst().first
+        }.joined(separator: " · ")
+        if !metadata.isEmpty { Text(metadata).font(.subheadline).foregroundStyle(model.theme.muted) }
+        HStack(spacing: 12) {
+          AlbumArtistBiographyButton(columnID: column.id, side: infoButtonSide)
+          if let play = column.playback?.first {
+            Button { model.invoke(play.token) } label: {
+              Label("Play", systemImage: "play.fill").fontWeight(.semibold).frame(minWidth: 86)
+            }.buttonStyle(.borderedProminent).buttonBorderShape(.capsule)
+              .foregroundStyle(model.theme.onTint).accessibilityLabel(play.label)
+              .contextMenu {
+                ForEach(column.playback ?? []) { action in
+                  Button(action.label) { model.invoke(action.token) }
+                  ForEach(action.context ?? []) { alternate in
+                    Button(alternate.label) { model.invoke(alternate.token) }
+                  }
+                }
+              }
           }
+          Group {
+            if detail.review?.isEmpty == false || detail.albumURL != nil {
+              Button(action: showAlbumNotes) {
+                Image(systemName: "opticaldisc").font(.title).frame(width: infoButtonSide, height: infoButtonSide).contentShape(Rectangle())
+              }.buttonStyle(.plain).accessibilityLabel("Album Info").accessibilityIdentifier("album-notes")
+            } else { Color.clear }
+          }.frame(width: infoButtonSide, height: infoButtonSide)
+        }.controlSize(.large).padding(.vertical, 4)
+      }
+    }.frame(maxWidth: .infinity).padding(.vertical, 16).padding(.horizontal, 3)
+  }
+
+}
+
+private struct AlbumNotesReader: View {
+  @Environment(AppModel.self) private var model
+  @Environment(\.dismiss) private var dismiss
+  @State private var height: PresentationDetent = .large
+  let detail: Details
+
+  var body: some View {
+    NavigationStack {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 16) {
+          Text(detail.title).font(.title.bold())
+          Text((detail.review ?? []).reduce(into: AttributedString()) { result, passage in
+            var part = AttributedString(passage.text)
+            if passage.italic { part.inlinePresentationIntent = .emphasized }
+            result.append(part)
+          }).textSelection(.enabled).accessibilityIdentifier("album-review")
+          if let url = detail.albumURL, let host = url.host {
+            Link(host, destination: url).accessibilityIdentifier("album-source-link")
+          }
+        }.frame(maxWidth: .infinity, alignment: .leading).padding()
+      }.background(model.theme.baseFill).foregroundStyle(model.theme.text)
+        .navigationTitle("Album Info").navigationBarTitleDisplayMode(.inline)
+        .toolbar { SheetDismissToolbarItem { dismiss() } }
+    }.tint(model.theme.tint).modifier(PlaybackSheetDetents(height: $height, dismiss: { dismiss() }))
+  }
+}
+
+struct ColumnRecommendations: View {
+  let columns: Int
+  @Environment(AppModel.self) private var model
+  let albums: [CommandButton]
+  let artists: [CommandButton]
+  let message: String
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      if !albums.isEmpty || !message.isEmpty {
+        tiles("Similar Albums", items: albums, portraits: false)
+        if !message.isEmpty { Text(message).font(.footnote).foregroundStyle(model.theme.muted) }
+      }
+      if !artists.isEmpty { tiles("Similar Artists", items: artists, portraits: true) }
+    }.frame(maxWidth: .infinity, alignment: .leading).foregroundStyle(model.theme.text)
+  }
+
+  private func tiles(_ title: String, items: [CommandButton], portraits: Bool) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text(title).font(.headline).accessibilityAddTraits(.isHeader)
+      LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: columns), alignment: .leading, spacing: 12) {
+        ForEach(items) { item in
+          Button { model.invoke(item.token) } label: {
+            VStack(alignment: portraits ? .center : .leading, spacing: 5) {
+              Color.clear.aspectRatio(1, contentMode: .fit)
+                .overlay { Artwork(id: item.artwork) }
+                .clipShape(portraits ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: 6)))
+              Text(item.subtitle ?? item.label).font(.subheadline).lineLimit(2)
+                .multilineTextAlignment(portraits ? .center : .leading)
+              if let artist = item.description { Text(artist).font(.caption).foregroundStyle(model.theme.muted).lineLimit(1) }
+            }.frame(maxWidth: .infinity, alignment: portraits ? .center : .leading).contentShape(Rectangle())
+          }.buttonStyle(.plain).accessibilityLabel(item.label)
         }
-        Spacer(minLength: 0)
-        if let cancel = row.cancel {
-          Button {
-            model.invoke(cancel.token)
-          } label: {
-            Image(systemName: "xmark").font(.body).frame(width: 44, height: 44)
-          }.buttonStyle(.borderless).accessibilityLabel("Cancel Download \(row.title)")
-            .accessibilityIdentifier("download-cancel-\(row.key)")
-        } else {
-          Image(systemName: "chevron.right").font(.caption).foregroundStyle(secondary)
-            .accessibilityHidden(true)
-        }
-      }.padding(.vertical, 4).contentShape(Rectangle())
+      }
     }
   }
-  var title: String { row.year.map { "\(row.title) (\($0))" } ?? row.title }
+}
+
+struct RelatedMusicSection: View {
+  @Environment(AppModel.self) private var model
+  let detail: Details
+  var body: some View {
+    if !detail.related.isEmpty || !detail.similar.isEmpty || !detail.message.isEmpty {
+      VStack(alignment: .leading, spacing: 10) {
+        Text(detail.relatedTitle).font(.title3.bold()).accessibilityAddTraits(.isHeader)
+        ForEach(detail.related + detail.similar) { item in
+          Button(item.label) { model.invoke(item.token) }.padding(.vertical, 6)
+        }
+        if !detail.message.isEmpty { Text(detail.message).font(.footnote).foregroundStyle(model.theme.muted) }
+      }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+  }
+}
+struct TrackMetadataContent: View {
+  let detail: Details
+  var body: some View {
+    MetadataRows(rows: detail.rows, links: detail.links)
+    if !detail.text.isEmpty { Text(detail.text).textSelection(.enabled) }
+    if detail.loading { ProgressView() }
+    if let lyrics = detail.lyrics {
+      Text("Lyrics").font(.title3.bold())
+      Text(lyrics).textSelection(.enabled)
+    }
+    RelatedMusicSection(detail: detail)
+  }
 }
 struct DetailScreen: View {
   @Environment(AppModel.self) var model
@@ -1083,16 +1326,14 @@ struct DetailScreen: View {
       ScrollView {
         if let detail = model.snapshot?.detail {
           VStack(alignment: .leading, spacing: 20) {
-            Artwork(id: detail.artwork)
+            if let artwork = detail.artwork { Artwork(id: artwork)
               .frame(
                 width: min(340, max(0, geometry.size.width - 40)),
                 height: min(340, max(0, geometry.size.width - 40))
               )
               .clipShape(RoundedRectangle(cornerRadius: 12)).frame(maxWidth: .infinity)
-            ActionButtons(
-              actions: detail.actions, compact: detail.kind == "artist",
-              showAll: detail.kind == "artist"
-            ).frame(maxWidth: .infinity)
+              .accessibilityIdentifier("track-detail-artwork")
+            }
             VStack(alignment: .leading, spacing: 4) {
               Text(detail.title).font(.title2.bold()).textSelection(.enabled)
               if detail.kind == "album", !detail.subtitle.isEmpty {
@@ -1103,38 +1344,18 @@ struct DetailScreen: View {
                 }
               }
             }
-            MetadataRows(rows: detail.rows, links: detail.links)
-            if !detail.text.isEmpty { Text(detail.text).textSelection(.enabled) }
-            if let passages = detail.review, !passages.isEmpty {
-              Text(passages.reduce(into: AttributedString()) { result, passage in
-                var part = AttributedString(passage.text)
-                if passage.italic { part.inlinePresentationIntent = .emphasized }
-                result.append(part)
-              }).textSelection(.enabled).accessibilityIdentifier("album-review")
-            }
-            if let url = detail.albumURL, let host = url.host {
-              Link(host, destination: url)
-                .accessibilityIdentifier("album-source-link")
-            }
-            if detail.loading { ProgressView() }
-            if !detail.related.isEmpty || !detail.similar.isEmpty || !detail.message.isEmpty {
-              Divider().padding(.top, 8)
-              Text(detail.relatedTitle).font(.title3.bold()).foregroundStyle(model.theme.text)
-                .accessibilityAddTraits(.isHeader)
-              ForEach(detail.related + detail.similar) { item in
-                Button(item.label) { model.invoke(item.token) }.padding(.vertical, 6)
-              }
-              if !detail.message.isEmpty {
-                Text(detail.message).font(.footnote).foregroundStyle(model.theme.muted)
-              }
-            }
+            ActionButtons(
+              actions: detail.actions, compact: detail.kind == "artist",
+              showAll: detail.kind == "artist"
+            ).frame(maxWidth: .infinity)
+            TrackMetadataContent(detail: detail)
           }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
         } else {
           ProgressView().frame(maxWidth: .infinity, minHeight: geometry.size.height)
         }
       }.frame(width: geometry.size.width, height: geometry.size.height)
         .accessibilityIdentifier("detail-content")
-    }.background(model.theme.bg).navigationTitle("Details").navigationBarTitleDisplayMode(.inline)
+    }.background(model.theme.baseFill).navigationTitle("").navigationBarTitleDisplayMode(.inline)
   }
 }
 struct ActionButtons: View {
@@ -1174,7 +1395,7 @@ struct ActionButtons: View {
             }
           }
         } label: {
-          if compact { Image(systemName: "ellipsis.circle").frame(width: 44, height: 44) }
+          if compact { LibraryControlIcon(symbol: "ellipsis.circle") }
           else { Image(systemName: "ellipsis.circle") }
         }.accessibilityLabel("More")
       }
@@ -1193,14 +1414,11 @@ struct ActionButtons: View {
       model.invoke(action.token)
     } label: {
       if let mark = action.mark {
-        Text(mark).font(.system(size: mark.count > 1 ? 11 : 17, weight: .bold))
-          .frame(width: 32, height: 32)
-          .frame(width: 44, height: 44).contentShape(Rectangle())
+        Text(mark).font(.system(size: mark.count > 1 ? 14 : 22, weight: .bold))
+          .frame(width: 48, height: 48).contentShape(Rectangle())
       } else if let symbol = action.symbol {
         if compact {
-          Image(systemName: symbol).font(.body)
-            .frame(width: 32, height: 32)
-            .frame(width: 44, height: 44).contentShape(Rectangle())
+          LibraryControlIcon(symbol: symbol)
         } else {
           Image(systemName: symbol).font(.title3).frame(minWidth: 24, minHeight: 24)
         }
@@ -1271,6 +1489,7 @@ private struct LibraryNavigationControls: ViewModifier {
       .navigationBarBackButtonHidden(!model.path.isEmpty)
       .background(LibrarySwipeBack())
       .toolbar { LibraryBackControl() }
+      .toolbar(model.path.isEmpty ? .hidden : .visible, for: .navigationBar)
   }
 }
 
@@ -1282,7 +1501,7 @@ private struct LibraryBackControl: ToolbarContent {
         Button {
           model.setPath(Array(model.path.dropLast()))
         } label: {
-          Image(systemName: "chevron.left")
+          LibraryControlIcon(symbol: "chevron.left")
         }
         .accessibilityLabel("Back")
         .contextMenu {

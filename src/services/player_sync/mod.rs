@@ -11,6 +11,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+pub mod mtp;
+mod scrobbles;
 pub mod volumes;
 mod webdav;
 pub use volumes::Volume;
@@ -130,13 +132,15 @@ pub struct Progress {
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
+    pub listens: usize,
+    pub unconfirmed_listens: usize,
     pub copied: usize,
     pub reused: usize,
     pub removed: usize,
     pub bytes: u64,
     pub playlist: PathBuf,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Entry {
     path: String,
     bytes: u64,
@@ -148,8 +152,10 @@ fn playlist_path(path: &str) -> bool {
 fn audio_manifest_path(path: &str) -> bool {
     relative(path) && Path::new(path).components().count() == 3
 }
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Manifest {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    listening_tags: BTreeMap<String, scrobbles::Tags>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     marker_paths: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,7 +172,7 @@ struct Manifest {
     #[serde(default)]
     retired: Vec<String>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PendingFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     song_id: Option<String>,
@@ -195,10 +201,12 @@ async fn recover_publication(
     root: &Path,
     manifest: &mut Manifest,
     layout: Layout,
-) -> Result<()> {
-    let Some(pending) = manifest.pending_file.take() else {
-        return Ok(());
-    };
+) -> Result<Option<Manifest>> {
+    if manifest.pending_file.is_none() {
+        return Ok(None);
+    }
+    let original = manifest.clone();
+    let pending = manifest.pending_file.take().expect("pending publication");
     let entry = &pending.entry;
     ensure!(
         entry.bytes > 0
@@ -218,11 +226,14 @@ async fn recover_publication(
     let dest = safe_path(root, &entry.path).await?;
     if tokio::fs::try_exists(&dest).await?
         && tokio::fs::metadata(&dest).await?.len() == entry.bytes
-        && digest(&dest).await? == pending.digest
+        && {
+            target.hydrate(&dest).await?;
+            digest(&dest).await? == pending.digest
+        }
     {
         pending.commit(manifest);
     }
-    save(root, manifest).await
+    Ok(Some(original))
 }
 
 impl PendingFile {
@@ -249,15 +260,16 @@ async fn publish_file(
     check_volume(target, root, &manifest.volume_uuid).await?;
     let destination = safe_path(root, &pending.entry.path).await?;
     manifest.pending_file = Some(pending);
-    save(root, manifest).await?;
+    save(target, root, manifest).await?;
     check_volume(target, root, &manifest.volume_uuid).await?;
+    target.publish(staged, &destination).await?;
     tokio::fs::rename(staged, destination).await?;
     manifest
         .pending_file
         .take()
         .expect("prepared publication")
         .commit(manifest);
-    save(root, manifest).await
+    save(target, root, manifest).await
 }
 
 /// Recover roots from older file indexes before a user changes their selection.
@@ -304,6 +316,14 @@ pub fn synced_folders(
     }
     if remember_roots {
         manifest.synced_folders = Some(roots.clone());
+        if volume.is_mtp() {
+            mtp::session::update_metadata(
+                volume,
+                path.strip_prefix(&volume.mount)?,
+                &std::fs::read(&path)?,
+                &manifest,
+            )?;
+        }
         let mut staged = tempfile::NamedTempFile::new_in(directory)?;
         serde_json::to_writer_pretty(&mut staged, &manifest)?;
         staged.as_file().sync_all()?;
@@ -417,11 +437,11 @@ async fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>> {
     );
     Ok(data)
 }
-async fn save(root: &Path, manifest: &Manifest) -> Result<()> {
+async fn save(target: &volumes::Target, root: &Path, manifest: &Manifest) -> Result<()> {
     let path = safe_path(root, INDEX).await?;
-    atomic_write(&path, &serde_json::to_vec_pretty(manifest)?).await
+    atomic_write(target, &path, &serde_json::to_vec_pretty(manifest)?).await
 }
-async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+async fn atomic_write(target: &volumes::Target, path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("Missing player folder")?.to_owned();
     let temporary = crate::app::tasks::spawn_blocking(move || {
         tempfile::NamedTempFile::new_in(parent).map(|file| file.into_temp_path())
@@ -431,6 +451,7 @@ async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     output.write_all(bytes).await?;
     output.sync_all().await?;
     drop(output);
+    target.publish(&temporary, path).await?;
     tokio::fs::rename(&temporary, path).await?;
     Ok(())
 }
@@ -456,7 +477,7 @@ async fn open_index(
     ensure!(volume.uuid == uuid, "The selected player changed");
     target.check().await?;
     ensure!(
-        target.path == tokio::fs::canonicalize(&volume.mount).await?,
+        volume.is_mtp() || target.path == tokio::fs::canonicalize(&volume.mount).await?,
         "The selected player changed"
     );
     let root = target
@@ -509,7 +530,7 @@ async fn open_index(
             );
             let manifest = empty();
             if initialize {
-                save(&root, &manifest).await?;
+                save(target, &root, &manifest).await?;
             }
             manifest
         }
@@ -520,7 +541,7 @@ async fn open_index(
         if !initialize {
             return Ok((root, manifest));
         }
-        atomic_write(&marker, uuid.as_bytes()).await?;
+        atomic_write(target, &marker, uuid.as_bytes()).await?;
     }
     check_volume(target, &root, uuid).await?;
     Ok((root, manifest))
@@ -549,8 +570,9 @@ async fn validate_review(
     target: &volumes::Target,
     volume: &Volume,
     manifest: &Manifest,
+    before_recovery: Option<&Manifest>,
 ) -> Result<()> {
-    let (_, current) = open_index(
+    let (root, current) = open_index(
         target,
         volume,
         &manifest.volume_uuid,
@@ -559,9 +581,12 @@ async fn validate_review(
     )
     .await?;
     ensure!(
-        serde_json::to_vec(manifest)? == serde_json::to_vec(&current)?,
+        before_recovery.unwrap_or(manifest) == &current,
         "Player contents changed. Review the sync again."
     );
+    if before_recovery.is_some() {
+        save(target, &root, manifest).await?;
+    }
     Ok(())
 }
 
@@ -587,7 +612,7 @@ async fn planned_path(root: &Path, path: &str) -> Result<PathBuf> {
 }
 
 pub async fn inventory(volume: &Volume, names: &BTreeMap<String, String>) -> Result<Report> {
-    let target = volumes::Target::open(&volume.mount).await?;
+    let target = volumes::Target::for_volume(volume, None).await?;
     let mut dirs = tokio::fs::read_dir(&target.path).await?;
     let mut result = Report::new();
     while let Some(dir) = dirs.next_entry().await? {
@@ -648,8 +673,59 @@ pub async fn inventory(volume: &Volume, names: &BTreeMap<String, String>) -> Res
         rows.sort();
         result.insert(label, rows);
     }
+    match read_playback_history(&target.path).await {
+        Ok(rows) if !rows.is_empty() => {
+            result.insert("Player listening history".into(), rows);
+        }
+        Err(error) => {
+            result.insert(
+                "Player listening history".into(),
+                vec![format!("Could not read playback log: {error}")],
+            );
+        }
+        _ => {}
+    }
     target.check().await?;
     Ok(result)
+}
+
+async fn read_playback_history(root: &Path) -> Result<Vec<String>> {
+    let log = safe_path(root, ".scrobbler.log").await?;
+    match tokio::fs::symlink_metadata(&log).await {
+        Ok(meta) => ensure!(meta.is_file(), "Invalid playback log"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    }
+    let data = read_limited(&log, 32 * 1024 * 1024).await?;
+    Ok(playback_history(std::str::from_utf8(&data)?))
+}
+
+fn playback_history(log: &str) -> Vec<String> {
+    let mut lines = log.lines();
+    if lines.next() != Some("#AUDIOSCROBBLER/1.1") {
+        return Vec::new();
+    }
+    lines
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let artist = fields.next()?;
+            let album = fields.next()?;
+            let title = fields.next()?;
+            let status = fields.nth(2)?;
+            let timestamp: i64 = fields.next()?.parse().ok()?;
+            if status != "L" || timestamp <= 0 || artist.is_empty() || title.is_empty() {
+                return None;
+            }
+            let date = time::OffsetDateTime::from_unix_timestamp(timestamp).ok()?;
+            Some(format!(
+                "{artist} · {title} · {album} · {} {:02}:{:02} UTC",
+                date.date(),
+                date.hour(),
+                date.minute()
+            ))
+        })
+        .collect()
 }
 
 fn album_folder(song: &Song) -> (String, String) {
@@ -843,7 +919,8 @@ pub async fn review_playlists<F: Future<Output = Result<()>>>(
             && manifest.playlists.iter().all(|path| playlist_path(path)),
         "Invalid player manifest paths; files were left unchanged"
     );
-    recover_publication(target, &root, &mut manifest, Layout::Playlist).await?;
+    let before_recovery =
+        recover_publication(target, &root, &mut manifest, Layout::Playlist).await?;
     let desired: BTreeSet<_> = songs().map(|song| song.id.clone()).collect();
     let mut albums = BTreeMap::new();
     let mut unique = BTreeSet::new();
@@ -1020,7 +1097,7 @@ pub async fn review_playlists<F: Future<Output = Result<()>>>(
             .push(report_line(name, "Remove playlist"));
     }
     review(report).await?;
-    validate_review(target, volume, &manifest).await?;
+    validate_review(target, volume, &manifest, before_recovery.as_ref()).await?;
     for (id, (reusable, _)) in &reusable_files {
         if *reusable {
             check_reviewed_copy(&root, &manifest.files[id]).await?;
@@ -1030,7 +1107,38 @@ pub async fn review_playlists<F: Future<Output = Result<()>>>(
         total: desired.len(),
         ..Default::default()
     };
-    let mut summary = Summary::default();
+    for song in songs() {
+        manifest
+            .listening_tags
+            .insert(song.id.clone(), (&song.track).into());
+    }
+    let tracks: std::collections::HashMap<_, _> = songs()
+        .map(|song| (song.id.as_str(), &song.track))
+        .collect();
+    let (listens, unconfirmed_listens) =
+        scrobbles::import(target, &root, &mut manifest, Some(client), |id| {
+            tracks
+                .get(id)
+                .map(|track| (*track).clone())
+                .unwrap_or_else(|| {
+                    let key = format!("navidrome:{}:{}", player.source_id, urlencoding::encode(id));
+                    Track {
+                        origin: TrackOrigin::Navidrome {
+                            source_id: player.source_id.clone(),
+                            song_id: id.to_owned(),
+                        },
+                        rating_key: key.clone(),
+                        key,
+                        ..Default::default()
+                    }
+                })
+        })
+        .await?;
+    let mut summary = Summary {
+        listens,
+        unconfirmed_listens,
+        ..Default::default()
+    };
     let mut done = BTreeSet::new();
     for song in songs() {
         if !done.insert(song.id.clone()) {
@@ -1071,6 +1179,9 @@ pub async fn review_playlists<F: Future<Output = Result<()>>>(
             tokio::fs::create_dir_all(parent).await?;
             let parent = parent.to_owned();
             let verifying = owned.is_some() && tokio::fs::try_exists(&destination).await?;
+            if verifying {
+                target.hydrate(&destination).await?;
+            }
             let temporary = crate::app::tasks::spawn_blocking(move || {
                 if verifying {
                     tempfile::NamedTempFile::new()
@@ -1082,6 +1193,7 @@ pub async fn review_playlists<F: Future<Output = Result<()>>>(
             .await??;
             let mut digest = md5::Context::new();
             let local = if let Some((entry, previous)) = reusable {
+                target.hydrate(&previous).await?;
                 let copied = copy_download(
                     tokio::fs::File::open(previous).await?,
                     entry.bytes,
@@ -1138,7 +1250,7 @@ pub async fn review_playlists<F: Future<Output = Result<()>>>(
                             signature: metadata,
                         },
                     );
-                    save(&root, &manifest).await?;
+                    save(target, &root, &manifest).await?;
                     summary.reused += 1;
                     status.reused += 1;
                     status.completed += 1;
@@ -1187,13 +1299,13 @@ pub async fn review_playlists<F: Future<Output = Result<()>>>(
         );
     }
     manifest.playlists.extend(desired_playlists.iter().cloned());
-    save(&root, &manifest).await?;
+    save(target, &root, &manifest).await?;
     for (_, path, contents, changed) in &publications {
         if !changed {
             continue;
         }
         check_volume(target, &root, &player.volume_uuid).await?;
-        atomic_write(path, contents).await?;
+        atomic_write(target, path, contents).await?;
     }
     manifest
         .retired
@@ -1207,7 +1319,7 @@ pub async fn review_playlists<F: Future<Output = Result<()>>>(
         .retired
         .retain(|path| !active_paths.contains(&path.to_lowercase()));
     manifest.playlists = desired_playlists;
-    save(&root, &manifest).await?;
+    save(target, &root, &manifest).await?;
     let remove: Vec<_> = manifest
         .files
         .keys()
@@ -1217,24 +1329,19 @@ pub async fn review_playlists<F: Future<Output = Result<()>>>(
     for id in remove {
         check_volume(target, &root, &player.volume_uuid).await?;
         let path = safe_path(&root, &manifest.files[&id].path).await?;
-        match tokio::fs::remove_file(path).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+        target.remove(&path).await?;
         manifest.files.remove(&id);
         summary.removed += 1;
     }
     for path in &manifest.retired {
         check_volume(target, &root, &player.volume_uuid).await?;
-        match tokio::fs::remove_file(safe_path(&root, path).await?).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+        target.remove(&safe_path(&root, path).await?).await?;
     }
+    manifest
+        .listening_tags
+        .retain(|id, _| manifest.files.contains_key(id));
     manifest.retired.clear();
-    save(&root, &manifest).await?;
+    save(target, &root, &manifest).await?;
     summary.playlist = publications
         .into_iter()
         .next()

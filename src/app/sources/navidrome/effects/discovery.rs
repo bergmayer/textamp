@@ -234,12 +234,6 @@ pub fn intercept(
         Action::Search(SearchAction::AdventureLauncherGenerate) => {
             if let Some(l) = state.popups.adventure_launcher() {
                 if let (Some(start), Some(end)) = (l.start_track.clone(), l.end_track.clone()) {
-                    if let Err(error) =
-                        crate::services::sonic_adventure::validate_endpoints(&start, &end)
-                    {
-                        state.set_error(error.to_string());
-                        return Some(vec![]);
-                    }
                     let count = match crate::app::journey::track_count(&l.track_count_input) {
                         Ok(count) => count,
                         Err(error) => {
@@ -247,21 +241,10 @@ pub fn intercept(
                             return Some(vec![]);
                         }
                     };
-                    if let Some(launcher) = state.popups.adventure_launcher_mut() {
-                        launcher.stage = crate::app::state::JourneyStage::Generating;
-                    }
                     adventure(state, tx, session, start, end, count);
                 } else {
                     state.set_error("Choose a start and end track".into());
                 }
-            }
-        }
-        Action::Settings(SettingsAction::SetAdventureLength(count)) => {
-            if let (Some(start), Some(end)) = (
-                state.adventure.start_track.clone(),
-                state.adventure.end_track.clone(),
-            ) {
-                adventure(state, tx, session, start, end, count.clamp(5, 100));
             }
         }
         _ => return None,
@@ -380,12 +363,9 @@ fn adventure(
         state.set_error(error.to_string());
         return;
     }
-    state.adventure.generating = true;
-    state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
-    let request_id = state.adventure_request_id;
     let api = Recommendations::new(state, session);
     let session = session.clone();
-    spawn(state, tx, "adventure", async move {
+    spawn_scoped(state, tx, "adventure", |_, request_id| async move {
         let result = async {
             let start_id = session.id(&start.rating_key)?;
             let end_id = session.id(&end.rating_key)?;
@@ -397,4 +377,9 @@ fn adventure(
             SettingsAction::AdventureGenerated { request_id, result }.into(),
         ])
     });
+    if let Some(launcher) = state.popups.adventure_launcher_mut() {
+        launcher.stage = crate::app::state::JourneyStage::Generating {
+            request_id: state.sources.nav_request_id,
+        };
+    }
 }

@@ -27,7 +27,7 @@ struct GlyphSpan {
     line: ShapedLine,
 }
 
-fn queue_glyph(
+fn sidebar_glyph(
     frame: &PresentedFrame,
     x: usize,
     y: usize,
@@ -36,18 +36,28 @@ fn queue_glyph(
     if cell.text.is_empty() || cell.text == " " {
         return None;
     }
-    let (area, tool) = frame
-        .queue_menus
-        .iter()
-        .find(|(area, _)| area.contains(ratatui::layout::Position::new(x as u16, y as u16)))?;
-    if cell.text != crate::ui::screens::now_playing::queue_menu_symbol(*tool) {
-        return None;
-    }
-    let glyph = match tool {
-        crate::app::queue_controls::Menu::QueueType => gpui_kit::assets::IconName::ListStart,
-        crate::app::queue_controls::Menu::Tools => gpui_kit::assets::IconName::ClipboardPenLine,
+    use gpui_kit::assets::IconName;
+    let (area, symbol) = frame.sidebar_symbols.iter().find(|(area, symbol)| {
+        cell.text == *symbol && area.contains(ratatui::layout::Position::new(x as u16, y as u16))
+    })?;
+    let glyph = match *symbol {
+        "♫" => IconName::ListMusic,
+        "◷" => IconName::ClockArrowLeft,
+        "◉" => IconName::ListStart,
+        "✎" => IconName::ClipboardPenLine,
+        "×" => IconName::Trash,
+        "⌃" => IconName::ChevronUp,
+        "⌄" => IconName::ChevronDown,
+        "‹" => IconName::ChevronLeft,
+        "◧" => IconName::PanelLeft,
+        "≋" => IconName::Radio,
+        "⚙" => IconName::Settings2,
+        "/" => IconName::Search,
+        ":" => IconName::Command,
+        "←" => IconName::ChevronLeft,
+        _ => return None,
     };
-    Some((ratatui::layout::Rect::new(area.x, area.y, 1, 1), glyph))
+    Some((*area, glyph))
 }
 
 fn transport_glyph(
@@ -58,6 +68,9 @@ fn transport_glyph(
     use crate::app::transport_controls::TransportControl;
     use gpui_kit::assets::IconName;
     match control {
+        TransportControl::Sidebar => Some(IconName::PanelLeft),
+        TransportControl::Clear => Some(IconName::Trash),
+        TransportControl::Queue => Some(IconName::ListMusic),
         TransportControl::Previous => Some(IconName::SkipBack),
         TransportControl::Next => Some(IconName::SkipForward),
         TransportControl::Menu => Some(IconName::Ellipsis),
@@ -503,7 +516,7 @@ impl TextSurface {
                     item.foreground
                 };
                 if transport_cell(frame, x, y)
-                    || queue_glyph(frame, x, y).is_some()
+                    || sidebar_glyph(frame, x, y).is_some()
                     || super::text_boxdrawing::supports(&item.text)
                 {
                     x += 1;
@@ -532,7 +545,7 @@ impl TextSurface {
                             || next.wide != 0
                             || next.text.starts_with('\u{10eeee}')
                             || transport_cell(frame, x, y)
-                            || queue_glyph(frame, x, y).is_some()
+                            || sidebar_glyph(frame, x, y).is_some()
                             || super::text_boxdrawing::supports(&next.text)
                         {
                             break;
@@ -640,7 +653,7 @@ impl TextSurface {
                         } else {
                             item.foreground
                         };
-                        if let Some((area, glyph)) = queue_glyph(&frame, x, y) {
+                        if let Some((area, glyph)) = sidebar_glyph(&frame, x, y) {
                             let extent = cell.height.min(px(14.));
                             let origin = bounds.origin
                                 + point(
@@ -1064,6 +1077,11 @@ impl Render for TextSurface {
                         this.selection = Some((cell, cell));
                         this.selecting = true;
                         cx.notify();
+                    } else if this.frame.as_ref().is_some_and(|frame| {
+                        let cell = this.cell_at(event.position);
+                        frame.mini_artwork.iter().any(|r| r.contains(cell.into()))
+                    }) {
+                        window.dispatch_action(Box::new(super::EnterMiniPlayer), cx);
                     } else if let Some((offset, anchor)) = this.input_region().and_then(|region| {
                         let cell = this.cell_at(event.position);
                         region.area.contains((cell.0, cell.1).into()).then(|| {
@@ -1560,6 +1578,80 @@ mod tests {
         }
     }
     #[gpui_test_support::test]
+    fn embedded_artwork_opens_the_shared_mini_player(cx: &mut TestAppContext) {
+        use super::super::{Desktop, WindowRegistry, WindowRole};
+        use gpui_kit::{AppContext, Context, Entity};
+        cx.update(super::super::init);
+        let mut initial = super::super::engine::Snapshot::default();
+        initial.presentation = crate::app::windowed_presentation::Presentation::windowed();
+        let preparation = initial
+            .presentation
+            .request(crate::app::launch::WindowedMode::Text)
+            .unwrap();
+        initial.presentation.commit(preparation);
+        let (engine, _updates, _commands) = super::super::engine::Engine::fixture(initial.clone());
+        let (host, cx) = cx.add_window_view(move |window, cx: &mut Context<Desktop>| {
+            let mut desktop = Desktop::new(
+                Arc::new(engine),
+                WindowRole::Library,
+                WindowRegistry::default(),
+                window,
+                cx,
+            );
+            let port = desktop.engine.commands.clone();
+            let surface = cx.new(|cx| TextSurface::new(port, preparation.identity, window, cx));
+            desktop.text_surface = Some((preparation.identity, surface));
+            desktop.snapshot = initial;
+            desktop
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let artwork = cx.update(|window, cx| {
+            host.update(cx, |host, cx| {
+                let surface: Entity<TextSurface> = host.text_surface.as_ref().unwrap().1.clone();
+                surface.update(cx, |view, cx| {
+                    let viewport = view.sent.expect("terminal viewport");
+                    let mut vt = crate::text_mode::vt::Vt::new(
+                        viewport.metrics.columns,
+                        viewport.metrics.rows,
+                    )
+                    .unwrap();
+                    view.apply(
+                        Arc::new(PresentedFrame {
+                            identity: view.identity,
+                            serial: 1,
+                            viewport,
+                            frame: vt.frame().unwrap(),
+                            breadcrumbs: vec![],
+                            editor: None,
+                            mini_artwork: vec![ratatui::layout::Rect::new(2, 2, 3, 2)],
+                            sidebar_symbols: vec![],
+                            graphical_visualizer: None,
+                            transport_controls: vec![],
+                            muted: false,
+                            playing: false,
+                            position_ms: 0,
+                            duration_ms: 0,
+                            input_region: None,
+                        }),
+                        window,
+                        cx,
+                    );
+                    view.bounds.origin + point(view.cell.width * 3., view.cell.height * 3.)
+                })
+            })
+        });
+        cx.simulate_click(artwork, Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let cover = cx
+            .debug_bounds("mini-artwork-return")
+            .expect("shared mini player");
+        cx.simulate_click(cover.center(), Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("mini-artwork-return").is_none());
+        assert!(host.read_with(cx, |host, _| host.text_surface.is_some()
+            && host.mini_return_size.is_none()));
+    }
+    #[gpui_test_support::test]
     fn wide_graphemes_reserve_two_cells_without_shifting_the_following_text(
         cx: &mut TestAppContext,
     ) {
@@ -1590,7 +1682,8 @@ mod tests {
             frame: vt.frame().unwrap(),
             breadcrumbs: Vec::new(),
             editor: None,
-            queue_menus: Vec::new(),
+            mini_artwork: vec![],
+            sidebar_symbols: Vec::new(),
             graphical_visualizer: None,
             transport_controls: Vec::new(),
             muted: false,
@@ -1664,7 +1757,8 @@ mod tests {
             frame: vt.frame().unwrap(),
             breadcrumbs: Vec::new(),
             editor: Some(document),
-            queue_menus: Vec::new(),
+            mini_artwork: vec![],
+            sidebar_symbols: Vec::new(),
             graphical_visualizer: None,
             transport_controls: Vec::new(),
             muted: false,

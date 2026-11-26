@@ -2,7 +2,7 @@
 use super::*;
 
 /// Render the same themed ANSI cell artwork used by the terminal frontend.
-pub(super) fn themed_artwork(cx: &App) -> AnyElement {
+pub(super) fn themed_artwork(id: &'static str, cx: &App) -> AnyElement {
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
@@ -35,8 +35,8 @@ pub(super) fn themed_artwork(cx: &App) -> AnyElement {
         _ => gpui_kit::black(),
     };
     div()
-        .id("now-playing-ansi-logo")
-        .debug_selector(|| "now-playing-ansi-logo".into())
+        .id(id)
+        .debug_selector(move || id.into())
         .role(Role::Image)
         .aria_label("Textamp ANSI logo")
         .w_full()
@@ -140,51 +140,13 @@ pub(super) fn themed_artwork(cx: &App) -> AnyElement {
 }
 
 pub fn content(cx: &App) -> AnyElement {
-    let rows: Vec<Vec<char>> = include_str!("about-logo.txt")
-        .lines()
-        .skip_while(|line| line.trim().is_empty())
-        .map(|line| line.chars().collect())
-        .collect();
-    let columns = rows.iter().map(Vec::len).max().unwrap_or(1) as f32;
-    let height = rows.len() as f32;
     let artwork = div()
-        .id("about-ansi-logo")
-        .debug_selector(|| "about-ansi-logo".into())
-        .role(Role::Image)
-        .aria_label("Textamp ANSI logo")
         .w_full()
         .max_w(px(480.))
-        .aspect_ratio(columns / (height * 1.45))
+        .h(px(140.))
+        .flex()
         .flex_none()
-        .child(
-            canvas(
-                move |_, _, _| (),
-                move |bounds, _, window, _| {
-                    let cell = bounds.size.width / columns;
-                    let cell_height = bounds.size.height / height;
-                    for (y, row) in rows.iter().enumerate() {
-                        let color = rgb(match y {
-                            0..=4 => 0x19c7ce,
-                            5..=8 => 0x39a8de,
-                            _ => 0x7169ed,
-                        });
-                        for (x, c) in row.iter().enumerate() {
-                            if *c == '█' {
-                                window.paint_quad(fill(
-                                    Bounds::new(
-                                        bounds.origin
-                                            + point(cell * x as f32, cell_height * y as f32),
-                                        size(cell, cell_height),
-                                    ),
-                                    color,
-                                ));
-                            }
-                        }
-                    }
-                },
-            )
-            .size_full(),
-        );
+        .child(themed_artwork("about-ansi-logo", cx));
     div()
         .flex()
         .flex_col()

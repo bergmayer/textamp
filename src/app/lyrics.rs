@@ -294,6 +294,85 @@ pub fn open(
     }
 }
 
+#[derive(Debug)]
+pub struct InlineLyrics {
+    generation: u64,
+    track_key: String,
+    request: u64,
+    text: Option<String>,
+}
+
+pub fn inline_text<'a>(state: &'a AppState, track: &'a Track) -> Option<&'a str> {
+    track
+        .lyrics
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            state
+                .inline_lyrics
+                .as_ref()
+                .filter(|inline| {
+                    inline.generation == state.library_generation
+                        && inline.track_key == track.rating_key
+                })
+                .and_then(|inline| inline.text.as_deref())
+        })
+}
+
+fn reconcile_inline(state: &mut AppState, events: &mpsc::Sender<Event>) {
+    let track = match state.view {
+        super::View::NowPlaying if state.now_playing_details_visible => state.current_track(),
+        super::View::Browse => {
+            super::sonic_details::selected_track(state).or_else(|| state.pane_track())
+        }
+        super::View::Queue if state.track_pane_open => {
+            state.playback_tracks().get(state.list_state.queue_index)
+        }
+        _ => None,
+    };
+    let target = track
+        .filter(|track| track.lyrics.as_deref().is_none_or(|s| s.trim().is_empty()))
+        .zip(state.sources.active.navidrome())
+        .filter(|_| !state.downloads.is_offline());
+    let Some((track, session)) = target else {
+        state.inline_lyrics = None;
+        state.sources.nav_tasks.remove("detail-lyrics");
+        return;
+    };
+    if state.inline_lyrics.as_ref().is_some_and(|inline| {
+        inline.generation == state.library_generation && inline.track_key == track.rating_key
+    }) {
+        return;
+    }
+    let track = track.clone();
+    let session = session.clone();
+    let track_key = track.rating_key.clone();
+    super::sources::navidrome::effects::spawn_scoped(
+        state,
+        events,
+        "detail-lyrics",
+        move |generation, request| async move {
+            let result = load(&session, &track, false)
+                .await
+                .map_err(|error| error.to_string());
+            Ok(vec![
+                PlaybackAction::LyricsLoaded {
+                    generation,
+                    request,
+                    result,
+                }
+                .into(),
+            ])
+        },
+    );
+    state.inline_lyrics = Some(InlineLyrics {
+        generation: state.library_generation,
+        track_key,
+        request: state.sources.nav_request_id,
+        text: None,
+    });
+}
+
 pub fn complete(
     state: &mut AppState,
     generation: u64,
@@ -301,6 +380,26 @@ pub fn complete(
     result: Result<Vec<Document>, String>,
 ) {
     if generation != state.library_generation {
+        return;
+    }
+    if let Some(inline) = state
+        .inline_lyrics
+        .as_mut()
+        .filter(|entry| entry.request == request && entry.generation == generation)
+    {
+        inline.text = match result {
+            Ok(documents) => documents.first().map(|doc| {
+                doc.line
+                    .iter()
+                    .map(|line| line.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }),
+            Err(error) => {
+                tracing::debug!(%error, "Could not load inline lyrics");
+                None
+            }
+        };
         return;
     }
     if state.popups.lyrics().is_some_and(|panel| {
@@ -330,6 +429,7 @@ pub fn complete(
 
 /// Track changes replace the owned request; closed panels cancel their request lease.
 pub fn reconcile(state: &mut AppState, events: &mpsc::Sender<Event>) {
+    reconcile_inline(state, events);
     let Some(panel) = state.popups.lyrics() else {
         state.sources.nav_tasks.remove("lyrics");
         return;

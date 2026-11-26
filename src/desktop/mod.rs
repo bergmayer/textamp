@@ -13,6 +13,8 @@ mod frame_tests;
 #[cfg(target_os = "macos")]
 mod icon;
 mod keyboard;
+#[cfg(target_os = "macos")]
+mod library_sheet;
 mod menu_catalog;
 mod meters;
 mod motion;
@@ -79,7 +81,8 @@ gpui_kit::actions!(
         HideOthers,
         ShowAll,
         ToggleNativeFullscreen,
-        CycleApplicationMode
+        CycleApplicationMode,
+        EnterMiniPlayer
     ]
 );
 fn native_menus(radio: &[String]) -> Vec<Menu> {
@@ -106,9 +109,6 @@ fn native_menus_for_snapshot(snapshot: &Snapshot) -> Vec<Menu> {
     menus
 }
 
-#[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
-#[action(no_json)]
-struct LargeAlbumCovers;
 #[derive(Clone, PartialEq, Debug, gpui_kit::Action)]
 #[action(no_json)]
 struct RadioCommand {
@@ -281,7 +281,7 @@ fn monitor_windows(
         let mut surface_request = 0;
         let mut surface_id = None;
         let mut menus = None;
-        let mut save_files = std::collections::HashSet::new();
+        let mut playlist_files = std::collections::HashSet::new();
         let mut presentation_identity = engine.snapshot.borrow().presentation.identity();
         let mut updates = engine.snapshot.clone();
         while updates.changed().await.is_ok() {
@@ -297,12 +297,12 @@ fn monitor_windows(
                         .surfaces
                         .iter()
                         .chain(snapshot.surface.iter())
-                        .filter(|model| model.save_file.is_some())
+                        .filter(|model| model.playlist_file.is_some())
                         .collect();
-                    save_files.retain(|id| models.iter().any(|model| &model.id == id));
+                    playlist_files.retain(|id| models.iter().any(|model| &model.id == id));
                     for model in models {
-                        if save_files.insert(model.id.clone()) {
-                            surface_view::prompt_export(model, engine.commands.clone(), cx);
+                        if playlist_files.insert(model.id.clone()) {
+                            surface_view::prompt_playlist_file(model, engine.commands.clone(), cx);
                         }
                     }
                 }
@@ -375,7 +375,7 @@ fn monitor_windows(
                 for model in snapshot
                     .surfaces
                     .iter()
-                    .filter(|model| model.save_file.is_none())
+                    .filter(|model| model.playlist_file.is_none())
                 {
                     if !workflows.contains_key(&model.id) {
                         match surface_view::open_native(
@@ -408,9 +408,7 @@ fn monitor_windows(
                         cx,
                     );
                 }
-                if snapshot.player_window_request != requests.0
-                    && (!snapshot.split_player || snapshot.player.fullscreen)
-                {
+                if snapshot.player_window_request != requests.0 {
                     let _ = open_player_windows(engine.clone(), windows.clone(), cx);
                 }
                 if snapshot.settings_request != requests.1 {
@@ -538,6 +536,11 @@ fn open_desktop_window(
 enum OverlayHost {
     #[default]
     Closed,
+    #[cfg(target_os = "macos")]
+    LibrarySheet {
+        id: String,
+        sheet: library_sheet::Sheet,
+    },
     Visible {
         id: String,
         window: AnyWindowHandle,
@@ -550,6 +553,8 @@ impl OverlayHost {
     fn id(&self) -> Option<&String> {
         match self {
             Self::Closed => None,
+            #[cfg(target_os = "macos")]
+            Self::LibrarySheet { id, .. } => Some(id),
             Self::Visible { id, .. } | Self::Dismissing { id } => Some(id),
         }
     }
@@ -559,6 +564,8 @@ impl OverlayHost {
                 *self = Self::Dismissing { id };
                 Some(window)
             }
+            #[cfg(target_os = "macos")]
+            Self::LibrarySheet { .. } => None,
             other => {
                 *self = other;
                 None
@@ -588,6 +595,7 @@ struct Desktop {
     syncing_filter: bool,
     filter_expected: String,
     pending_centered_rows: std::collections::HashMap<String, usize>,
+    grid_widths: std::collections::HashMap<String, Pixels>,
     initial_column_height: Pixels,
     engine: std::sync::Arc<Engine>,
     role: WindowRole,
@@ -596,6 +604,7 @@ struct Desktop {
     arrow_repeat: navigation::ArrowRepeat,
     rapid_navigation: bool,
     sidebar_visible: bool,
+    sheet_sidebar_root: bool,
     sidebar_width: Pixels,
     jump_viewports:
         std::collections::VecDeque<(u64, std::collections::HashMap<String, Point<Pixels>>)>,
@@ -612,11 +621,11 @@ struct Desktop {
     seek_expected: f32,
     volume_expected: f32,
     visualizer_bounds: Option<Bounds<Pixels>>,
+    mini_return_size: Option<Size<Pixels>>,
+    show_visualizer: bool,
     sheet_size: Size<Pixels>,
     queue_width: Pixels,
-    queue_progress: f32,
     sheet_header_height: Pixels,
-    transport_artwork_x: f32,
     column_motion_until: Option<std::time::Instant>,
     drawn_presentation: Option<crate::app::windowed_presentation::Identity>,
     column_layout: Option<column_layout::Layout>,
@@ -626,6 +635,7 @@ struct Desktop {
     pane_presented: std::collections::HashMap<motion::PaneKey, Bounds<Pixels>>,
     waveform_scrub: Option<(u64, f32)>,
     queue_drop_after: Option<(browser::Target, bool)>,
+    pane_focus: keyboard::PaneFocus,
     seek_focus: FocusHandle,
     volume_focus: FocusHandle,
     scroll_handles: std::collections::HashMap<String, UniformListScrollHandle>,
@@ -638,16 +648,41 @@ struct Desktop {
     letter_shortcuts: Option<(String, std::time::Instant)>,
     _subscriptions: Vec<Subscription>,
     radio_browser: Option<Entity<surface_view::SurfaceView>>,
+    player_reader: Option<Entity<surface_view::SurfaceView>>,
     workspace_view: Option<Entity<surface_view::SurfaceView>>,
     player_devices: Option<Entity<player_devices::PlayerDevices>>,
     overlay: OverlayHost,
     transport_art: Option<std::sync::Arc<Image>>,
     inspector_art: Option<std::sync::Arc<Image>>,
-    image_cache: std::collections::HashMap<String, std::sync::Arc<Image>>,
+    image_cache: std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<Image>>>,
     visible_rows: std::collections::HashMap<String, (std::ops::Range<usize>, usize, u64)>,
     _refresh: Task<()>,
 }
 impl Desktop {
+    /// Encode artwork when the rendered view asks for it.
+    fn cached_artwork(&self, key: &str) -> Option<std::sync::Arc<Image>> {
+        if let Some(image) = self.image_cache.borrow().get(key).cloned() {
+            return Some(image);
+        }
+        let bytes = self.snapshot.images.get(key)?;
+        let image = player::image_from_bytes(bytes, self.snapshot.artwork_mode)?;
+        self.image_cache
+            .borrow_mut()
+            .insert(key.to_owned(), image.clone());
+        Some(image)
+    }
+
+    fn grid_columns_for(&self, snapshot: &Snapshot, column: usize) -> usize {
+        snapshot
+            .columns
+            .get(column)
+            .and_then(|c| self.grid_widths.get(&c.identity))
+            .map_or(2, |width| filter::columns_for_width(f32::from(*width)))
+    }
+    fn grid(&self, snapshot: &Snapshot, column: usize) -> crate::app::view_options::AlbumGrid {
+        filter::grid(snapshot, column, self.grid_columns_for(snapshot, column))
+    }
+
     fn new(
         engine: std::sync::Arc<Engine>,
         role: WindowRole,
@@ -771,6 +806,8 @@ impl Desktop {
                     gpui_kit::component::input::InputEvent::PressEnter { .. }
                 ) {
                     let _ = this.engine.commands.try_send(Command::Navigate {
+                        grid_columns: this
+                            .grid_columns_for(&this.snapshot, this.snapshot.focused_column),
                         column_delta: 1,
                         row_delta: 0,
                     });
@@ -838,12 +875,14 @@ impl Desktop {
             syncing_filter: false,
             filter_expected: String::new(),
             pending_centered_rows: Default::default(),
+            grid_widths: Default::default(),
             initial_column_height: window.viewport_size().height,
             inspector_art: None,
             transport_art: None,
             image_cache: Default::default(),
             visible_rows: Default::default(),
             radio_browser: None,
+            player_reader: None,
             workspace_view: None,
             player_devices: None,
             overlay: OverlayHost::Closed,
@@ -854,6 +893,7 @@ impl Desktop {
             arrow_repeat: navigation::ArrowRepeat::default(),
             rapid_navigation: false,
             sidebar_visible: true,
+            sheet_sidebar_root: true,
             sidebar_width: px(motion::SIDEBAR_WIDTH),
             jump_viewports: Default::default(),
             sidebar_scroll: ScrollHandle::new(),
@@ -876,24 +916,24 @@ impl Desktop {
             seek_expected: 0.,
             volume_expected: 0.,
             visualizer_bounds: None,
+            mini_return_size: None,
+            show_visualizer: true,
             sheet_size: size(
                 window.viewport_size().width,
                 (window.viewport_size().height
                     - gpui_kit::component::TITLE_BAR_HEIGHT
-                    - px(crate::ui::layout::FOOTER_HEIGHT))
+                    - px(motion::FOOTER_HEIGHT))
                 .max(px(114.)),
             ),
             queue_width: px(motion::SIDEBAR_WIDTH),
-            queue_progress: 0.,
             sheet_header_height: px(crate::ui::layout::player_header(
                 f32::from(
                     window.viewport_size().height
                         - gpui_kit::component::TITLE_BAR_HEIGHT
-                        - px(crate::ui::layout::FOOTER_HEIGHT),
+                        - px(motion::FOOTER_HEIGHT),
                 ),
                 f32::from(window.viewport_size().width),
             )),
-            transport_artwork_x: 172.,
             column_motion_until: None,
             drawn_presentation: None,
             column_layout: None,
@@ -903,6 +943,7 @@ impl Desktop {
             pane_presented: Default::default(),
             waveform_scrub: None,
             queue_drop_after: None,
+            pane_focus: keyboard::PaneFocus::new(cx),
             seek_focus: cx.focus_handle().tab_stop(true),
             volume_focus: cx.focus_handle().tab_stop(true),
             scroll_handles: Default::default(),
@@ -923,6 +964,29 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if snapshot.player.artwork != self.snapshot.player.artwork
+            || snapshot.artwork_mode != self.snapshot.artwork_mode
+        {
+            self.transport_art = snapshot
+                .player
+                .artwork
+                .as_ref()
+                .and_then(|bytes| player::image_from_bytes(bytes, snapshot.artwork_mode));
+        }
+        // A gesture retains its starting playback identity through release.
+        // If the track changes mid-drag, the engine rejects that old request.
+        if self.scrub.is_none() {
+            let value = if snapshot.duration_ms > 0 {
+                snapshot.position_ms as f32 / snapshot.duration_ms as f32
+            } else {
+                0.
+            };
+            self.seek_expected = value;
+            if (self.seek_slider.read(cx).value().end() - value).abs() > 0.00001 {
+                self.seek_slider
+                    .update(cx, |s, cx| s.set_value(value, window, cx));
+            }
+        }
         let first_graphical_frame = !self.initial_window_ready
             && self.role == WindowRole::Library
             && snapshot.presentation.pending().is_none()
@@ -1003,7 +1067,8 @@ impl Desktop {
                                                 .get(&model.identity)
                                                 .map_or(0., |handle| -f32::from(handle.offset().y));
                                             let position = offset / model.row_height();
-                                            let display = position.floor().max(0.) as usize;
+                                            let band = position.floor().max(0.) as usize;
+                                            let display = self.grid(&snapshot, column).start(band);
                                             let original = filter::row(&snapshot, column, display)?;
                                             Some(crate::app::view_continuity::ColumnAnchor {
                                                 column,
@@ -1193,9 +1258,7 @@ impl Desktop {
             window.remove_window();
             return;
         }
-        if self.role == WindowRole::NowPlaying
-            && (!snapshot.separate_player || (snapshot.split_player && !snapshot.player.fullscreen))
-        {
+        if self.role == WindowRole::NowPlaying && !snapshot.separate_player {
             let _ = open_desktop_window(
                 self.engine.clone(),
                 self.windows.clone(),
@@ -1205,9 +1268,6 @@ impl Desktop {
             window.remove_window();
             return;
         }
-        if snapshot.split_player && !snapshot.player.fullscreen {
-            self.presentation = WindowRole::Library;
-        }
         let entering_multiple_windows = self.role == WindowRole::Library
             && snapshot.separate_player
             && snapshot.presentation.active() == Some(crate::app::launch::WindowedMode::Gui)
@@ -1216,10 +1276,15 @@ impl Desktop {
         if matches!(self.role, WindowRole::Library | WindowRole::NowPlaying)
             && (snapshot.player_window_request != self.snapshot.player_window_request
                 || entering_multiple_windows)
-            && (!snapshot.split_player || snapshot.player.fullscreen)
         {
             if !snapshot.separate_player {
-                self.presentation = WindowRole::NowPlaying;
+                self.presentation = if snapshot.sheet_browser {
+                    self.sheet_sidebar_root =
+                        snapshot.sheet_root_request == Some(snapshot.player_window_request);
+                    WindowRole::Library
+                } else {
+                    WindowRole::NowPlaying
+                };
                 window.activate_window();
             } else if self.role == WindowRole::NowPlaying {
                 window.activate_window();
@@ -1261,6 +1326,9 @@ impl Desktop {
         } else {
             self.presentation
         } != WindowRole::Library;
+        if !snapshot.queue_open && !snapshot.separate_player {
+            self.queue_focused = false;
+        }
         if self.snapshot.workspace.is_some()
             && !self.snapshot.player.active
             && (snapshot.workspace.is_none() || snapshot.player.active)
@@ -1268,7 +1336,6 @@ impl Desktop {
             self.focus.focus(window, cx);
         }
         if snapshot.player.active {
-            snapshot.split_player = false;
             if snapshot.separate_player {
                 snapshot.surface = None;
                 snapshot.section = "Now Playing".into();
@@ -1289,7 +1356,7 @@ impl Desktop {
                     .iter()
                     .filter(|column| !column.hidden && !column.metadata)
                     .count(),
-                snapshot.preview.is_some(),
+                snapshot.has_inspector(),
             )
         };
         let columns_changed = snapshot
@@ -1346,10 +1413,13 @@ impl Desktop {
         }
         if snapshot.sidebar_cursor != self.snapshot.sidebar_cursor
             && let Some(index) = snapshot.sidebar_cursor
-            && let Some(position) =
-                sidebar::visible_rows(&snapshot.sidebar, &snapshot.collapsed_sidebar_sections)
-                    .iter()
-                    .position(|row| *row == index)
+            && let Some(position) = sidebar::visible_rows(
+                &snapshot.sidebar,
+                &snapshot.collapsed_sidebar_sections,
+                snapshot.sidebar_visible == Some(false),
+            )
+            .iter()
+            .position(|row| *row == index)
         {
             self.sidebar_scroll.scroll_to_item(position);
         }
@@ -1362,15 +1432,6 @@ impl Desktop {
         };
         if preview_track(&snapshot) != preview_track(&self.snapshot) {
             self.details_scroll.set_offset(point(px(0.), px(0.)));
-        }
-        if snapshot.player.artwork != self.snapshot.player.artwork
-            || snapshot.artwork_mode != self.snapshot.artwork_mode
-        {
-            self.transport_art = snapshot
-                .player
-                .artwork
-                .as_ref()
-                .and_then(|bytes| player::image_from_bytes(bytes, snapshot.artwork_mode));
         }
         if snapshot.generation != self.snapshot.generation
             || snapshot.filter.column != self.snapshot.filter.column
@@ -1414,31 +1475,22 @@ impl Desktop {
                 cx,
             );
         }
-        if !std::sync::Arc::ptr_eq(&snapshot.images, &self.snapshot.images)
-            || snapshot.artwork_mode != self.snapshot.artwork_mode
-        {
-            self.image_cache
-                .retain(|key, _| snapshot.images.contains_key(key));
-            for (key, bytes) in snapshot.images.iter() {
-                if (self
-                    .snapshot
+        if snapshot.artwork_mode != self.snapshot.artwork_mode {
+            self.image_cache.get_mut().clear();
+        } else if !std::sync::Arc::ptr_eq(&snapshot.images, &self.snapshot.images) {
+            self.image_cache.get_mut().retain(|key, _| {
+                self.snapshot
                     .images
                     .get(key)
-                    .is_none_or(|old| !std::sync::Arc::ptr_eq(old, bytes))
-                    || snapshot.artwork_mode != self.snapshot.artwork_mode)
-                    && let Some(image) = player::image_from_bytes(bytes, snapshot.artwork_mode)
-                {
-                    self.image_cache.insert(key.clone(), image);
-                }
-            }
+                    .zip(snapshot.images.get(key))
+                    .is_some_and(|(old, new)| std::sync::Arc::ptr_eq(old, new))
+            });
         }
         if snapshot
             .columns
             .iter()
             .zip(&self.snapshot.columns)
-            .any(|(a, b)| {
-                a.artwork_visible != b.artwork_visible || a.large_artwork != b.large_artwork
-            })
+            .any(|(a, b)| a.album_grid != b.album_grid || a.artwork_visible != b.artwork_visible)
         {
             self.visible_rows.clear();
         }
@@ -1450,20 +1502,6 @@ impl Desktop {
                 .as_ref()
                 .and_then(|bytes| player::image_from_bytes(bytes, snapshot.artwork_mode));
         }
-        // A gesture retains its starting playback identity through release.
-        // If the track changes mid-drag, the engine rejects that old request.
-        if self.scrub.is_none() {
-            let value = if snapshot.duration_ms > 0 {
-                snapshot.position_ms as f32 / snapshot.duration_ms as f32
-            } else {
-                0.
-            };
-            self.seek_expected = value;
-            if (self.seek_slider.read(cx).value().end() - value).abs() > 0.00001 {
-                self.seek_slider
-                    .update(cx, |s, cx| s.set_value(value, window, cx));
-            }
-        }
         if !self.volume_dragging
             && (self.volume_slider.read(cx).value().end() - snapshot.volume).abs() > 0.0001
         {
@@ -1471,8 +1509,24 @@ impl Desktop {
             self.volume_slider
                 .update(cx, |s, cx| s.set_value(snapshot.volume, window, cx));
         }
+        self.grid_widths.retain(|key, _| {
+            snapshot
+                .columns
+                .iter()
+                .any(|column| &column.identity == key)
+        });
+        if snapshot.showing_queue_history
+            && (snapshot.history_cursor != self.snapshot.history_cursor
+                || !self.snapshot.showing_queue_history)
+        {
+            self.scroll_handles
+                .entry("listening-history".into())
+                .or_default()
+                .scroll_to_item(snapshot.history_cursor, ScrollStrategy::Nearest);
+        }
         self.scroll_handles.retain(|key, _| {
-            snapshot.columns.iter().any(|c| &c.identity == key)
+            key == "listening-history"
+                || snapshot.columns.iter().any(|c| &c.identity == key)
                 || snapshot
                     .playback_queue
                     .as_ref()
@@ -1585,10 +1639,17 @@ impl Desktop {
                 } else {
                     selected + filter::header_count(&snapshot, snapshot.focused_column)
                 };
-                if snapshot.navigation_origin == browser::Origin::AlphabetJump {
+                if column.artist_header.is_some() || column.album_page.is_some() {
+                    self.pending_centered_rows
+                        .insert(column.identity.clone(), row);
+                } else if snapshot.navigation_origin == browser::Origin::AlphabetJump {
+                    let row = self.grid(&snapshot, snapshot.focused_column).band(row);
                     handle.scroll_to_item_strict(row, ScrollStrategy::Center);
                 } else {
-                    handle.scroll_to_item(row, ScrollStrategy::Nearest);
+                    handle.scroll_to_item(
+                        self.grid(&snapshot, snapshot.focused_column).band(row),
+                        ScrollStrategy::Nearest,
+                    );
                 }
             }
         }
@@ -1613,19 +1674,20 @@ impl Desktop {
                     .and_then(|indices| indices.iter().position(|&index| index == original))
                     .unwrap_or(original)
                     + filter::header_count(&snapshot, anchor.column);
+                let grid = self.grid(&snapshot, anchor.column);
                 let handle = self
                     .scroll_handles
                     .entry(column.identity.clone())
                     .or_default();
                 handle.set_offset(point(
                     px(0.),
-                    -px((display as f32 + anchor.fraction) * column.row_height()),
+                    -px((grid.band(display) as f32 + anchor.fraction) * column.row_height()),
                 ));
                 let selected = filter::indices(&snapshot, anchor.column)
                     .and_then(|indices| indices.iter().position(|&index| index == column.selected))
                     .unwrap_or(column.selected)
                     + filter::header_count(&snapshot, anchor.column);
-                handle.scroll_to_item(selected, ScrollStrategy::Nearest);
+                handle.scroll_to_item(grid.band(selected), ScrollStrategy::Nearest);
                 if anchor.pointer_pinned {
                     self.scroll_pin = Some(column.identity.clone());
                 }
@@ -1681,7 +1743,7 @@ impl Desktop {
             for model in snapshot
                 .surfaces
                 .iter()
-                .filter(|model| model.save_file.is_none())
+                .filter(|model| model.playlist_file.is_none())
             {
                 if !workflow_windows.contains_key(&model.id) {
                     match surface_view::open_native(
@@ -1711,10 +1773,14 @@ impl Desktop {
             for (_, handle) in workflow_windows.drain() {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             }
+            let dock_reader = (snapshot.player.active || snapshot.sheet_browser)
+                && self.mini_return_size.is_none();
             let surface_id = snapshot
                 .surface
                 .as_ref()
-                .filter(|model| model.save_file.is_none())
+                .filter(|model| {
+                    model.playlist_file.is_none() && !(dock_reader && model.player_reader)
+                })
                 .map(|model| model.id.clone());
             let reopen_requested =
                 surface_id.is_some() && snapshot.surface_request != self.snapshot.surface_request;
@@ -1726,30 +1792,49 @@ impl Desktop {
                         let _ = previous.update(cx, |_, window, cx| window.close_dialog(cx));
                     }
                 }
-                if let Some(model) = snapshot
-                    .surface
-                    .clone()
-                    .filter(|model| model.save_file.is_none())
-                {
+                if let Some(model) = snapshot.surface.clone().filter(|model| {
+                    model.playlist_file.is_none() && !(dock_reader && model.player_reader)
+                }) {
                     let commands = self.engine.commands.clone();
                     let updates = self.engine.snapshot.clone();
-                    self.overlay = OverlayHost::Visible {
-                        id: model.id.clone(),
-                        window: window.window_handle(),
-                    };
-                    surface_view::open_overlay(
-                        cx.entity().downgrade(),
-                        model,
-                        commands,
-                        updates,
-                        window,
-                        cx,
-                    );
+                    #[cfg(target_os = "macos")]
+                    let sheet = model
+                        .library_inspector
+                        .then(|| library_sheet::Sheet::open(window, &model, commands.clone()))
+                        .flatten()
+                        .map(|sheet| OverlayHost::LibrarySheet {
+                            id: model.id.clone(),
+                            sheet,
+                        });
+                    #[cfg(not(target_os = "macos"))]
+                    let sheet: Option<OverlayHost> = None;
+                    if let Some(sheet) = sheet {
+                        self.overlay = sheet;
+                    } else {
+                        self.overlay = OverlayHost::Visible {
+                            id: model.id.clone(),
+                            window: window.window_handle(),
+                        };
+                        surface_view::open_overlay(
+                            cx.entity().downgrade(),
+                            model,
+                            commands,
+                            updates,
+                            window,
+                            cx,
+                        );
+                    }
                 }
                 if surface_id.is_none() {
                     self.overlay = OverlayHost::Closed;
                 }
             }
+        }
+        #[cfg(target_os = "macos")]
+        if let OverlayHost::LibrarySheet { id, sheet } = &mut self.overlay
+            && let Some(model) = snapshot.surface.as_ref().filter(|s| s.id == *id)
+        {
+            sheet.update(model);
         }
         drop(workflow_windows);
         if returning_from_text {
@@ -1774,12 +1859,17 @@ impl Desktop {
         let _ = self.engine.commands.try_send(Command::Action(
             crate::app::action::NavigationAction::ResetDesktopPanels.into(),
         ));
+        self.sidebar_width = px(motion::SIDEBAR_WIDTH);
+        self.queue_width = px(motion::SIDEBAR_WIDTH);
         self.layout_epoch = self.layout_epoch.wrapping_add(1);
         self.column_layout = None;
         self.column_scroll = ScrollHandle::new();
         self.sidebar_scroll = ScrollHandle::new();
         self.letter_shortcuts = None;
         cx.notify();
+    }
+    fn sheet_open(&self) -> bool {
+        self.snapshot.player.active || self.snapshot.sheet_browser
     }
     fn command(&self, command: PaletteCommandKind) {
         if let Err(error) = self.engine.commands.try_send(Command::Palette(command)) {
@@ -1790,7 +1880,8 @@ impl Desktop {
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(target_os = "macos")]
-        if self.snapshot.presentation.active() == Some(crate::app::launch::WindowedMode::Text)
+        if self.mini_return_size.is_none()
+            && self.snapshot.presentation.active() == Some(crate::app::launch::WindowedMode::Text)
             && let Some((_, surface)) = &self.text_surface
         {
             return div()
@@ -1813,22 +1904,34 @@ impl Render for Desktop {
                             ),
                     ),
                 )
+                .on_action(
+                    cx.listener(|this, _: &EnterMiniPlayer, window, cx| {
+                        this.enter_mini(window, cx)
+                    }),
+                )
                 .child(div().flex_1().min_h_0().child(surface.clone()))
                 .into_any_element();
         }
         self.sample_column_motion(window, cx);
-        let mini = matches!(self.role, WindowRole::Library | WindowRole::NowPlaying)
-            && self.snapshot.player.active
-            && player::is_mini(window.viewport_size());
-        if !player::is_mini(window.viewport_size()) {
+        let mini = self.mini_return_size.is_some()
+            || matches!(self.role, WindowRole::Library | WindowRole::NowPlaying)
+                && self.snapshot.player.active
+                && player::is_mini(window.viewport_size());
+        if !mini && !player::is_mini(window.viewport_size()) {
             self.library_size = window.viewport_size();
         }
-        let single = self.role != WindowRole::Queue
-            && !self.snapshot.separate_player
-            && !self.snapshot.split_player
-            && !mini;
+        let single = self.role != WindowRole::Queue && !self.snapshot.separate_player && !mini;
         let workspace = if self.role == WindowRole::Queue {
-            self.queue_panel(cx)
+            div()
+                .size_full()
+                .flex()
+                .child(div().flex_1().min_w_0().child(self.queue_panel(cx)))
+                .child(
+                    div()
+                        .w(px(motion::SIDEBAR_RAIL_WIDTH))
+                        .child(self.queue_shortcuts(window, cx)),
+                )
+                .into_any_element()
         } else if self.snapshot.player.fullscreen {
             self.fullscreen_workspace(cx)
         } else if self.role == WindowRole::Visualizer {
@@ -1840,22 +1943,47 @@ impl Render for Desktop {
         } else {
             self.workspace(window, cx).into_any_element()
         };
+        let workspace = if self.snapshot.theme == crate::app::theme::ThemeName::BrushedAluminum
+            && !self.snapshot.player.fullscreen
+        {
+            theme::aluminum_frame(workspace)
+        } else {
+            workspace
+        };
         let mut transport =
             (self.role != WindowRole::Queue && !mini && !single && !self.snapshot.player.active)
-                .then(|| self.transport(None, cx).into_any_element());
-        let workspace =
-            if self.role == WindowRole::Library && !mini && !self.snapshot.player.fullscreen {
-                let workspace = div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .child(div().flex_1().min_h_0().child(workspace))
-                    .when_some(transport.take(), |view, bar| view.child(bar))
-                    .into_any_element();
-                self.queue_dock(workspace, window, cx)
-            } else {
-                workspace
-            };
+                .then(|| self.transport(false, cx).into_any_element());
+        let integrated_transport =
+            self.role == WindowRole::Library && !mini && !self.snapshot.player.fullscreen;
+        let workspace = if integrated_transport {
+            let bar = transport
+                .take()
+                .unwrap_or_else(|| self.transport(true, cx).into_any_element());
+            let controls = div()
+                .relative()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .bg(cx.theme().title_bar)
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .shadow_md()
+                .when(
+                    self.snapshot.theme == crate::app::theme::ThemeName::BrushedAluminum,
+                    |view| view.child(theme::aluminum_surface()),
+                )
+                .child(bar)
+                .child(self.status_strip(true, cx));
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().overflow_hidden().child(workspace))
+                .child(controls)
+                .into_any_element()
+        } else {
+            workspace
+        };
         let titlebar = if matches!(self.role, WindowRole::Queue | WindowRole::Visualizer) {
             gpui_kit::component::TitleBar::new()
                 .child(if self.role == WindowRole::Visualizer {
@@ -1874,9 +2002,7 @@ impl Render for Desktop {
                             gpui_kit::assets::IconName::Maximize2,
                         ))
                         .tooltip("Show Full Now Playing")
-                        .on_click(
-                            cx.listener(|this, _, window, _| window.resize(this.library_size)),
-                        ),
+                        .on_click(cx.listener(|this, _, window, cx| this.leave_mini(window, cx))),
                 )
                 .into_any_element()
         } else {
@@ -1921,6 +2047,18 @@ impl Render for Desktop {
                     origin: browser::Origin::Pointer,
                     intent: item.intent,
                 });
+            }))
+            .on_action(cx.listener(|this, action: &menu_catalog::Invoke, _, cx| {
+                if this.snapshot.sheet_browser
+                    && !this.sheet_sidebar_root
+                    && crate::app::command_history::key(&PaletteCommandKind::CloseColumn).as_ref()
+                        == Some(&action.key)
+                {
+                    this.command(PaletteCommandKind::CloseColumn);
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, action: &NativeCommand, _, cx| {
                 if action.0 == NativeCommandKind::CloseColumn {
@@ -2009,8 +2147,27 @@ impl Render for Desktop {
                     label: command.label.clone(),
                 });
             }))
-            .on_action(cx.listener(|this, _: &Activate, _, _| {
-                if this.snapshot.player.active || this.queue_focused {
+            .on_action(cx.listener(|this, _: &Activate, window, cx| {
+                if !this.focus.is_focused(window)
+                    && !this
+                        .pane_focus
+                        .handle(keyboard::Pane::Library)
+                        .is_focused(window)
+                    && !this
+                        .pane_focus
+                        .handle(keyboard::Pane::Queue)
+                        .is_focused(window)
+                {
+                    cx.propagate();
+                    return;
+                }
+                if this.snapshot.player.active
+                    || this.queue_focused
+                    || this
+                        .pane_focus
+                        .handle(keyboard::Pane::Queue)
+                        .is_focused(window)
+                {
                     let _ = this.engine.commands.try_send(Command::PlayerKey(
                         crossterm::event::KeyEvent::new(
                             crossterm::event::KeyCode::Enter,
@@ -2019,7 +2176,23 @@ impl Render for Desktop {
                     ));
                     return;
                 }
+                if this.snapshot.sidebar_cursor.is_none()
+                    && !this.snapshot.details_focused
+                    && this
+                        .snapshot
+                        .columns
+                        .get(this.snapshot.focused_column)
+                        .is_some_and(|column| column.album_grid)
+                {
+                    let _ = this
+                        .engine
+                        .commands
+                        .try_send(Command::Activate { following: false });
+                    return;
+                }
                 let _ = this.engine.commands.try_send(Command::Navigate {
+                    grid_columns: this
+                        .grid_columns_for(&this.snapshot, this.snapshot.focused_column),
                     column_delta: 1,
                     row_delta: 0,
                 });
@@ -2039,7 +2212,21 @@ impl Render for Desktop {
                     .commands
                     .try_send(Command::Activate { following: true });
             }))
-            .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
+            .on_action(cx.listener(|this, _: &MoveUp, window, cx| {
+                let queue = this
+                    .pane_focus
+                    .handle(keyboard::Pane::Queue)
+                    .is_focused(window);
+                let library = this
+                    .pane_focus
+                    .handle(keyboard::Pane::Library)
+                    .is_focused(window);
+                if !queue && !library && this.pane_focus.step(true, true, window, cx) {
+                    return;
+                }
+                if queue {
+                    this.queue_focused = true;
+                }
                 if this.snapshot.details_focused
                     && !this.snapshot.player.active
                     && !this.queue_focused
@@ -2060,11 +2247,27 @@ impl Render for Desktop {
                     return;
                 }
                 let _ = this.engine.commands.try_send(Command::Navigate {
+                    grid_columns: this
+                        .grid_columns_for(&this.snapshot, this.snapshot.focused_column),
                     column_delta: 0,
                     row_delta: -1,
                 });
             }))
-            .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
+            .on_action(cx.listener(|this, _: &MoveDown, window, cx| {
+                let queue = this
+                    .pane_focus
+                    .handle(keyboard::Pane::Queue)
+                    .is_focused(window);
+                let library = this
+                    .pane_focus
+                    .handle(keyboard::Pane::Library)
+                    .is_focused(window);
+                if !queue && !library && this.pane_focus.step(false, true, window, cx) {
+                    return;
+                }
+                if queue {
+                    this.queue_focused = true;
+                }
                 if this.snapshot.details_focused
                     && !this.snapshot.player.active
                     && !this.queue_focused
@@ -2085,11 +2288,24 @@ impl Render for Desktop {
                     return;
                 }
                 let _ = this.engine.commands.try_send(Command::Navigate {
+                    grid_columns: this
+                        .grid_columns_for(&this.snapshot, this.snapshot.focused_column),
                     column_delta: 0,
                     row_delta: 1,
                 });
             }))
-            .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
+            .on_action(cx.listener(|this, _: &MoveLeft, window, cx| {
+                let queue = this
+                    .pane_focus
+                    .handle(keyboard::Pane::Queue)
+                    .is_focused(window);
+                let library = this
+                    .pane_focus
+                    .handle(keyboard::Pane::Library)
+                    .is_focused(window);
+                if !queue && !library && this.pane_focus.step(true, true, window, cx) {
+                    return;
+                }
                 if this.queue_focused || this.role == WindowRole::Queue {
                     this.queue_focused = false;
                     cx.notify();
@@ -2102,12 +2318,26 @@ impl Render for Desktop {
                     return;
                 }
                 let _ = this.engine.commands.try_send(Command::Navigate {
+                    grid_columns: this
+                        .grid_columns_for(&this.snapshot, this.snapshot.focused_column),
                     column_delta: -1,
                     row_delta: 0,
                 });
             }))
-            .on_action(cx.listener(|this, _: &MoveRight, _, _| {
+            .on_action(cx.listener(|this, _: &MoveRight, window, cx| {
+                let queue = this
+                    .pane_focus
+                    .handle(keyboard::Pane::Queue)
+                    .is_focused(window);
+                let library = this
+                    .pane_focus
+                    .handle(keyboard::Pane::Library)
+                    .is_focused(window);
+                if !queue && !library && this.pane_focus.step(false, true, window, cx) {
+                    return;
+                }
                 if this.queue_focused || this.role == WindowRole::Queue {
+                    this.pane_focus.step(false, false, window, cx);
                     return;
                 }
                 if this.snapshot.player.active {
@@ -2117,6 +2347,8 @@ impl Render for Desktop {
                     return;
                 }
                 let _ = this.engine.commands.try_send(Command::Navigate {
+                    grid_columns: this
+                        .grid_columns_for(&this.snapshot, this.snapshot.focused_column),
                     column_delta: 1,
                     row_delta: 0,
                 });
@@ -2183,6 +2415,8 @@ impl Render for Desktop {
                         1
                     };
                 let _ = this.engine.commands.try_send(Command::Navigate {
+                    grid_columns: this
+                        .grid_columns_for(&this.snapshot, this.snapshot.focused_column),
                     column_delta: 0,
                     row_delta,
                 });
@@ -2196,8 +2430,34 @@ impl Render for Desktop {
             }))
             .track_focus(&self.focus)
             .key_context("Textamp")
-            .on_action(keyboard::next_focus)
-            .on_action(keyboard::previous_focus)
+            .on_action(cx.listener(|this, _: &keyboard::NextFocus, window, cx| {
+                if window.has_active_dialog(cx) {
+                    window.focus_next(cx);
+                    cx.stop_propagation();
+                } else {
+                    this.pane_focus.step(false, false, window, cx);
+                    this.queue_focused = this
+                        .pane_focus
+                        .handle(keyboard::Pane::Queue)
+                        .is_focused(window);
+                    cx.notify();
+                }
+            }))
+            .on_action(
+                cx.listener(|this, _: &keyboard::PreviousFocus, window, cx| {
+                    if window.has_active_dialog(cx) {
+                        window.focus_prev(cx);
+                        cx.stop_propagation();
+                    } else {
+                        this.pane_focus.step(true, false, window, cx);
+                        this.queue_focused = this
+                            .pane_focus
+                            .handle(keyboard::Pane::Queue)
+                            .is_focused(window);
+                        cx.notify();
+                    }
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if this.snapshot.player.fullscreen
                     && event.keystroke.modifiers == Modifiers::default()
@@ -2257,7 +2517,20 @@ impl Render for Desktop {
             .on_action(cx.listener(|this, _: &NowPlaying, _, _| {
                 this.command(PaletteCommandKind::GotoNowPlaying)
             }))
-            .on_action(cx.listener(|this, _: &PlayPause, _, _| {
+            .on_action(cx.listener(|this, _: &PlayPause, window, cx| {
+                if !this.focus.is_focused(window)
+                    && !this
+                        .pane_focus
+                        .handle(keyboard::Pane::Library)
+                        .is_focused(window)
+                    && !this
+                        .pane_focus
+                        .handle(keyboard::Pane::Queue)
+                        .is_focused(window)
+                {
+                    cx.propagate();
+                    return;
+                }
                 let _ = this
                     .engine
                     .commands
@@ -2279,9 +2552,10 @@ impl Render for Desktop {
                     .child(workspace),
             )
             .when_some(transport, |root, transport| root.child(transport))
-            .when(!mini && self.role != WindowRole::Queue, |root| {
-                root.child(self.status_strip(cx))
-            })
+            .when(
+                !integrated_transport && !mini && self.role != WindowRole::Queue,
+                |root| root.child(self.status_strip(false, cx)),
+            )
             .into_any_element()
     }
 }
@@ -2581,12 +2855,6 @@ pub fn run_requested(arguments: crate::app::launch::Arguments) -> anyhow::Result
             desktop.update(cx, |desktop, cx| desktop.open_settings(cx));
         }
         let radio_commands = desktop.clone();
-        let cover_engine = engine.clone();
-        cx.on_action(move |_: &LargeAlbumCovers, _| {
-            let _ = cover_engine
-                .commands
-                .try_send(Command::ToggleLargeAlbumCovers);
-        });
         cx.on_action(move |action: &RadioCommand, cx| {
             radio_commands.update(cx, |desktop, _| {
                 let _ = desktop
@@ -2768,4 +3036,19 @@ pub fn run_requested(arguments: crate::app::launch::Arguments) -> anyhow::Result
         cx.activate(true);
     });
     Ok(())
+}
+
+fn provider_logo(provider: crate::services::web_search::Provider) -> impl gpui::IntoElement {
+    use gpui::Styled;
+    let bytes: &[u8] = match provider {
+        crate::services::web_search::Provider::Google => {
+            include_bytes!("../../ios/Textamp/Assets.xcassets/Google.imageset/icon.png")
+        }
+        crate::services::web_search::Provider::DuckDuckGo => {
+            include_bytes!("../../ios/Textamp/Assets.xcassets/DuckDuckGo.imageset/icon.png")
+        }
+    };
+    let image = player::image_from_bytes(bytes, crate::app::state::ArtworkMode::Auto)
+        .expect("bundled provider PNG");
+    gpui::img(image).size(gpui::px(20.))
 }

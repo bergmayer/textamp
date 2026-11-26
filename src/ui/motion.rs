@@ -13,6 +13,29 @@ use std::{
 
 const DURATION: Duration = Duration::from_millis(150);
 
+/// A column-count change briefly softens the new grid at its final layout.
+#[derive(Default)]
+pub(crate) struct GridReflow {
+    columns: usize,
+    changed: Option<Instant>,
+}
+
+impl GridReflow {
+    pub(crate) fn sample(&mut self, columns: usize, now: Instant) -> f32 {
+        if self.columns != 0 && self.columns != columns {
+            self.changed = Some(now);
+        }
+        self.columns = columns;
+        let Some(start) = self.changed else { return 1. };
+        let t =
+            (now.saturating_duration_since(start).as_secs_f32() / DURATION.as_secs_f32()).min(1.);
+        if t >= 1. {
+            self.changed = None;
+        }
+        1. - 0.55 * (1. - t).powi(2)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct Stamp {
     navigation: u64,
@@ -52,12 +75,9 @@ impl Stamp {
                 column.title.hash(&mut navigation);
             }
         }
-        state
-            .pane_track()
-            .map(|track| track.rating_key.as_str())
-            .hash(&mut navigation);
-        crate::app::sonic_details::selected_track(state)
-            .map(|track| track.rating_key.as_str())
+        state.track_pane_open.hash(&mut navigation);
+        crate::app::sonic_details::visible(state)
+            .is_some()
             .hash(&mut navigation);
         state
             .tui_sidebar_group
@@ -115,6 +135,7 @@ pub struct SceneMotion {
     popup: Option<Rect>,
     transition: Option<Transition>,
     capture: bool,
+    grids: std::collections::HashMap<usize, GridReflow>,
 }
 impl SceneMotion {
     pub fn new(enabled: bool) -> Self {
@@ -171,6 +192,12 @@ impl SceneMotion {
         self.stamp = Some(next);
     }
     pub fn active(&self, now: Instant) -> bool {
+        self.grids.values().any(|grid| {
+            grid.changed
+                .is_some_and(|t| now.saturating_duration_since(t) < DURATION)
+        }) || self.structural_motion(now)
+    }
+    pub fn structural_motion(&self, now: Instant) -> bool {
         self.transition
             .as_ref()
             .is_some_and(|transition| now.saturating_duration_since(transition.started) < DURATION)
@@ -266,6 +293,27 @@ impl SceneMotion {
                 self.capture = true;
             }
         }
+        self.grids
+            .retain(|column, _| regions.album_grids.iter().any(|(i, _, _)| i == column));
+        for &(column, columns, area) in &regions.album_grids {
+            let opacity = self.grids.entry(column).or_default().sample(columns, now);
+            if opacity < 1. && regions.popup_outer.is_none() && self.transition.is_none() {
+                use ratatui::style::Color;
+                let area = area.intersection(buffer.area);
+                for y in area.y..area.bottom() {
+                    for x in area.x..area.right() {
+                        let cell = &mut buffer[(x, y)];
+                        if let (Color::Rgb(r, g, b), Color::Rgb(br, bg, bb)) = (cell.fg, cell.bg) {
+                            let mix = |fg: u8, bg: u8| {
+                                (f32::from(bg) + (f32::from(fg) - f32::from(bg)) * opacity).round()
+                                    as u8
+                            };
+                            cell.fg = Color::Rgb(mix(r, br), mix(g, bg), mix(b, bb));
+                        }
+                    }
+                }
+            }
+        }
         self.popup = regions.popup_outer;
         if self.capture
             || self.transition.is_some()
@@ -332,6 +380,43 @@ mod tests {
     }
     fn text(buffer: &Buffer) -> String {
         buffer.content.iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn grid_reflow_only_animates_a_change_in_column_count() {
+        let mut grid = GridReflow::default();
+        let now = Instant::now();
+        assert_eq!(grid.sample(2, now), 1.);
+        let start = grid.sample(3, now);
+        let middle = grid.sample(3, now + DURATION / 2);
+        assert!(0. < start && start < middle && middle < 1.);
+        assert_eq!(grid.sample(3, now + DURATION), 1.);
+    }
+
+    #[test]
+    fn scrolling_tracks_with_details_visible_does_not_start_a_scene_transition() {
+        use crate::library::models::Track;
+        let tracks = ["a", "b"].map(|key| Track {
+            rating_key: key.into(),
+            title: key.into(),
+            ..Default::default()
+        });
+        let mut state = AppState::new();
+        state.track_pane_open = true;
+        state.category_column_focused = false;
+        state.artist_nav.columns = vec![BrowseColumn::new_with_tracks(
+            "Tracks",
+            BrowseItem::from_tracks(&tracks),
+            tracks.to_vec(),
+        )];
+        let mut motion = SceneMotion::new(true);
+        let now = Instant::now();
+        motion.prepare(&state, now);
+        assert_eq!(state.pane_track().unwrap().rating_key, "a");
+        state.artist_nav.columns[0].selected_index = 1;
+        assert_eq!(state.pane_track().unwrap().rating_key, "b");
+        motion.prepare(&state, now);
+        assert!(!motion.active(now));
     }
 
     #[test]

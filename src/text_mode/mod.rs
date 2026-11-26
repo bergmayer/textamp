@@ -11,7 +11,8 @@ pub struct PresentedFrame {
     pub frame: vt::Frame,
     pub breadcrumbs: Vec<String>,
     pub editor: Option<crate::app::terminal_text::Document>,
-    pub queue_menus: Vec<(ratatui::layout::Rect, crate::app::queue_controls::Menu)>,
+    pub mini_artwork: Vec<ratatui::layout::Rect>,
+    pub sidebar_symbols: Vec<(ratatui::layout::Rect, &'static str)>,
     pub graphical_visualizer: Option<ratatui::layout::Rect>,
     pub transport_controls: Vec<(
         ratatui::layout::Rect,

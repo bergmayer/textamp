@@ -665,7 +665,7 @@ pub async fn dispatch(
             crate::app::tasks::spawn(async move {
                 let action = match crate::services::external_search::open_search(
                     request.target,
-                    &request.query,
+                    &request.query.text(),
                 )
                 .await
                 {

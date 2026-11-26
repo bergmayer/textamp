@@ -829,7 +829,7 @@ pub fn play(state: &mut AppState, audio: &mut crate::audio::AudioPlayer) -> bool
         .artwork
         .then(|| std::fs::read(state.downloads.store.root.join(id).join("artwork")).ok())
         .flatten();
-    state.sources.sonic_tasks.remove("now-playing");
+    state.sources.nav_tasks.remove("now-playing");
     state.playback.preparation_id = state.playback.preparation_id.wrapping_add(1);
     state.playback.scrobble = ScrobbleState::Pending;
     state.waveform = WaveformState {
@@ -1196,18 +1196,15 @@ fn open_saved_details(
             } else {
                 artist_key.to_owned()
             };
-            let mut column = BrowseColumn::new(format!("Artist Details — {name}"), vec![]);
-            column.details = Some(BrowseDetails::Artist(ArtistInfoDetails {
+            state.popups.set_artist_bio(Some(ArtistBioPopup {
                 artist_key: key,
                 artist_name: name.to_owned(),
-                request_id: 0,
                 document,
+                scroll: 0,
+                google_focused: false,
                 image_index: 0,
                 task: None,
             }));
-            reopen_for_details(state, track);
-            state.artist_nav.push_column(column);
-            state.miller_reveal_right = true;
             return Some(vec![]);
         }
     };
@@ -1292,6 +1289,7 @@ pub(super) fn offline_artist(
         );
     }
     Some(crate::services::biography::Biography {
+        unavailable: true,
         text,
         ..Default::default()
     })

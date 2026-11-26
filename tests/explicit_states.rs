@@ -110,6 +110,7 @@ async fn stop_cancels_preparation_and_rejects_its_late_completion() {
     assert!(task.await.unwrap_err().is_cancelled());
     dispatch_action(
         FileAction::Prepared {
+            tagged_album: false,
             generation: state.library_generation,
             id: preparation,
             track: Box::new(track),

@@ -16,6 +16,9 @@ pub(super) enum Command {
     LyricsLanguage {
         index: usize,
     },
+    NowPlayingDetails {
+        visible: bool,
+    },
     LyricsFollow,
     LyricsSearch,
     LyricsRetry,
@@ -108,9 +111,19 @@ pub(super) enum Command {
         to: usize,
         keys: Vec<String>,
     },
+    QueueRemoveSide {
+        index: usize,
+        key: String,
+        above: bool,
+    },
     QueueRemove {
         index: usize,
         key: String,
+    },
+    ClearHistory,
+    HistoryTrack {
+        id: String,
+        operation: HistoryOperation,
     },
     QueuePlay {
         index: usize,
@@ -149,6 +162,10 @@ pub(super) enum Command {
     },
     JourneyCount {
         count: String,
+    },
+    PlaylistFilePicked {
+        generation: u64,
+        path: Option<std::path::PathBuf>,
     },
     SubmitInput {
         text: String,
@@ -191,6 +208,13 @@ pub(super) enum Sheet {
 pub(super) enum Endpoint {
     Start,
     End,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum HistoryOperation {
+    Play,
+    Next,
+    Details,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -238,11 +262,11 @@ pub(super) enum Binding {
     PaletteSelection(PaletteCommandKind),
     Tool(app::presentation::NpSidebarButton),
     Search(SearchTab, usize, String),
+    RecentSearch(crate::app::library_details::RecentResult),
     ViewOption {
         column: usize,
         option: SortPopupOption,
     },
-    Details(usize),
     Station {
         owner: String,
         key: String,
@@ -269,7 +293,10 @@ pub(super) enum Binding {
         index: usize,
         key: String,
     },
-    ArtistRadio(String),
+    ArtistRadio {
+        key: String,
+        select: bool,
+    },
 }
 
 pub(super) use crate::app::navigation_history::LibraryNavigation;
@@ -610,6 +637,10 @@ impl Adapter {
                 self.tab = Tab::Library;
                 actions
             }
+            Command::NowPlayingDetails { visible } => {
+                state.now_playing_details_visible = visible && state.view == View::NowPlaying;
+                vec![]
+            }
             Command::Tab { tab } => {
                 self.tab = tab;
                 let mut actions = vec![];
@@ -637,6 +668,7 @@ impl Adapter {
                 self.take_home_action(state)
             }
             Command::Sheet { sheet } => match sheet {
+                Some(Sheet::LibraryPicker) => vec![SearchAction::OpenLibraryPicker.into()],
                 Some(Sheet::Downloads) => vec![app::downloads::Command::Manage.into()],
                 Some(Sheet::Search) => {
                     state.palette.open = false;
@@ -683,6 +715,32 @@ impl Adapter {
             ],
             Command::JourneyCount { count } => {
                 vec![SearchAction::AdventureLauncherSetTrackCount(count).into()]
+            }
+            Command::PlaylistFilePicked { generation, path } => {
+                if !state
+                    .popups
+                    .input_dialog()
+                    .is_some_and(|input| match input.action_type {
+                        InputDialogAction::ImportPlaylist { generation: owner }
+                        | InputDialogAction::ExportPlaylist {
+                            generation: owner, ..
+                        } => owner == generation,
+                        _ => false,
+                    })
+                {
+                    return vec![];
+                }
+                let importing = state.popups.input_dialog().is_some_and(|input| {
+                    matches!(input.action_type, InputDialogAction::ImportPlaylist { .. })
+                });
+                state.popups.set_input_dialog(None);
+                if importing && let Some(path) = path {
+                    return vec![QueueAction::ImportPlaylist { generation, path }.into()];
+                }
+                if !importing && path.is_some() {
+                    state.set_status("Playlist exported".into());
+                }
+                vec![]
             }
             Command::SubmitInput { text } => {
                 if let Some(dialog) = state.popups.input_dialog_mut() {
@@ -993,6 +1051,13 @@ impl Adapter {
                 state.queue.selected.clear();
                 vec![QueueAction::ReorderSelection { from, to }.into()]
             }
+            Command::QueueRemoveSide { index, key, above } => {
+                if queue_matches(state, index, &key) {
+                    vec![QueueAction::RemoveQueueSide { row: index, above }.into()]
+                } else {
+                    vec![]
+                }
+            }
             Command::QueueRemove { index, key } => {
                 if queue_matches(state, index, &key) {
                     vec![QueueAction::RemoveFromQueue(index).into()]
@@ -1000,6 +1065,27 @@ impl Adapter {
                     vec![]
                 }
             }
+            Command::HistoryTrack { id, operation } => {
+                use app::track_context::ContextKind;
+                let kind = match operation {
+                    HistoryOperation::Play => ContextKind::PlayTrack,
+                    HistoryOperation::Next => ContextKind::PlayNextInQueue,
+                    HistoryOperation::Details => {
+                        if state
+                            .listening_history
+                            .iter()
+                            .find(|p| p.id == id)
+                            .and_then(|p| p.resolve(state))
+                            .is_some()
+                        {
+                            self.tab = Tab::Library;
+                        }
+                        ContextKind::ShowDetails(Destination::Track)
+                    }
+                };
+                vec![app::listening_history::track_action(&id, kind)]
+            }
+            Command::ClearHistory => vec![QueueAction::ClearHistory.into()],
             Command::QueuePlay { index, key } => {
                 if queue_matches(state, index, &key) {
                     app::queue_edit::play_at(state, index)
@@ -1062,21 +1148,10 @@ impl Adapter {
                     })
                     .take(30)
                     .collect::<Vec<_>>();
-                if let Some(PlayAllRow::Album { rating_key, .. }) = &column.play_all_row
-                    && keys.contains(rating_key)
-                    && let Some(thumb) = state
-                        .library
-                        .albums
-                        .iter()
-                        .find(|album| &album.rating_key == rating_key)
-                        .and_then(|album| album.thumb.clone())
-                        .or_else(|| {
-                            column.tracks.first().and_then(|track| {
-                                track.parent_thumb.clone().or(track.thumb.clone())
-                            })
-                        })
+                if let Some(cover) = app::details::album_cover(state, column)
+                    && keys.contains(&cover.0)
                 {
-                    images.push((rating_key.clone(), thumb));
+                    images.push(cover);
                 }
                 images.sort();
                 images.dedup();
@@ -1180,19 +1255,11 @@ impl Adapter {
                 actions.extend(self.activate(Binding::Palette(command), state));
                 actions
             }
-            Binding::ArtistRadio(key) => {
-                let Some(picker) = state.popups.artist_radio_picker_mut() else {
-                    return vec![];
-                };
-                let Some(index) = picker
-                    .filtered_artists
-                    .iter()
-                    .position(|artist| artist.rating_key == key)
-                else {
-                    return vec![];
-                };
-                picker.item_index = index;
-                vec![SearchAction::ArtistRadioPickerToggleArtist.into()]
+            Binding::ArtistRadio { key, select } => {
+                if let Some(picker) = state.popups.artist_radio_picker_mut() {
+                    picker.set_selected(&key, select);
+                }
+                vec![]
             }
             Binding::JourneyChoice { index, key } => {
                 if let Some(launcher) = state.popups.adventure_launcher_mut()
@@ -1224,7 +1291,7 @@ impl Adapter {
                     return vec![];
                 };
                 let Some((index, station)) = state.station_nav.columns[column]
-                    .stations
+                    .stations()
                     .iter()
                     .enumerate()
                     .find(|(_, station)| station.key == key)
@@ -1358,7 +1425,7 @@ impl Adapter {
                     self.open_radio(state);
                     if let Some(root) = state.station_nav.columns.first()
                         && let Some(station) =
-                            root.stations.iter().find(|station| station.key == *key)
+                            root.stations().iter().find(|station| station.key == *key)
                     {
                         return self.activate(
                             Binding::Station {
@@ -1409,7 +1476,9 @@ impl Adapter {
                         state.popups.close_all();
                         vec![NavigationAction::SetView(View::Queue).into()]
                     }
-                    PaletteCommandKind::OpenAiBrowser => self.activate(Binding::SidebarGroup(app::sidebar::SidebarGroup::Ai), state),
+                    PaletteCommandKind::OpenAiBrowser => {
+                        self.activate(Binding::SidebarGroup(app::sidebar::SidebarGroup::Ai), state)
+                    }
                     PaletteCommandKind::OpenRadioBrowser => self.open_radio(state),
                     PaletteCommandKind::ConfigureStation(key) => {
                         self.tab = Tab::Library;
@@ -1434,6 +1503,19 @@ impl Adapter {
                     _ => app::command_palette::run(command, state),
                 }
             }
+            Binding::RecentSearch(result) => {
+                if !state.search.query.is_empty()
+                    || !state
+                        .search
+                        .recent
+                        .iter()
+                        .any(|item| item.same_item(&result))
+                {
+                    return vec![];
+                }
+                self.tab = Tab::Library;
+                vec![SearchAction::CloseSearchPopup.into(), result.open()]
+            }
             Binding::Search(tab, index, query) => {
                 if state.search.query != query {
                     return vec![];
@@ -1447,15 +1529,6 @@ impl Adapter {
                 let mut actions = vec![SearchAction::CloseSearchPopup.into()];
                 actions.extend(app::library_details::search_result_actions(state));
                 actions
-            }
-            Binding::Details(column) => {
-                state.track_pane_open = false;
-                app::column_controls::activate(
-                    state,
-                    column,
-                    app::column_controls::ColumnControl::Details,
-                    app::playback_controls::QueuePlacement::Now,
-                )
             }
             Binding::ViewOption { column, option } => {
                 if let Some(nav) = state.browse_nav_mut() {
@@ -1472,8 +1545,11 @@ impl Adapter {
                     SortPopupOption::Artwork => actions.extend(
                         app::handlers::key_input::sort_popup::toggle_artwork(state, column),
                     ),
-                    SortPopupOption::LargeArtwork => {
-                        actions.push(SettingsAction::SetLargeArtwork(!state.large_artwork).into())
+                    SortPopupOption::AlbumGrid => {
+                        actions.push(SettingsAction::SetAlbumGrid(true).into())
+                    }
+                    SortPopupOption::AlbumList => {
+                        actions.push(SettingsAction::SetAlbumGrid(false).into())
                     }
                     SortPopupOption::CompilationOnlyArtists => actions.push(
                         SettingsAction::SetShowCompilationOnlyArtists(

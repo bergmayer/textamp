@@ -56,7 +56,6 @@ pub enum Event {
     Playback(PlaybackEvent),
     Artwork(ArtworkEvent),
 
-    Cache(CacheEvent),
     Visualizer(VisualizerEvent),
     Radio(RadioEvent),
     Playlist(PlaylistEvent),
@@ -159,11 +158,6 @@ impl From<ArtworkEvent> for Event {
     }
 }
 
-impl From<CacheEvent> for Event {
-    fn from(e: CacheEvent) -> Self {
-        Event::Cache(e)
-    }
-}
 impl From<VisualizerEvent> for Event {
     fn from(e: VisualizerEvent) -> Self {
         Event::Visualizer(e)

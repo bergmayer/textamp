@@ -8,7 +8,7 @@ use textamp::app::state::{NowPlayingFocus, StationColumn, View};
 use textamp::app::{Action, AppState};
 use textamp::config::Config;
 
-fn station_state() -> AppState {
+fn station_state(key: &str) -> AppState {
     let mut state = AppState::new();
     state.view = View::Queue;
     state.active_library = Some("5".into());
@@ -17,7 +17,7 @@ fn station_state() -> AppState {
         "stations".into(),
         vec![
             serde_json::from_value(serde_json::json!({
-                "key": "/library/sections/5/stations/randomAlbum",
+                "key": key,
                 "title": "Play Random Albums",
                 "type": "station",
                 "identifier": "randomAlbum"
@@ -46,8 +46,7 @@ fn palette_and_alt_r_use_the_same_station_action() {
         "nav-radio/randomAlbum",
         "folder-radio/randomAlbum",
     ] {
-        let mut state = station_state();
-        state.station_nav.columns[0].stations[0].key = key.into();
+        let mut state = station_state(key);
         if key.starts_with("nav-radio/") {
             state.active_library = Some("navidrome:account:1".into());
         }
@@ -65,7 +64,7 @@ fn palette_and_alt_r_use_the_same_station_action() {
         for actions in [&palette, &shortcut] {
             assert!(
                 matches!(actions.as_slice(), [Action::Radio(RadioAction::PlayStation(key))]
-            if key == &state.station_nav.columns[0].stations[0].key),
+            if key == &state.station_nav.columns[0].stations()[0].key),
                 "{actions:?}"
             );
         }
@@ -140,7 +139,7 @@ fn random_album_shortcut_is_unavailable_without_a_station_for_every_source() {
         ActiveSource::None,
         ActiveSource::Folder("local-or-webdav".into()),
     ] {
-        let mut state = station_state();
+        let mut state = station_state("/library/sections/5/stations/randomAlbum");
         state.sources.active = source;
         state.station_nav.columns.clear();
         assert!(
@@ -164,8 +163,16 @@ fn random_album_shortcut_is_unavailable_without_a_station_for_every_source() {
 #[test]
 fn folder_palette_keeps_shared_controls_but_hides_server_only_commands() {
     use textamp::app::state::PaletteCommandKind;
-    let mut state = station_state();
+    let mut state = station_state("/library/sections/5/stations/randomAlbum");
     state.sources.active = ActiveSource::Folder("local-or-webdav".into());
+    for i in 0..20 {
+        let mut track = textamp::library::track::Track::from_folder(
+            "local-or-webdav",
+            &format!("{i}/song.flac"),
+        );
+        track.grandparent_title = Some(format!("artist-{i}"));
+        state.library.folder_radio.observe(track);
+    }
     textamp::app::sources::radio::load_folder_stations(&mut state);
     state
         .queue

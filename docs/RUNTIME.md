@@ -284,7 +284,7 @@ are diagnostic measurements, not fixed timing assertions for CI or promises for
 remote servers. Compare runs on the same machine under similar load and retain
 request-identity and interaction checks alongside timing measurements.
 
-Queue shuffle and remix operations apply to every queue entry. Reordering retains
+Queue shuffle pins the playing occurrence, or the first pending entry when idle, and randomizes the remaining entries. Reordering retains
 the playing occurrence by index identity, and insertion before it advances its
 queue index without restarting audio. Replacing or deleting the playing entry
 uses the corresponding explicit playback policy. Saved and undo queues contain

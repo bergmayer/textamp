@@ -190,7 +190,13 @@ pub fn dispatch(
                     // Queue mode: use state.queue
                     if let Some(idx) = state.queue.index {
                         if idx + 1 < state.queue.tracks.len() {
-                            state.queue.index = Some(idx + 1);
+                            if state.queue.repeat == crate::app::state::RepeatMode::Queue {
+                                let played = state.queue.tracks[idx].clone();
+                                crate::app::queue_edit::consume(state, idx);
+                                state.queue.tracks.push(played);
+                            } else {
+                                crate::app::queue_edit::consume(state, idx);
+                            }
                             helpers::play_current_track(event_tx, state, audio);
                         } else if state.queue.repeat == crate::app::state::RepeatMode::Queue
                             && !state.queue.tracks.is_empty()
@@ -198,7 +204,7 @@ pub fn dispatch(
                             state.queue.index = Some(0);
                             helpers::play_current_track(event_tx, state, audio);
                         } else {
-                            // End of queue: report final stop to server (not continuing)
+                            crate::app::queue_edit::consume(state, idx);
 
                             audio.stop();
                             state.playback.request_id = audio.playback_id();
@@ -213,10 +219,16 @@ pub fn dispatch(
             if state.playback.position_ms > 3000 {
                 state.playback.position_ms = 0;
                 helpers::play_current_track(event_tx, state, audio);
+            } else if let Some(previous) = state.queue.previous.pop_back() {
+                let (tracks, playing) = state.playback_buffer_mut();
+                let index = playing.unwrap_or(0).min(tracks.len());
+                tracks.insert(index, previous);
+                *playing = Some(index);
+                state.queue.selected.clear();
+                state.queue.selection_anchor = None;
+                state.list_state.queue_index = index;
+                helpers::play_current_track(event_tx, state, audio);
             } else {
-                // Report stop for current track before going to previous
-                // continuing=true because we're moving to the previous track
-
                 // Go to previous track based on playback mode
                 match state.playback_mode {
                     PlaybackMode::Radio => {

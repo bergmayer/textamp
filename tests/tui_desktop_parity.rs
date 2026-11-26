@@ -161,6 +161,32 @@ fn sidebar_disclosures_share_the_desktop_hierarchy_and_keyboard_targets() {
         matches!(key(&mut state, KeyCode::Right).as_slice(), [Action::Settings(SettingsAction::ToggleSidebarGroup(title))] if title == "Albums")
     );
 }
+#[cfg(target_os = "macos")]
+#[test]
+fn compact_sidebar_opens_groups_and_restores_expanded_children() {
+    let mut state = fixture();
+    state.desktop_collapsed_sections.clear();
+    state.category_column_focused = true;
+    let rows = state.category_rows();
+    state.category_column_index = rows
+        .iter()
+        .position(|row| *row == CategoryRow::Root(LibraryRoot::Albums))
+        .unwrap();
+    let (tx, _) = tokio::sync::mpsc::channel(8);
+    dispatch_navigation::dispatch(&tx, NavigationAction::ToggleSidebar, &mut state).unwrap();
+    let compact = state.category_rows();
+    assert_eq!(
+        compact[state.category_column_index],
+        CategoryRow::Header("Albums")
+    );
+    assert!(!compact.contains(&CategoryRow::Root(LibraryRoot::Albums)));
+    draw(&mut state, 120, 32);
+    key(&mut state, KeyCode::Enter);
+    assert_eq!(state.tui_sidebar_group.as_ref().unwrap().0, "Albums");
+    dispatch_navigation::dispatch(&tx, NavigationAction::ToggleSidebar, &mut state).unwrap();
+    assert_eq!(state.category_rows(), rows);
+}
+
 #[test]
 fn queue_stays_on_the_right_and_tools_and_artist_labels_are_operable() {
     let mut state = fixture();
@@ -169,18 +195,22 @@ fn queue_stays_on_the_right_and_tools_and_artist_labels_are_operable() {
         for (width, height) in [(160, 48), (100, 30), (60, 16)] {
             let buffer = draw(&mut state, width, height);
             let queue = state.hit_regions.queue_content.as_ref().unwrap();
-            assert_eq!(queue.track_list.right(), width);
+            assert!(queue.track_list.right() <= state.hit_regions.queue_tabs[0].0.x);
             let queue_x = queue.track_list.x;
+            let tabs = &state.hit_regions.queue_tabs;
+            assert_eq!(tabs.len(), 2);
+            assert!(tabs[0].0.width.abs_diff(tabs[1].0.width) <= 1);
+            assert_eq!(tabs[0].0.x, tabs[1].0.x);
+            assert!(tabs[1].0.x - queue.track_list.right() <= 2);
+            assert!(width - tabs[1].0.right() <= 2);
             let tools = &state.hit_regions.queue_menus;
             assert_eq!(tools.len(), 2);
-            assert_eq!(
-                tools
-                    .iter()
-                    .map(|(rect, _)| rect.y)
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len(),
-                1
-            );
+            let transport = state.hit_regions.transport.as_ref().unwrap();
+            if let Some(volume) = transport.volume_slider {
+                assert!(volume.width <= 9 && volume.right() <= tools[0].0.x);
+                assert!(volume.y > tools[0].0.y);
+            }
+            assert!(tools[0].0.y < tools[1].0.y);
             assert!(tools.iter().all(|(rect, _)| rect.x >= queue_x
                 && rect.right() <= width
                 && rect.bottom() <= height));
@@ -194,13 +224,16 @@ fn queue_stays_on_the_right_and_tools_and_artist_labels_are_operable() {
                     .map(|(x, y)| buffer[(x, y)].symbol())
                     .collect();
                 assert!(!text.contains("0:00"));
-                let link = state
+                let Some(link) = state
                     .hit_regions
                     .artist_links
                     .iter()
                     .find(|link| link.area.x < queue_x)
-                    .unwrap()
-                    .clone();
+                    .cloned()
+                else {
+                    assert!(width <= 60);
+                    continue;
+                };
                 assert!(matches!(
                     click(&mut state, link.area).as_slice(),
                     [Action::Browse(BrowseAction::OpenDetailsInLibrary {
@@ -748,6 +781,7 @@ async fn journey_endpoint_fields_and_buttons_are_keyboard_and_mouse_operable() {
 fn transport_keeps_metadata_centered_and_seeking_separate_from_navigation() {
     use textamp::app::{action::PlaybackAction, transport_controls::TransportControl};
     let mut state = fixture();
+    state.playback.status = textamp::app::PlayStatus::Paused;
     state.playback.duration_ms = 123_000;
     for view in [View::Browse, View::NowPlaying] {
         state.view = view;
@@ -1045,9 +1079,18 @@ fn closing_the_decades_root_leaves_zero_columns() {
         follow.is_empty(),
         "a late tag refresh must not reopen a closed column"
     );
-    for _ in 0..2 {
-        draw(&mut state, 120, 32);
-    }
+    let buffer = draw(&mut state, 120, 32);
+    let sidebar = state.hit_regions.category_column.as_ref().unwrap().area;
+    let before_queue = state.hit_regions.queue_tabs[0].0.x;
+    let divider = (before_queue - 5..before_queue)
+        .rev()
+        .find(|x| buffer[(*x, sidebar.y)].symbol() == "│")
+        .expect("queue divider at the edge of the empty workspace");
+    let header: String = (sidebar.right()..divider)
+        .map(|x| buffer[(x, sidebar.y)].symbol())
+        .collect();
+    assert!(header.trim().is_empty(), "closed column header: {header:?}");
+    assert_eq!(state.hit_regions.miller_viewport, Some((0, 0)));
     assert!(state.tag_nav.columns.is_empty());
     assert!(
         state
@@ -1056,6 +1099,73 @@ fn closing_the_decades_root_leaves_zero_columns() {
             .as_ref()
             .is_none_or(|regions| regions.columns.is_empty())
     );
+    let actions = key(&mut state, KeyCode::Enter);
+    let [Action::Navigation(open)] = actions.as_slice() else {
+        panic!("Expected Enter to reopen Decades, got {actions:?}");
+    };
+    let refresh = dispatch_navigation::dispatch(&tx, open.clone(), &mut state).unwrap();
+    assert!(matches!(
+        refresh.as_slice(),
+        [Action::Browse(BrowseAction::RefreshTagView)]
+    ));
+    textamp::app::handlers::dispatch_browse::dispatch(
+        &tx,
+        BrowseAction::RefreshTagView,
+        &mut state,
+    )
+    .unwrap();
+    let buffer = draw(&mut state, 120, 32);
+    let reopened = &state.hit_regions.miller_columns.as_ref().unwrap().columns[0];
+    let title: String = (reopened.area.x..reopened.area.right())
+        .map(|x| buffer[(x, reopened.area.y)].symbol())
+        .collect();
+    assert!(title.contains("Decades"));
+    assert!(
+        reopened
+            .controls
+            .iter()
+            .any(|(_, control)| *control == ColumnControl::Close)
+    );
+}
+
+#[test]
+fn closing_the_folder_root_removes_its_header_until_reopened_from_the_sidebar() {
+    use textamp::app::{action::FolderAction, column_controls::ColumnControl};
+    use textamp::library::folder::{FolderColumn, FolderNavigationState};
+
+    let mut state = fixture();
+    state.browse_category = BrowseCategory::Folders;
+    state.tui_queue_visible = false;
+    let mut folders = FolderNavigationState::for_library("fixture".into());
+    folders
+        .columns
+        .push(FolderColumn::new(None, "Folders".into(), vec![]));
+    state.folder_state = Some(folders);
+    draw(&mut state, 90, 32);
+    let region = &state.hit_regions.miller_columns.as_ref().unwrap().columns[0];
+    let area = region.area;
+    let close = region
+        .controls
+        .iter()
+        .find(|(_, control)| *control == ColumnControl::Close)
+        .unwrap()
+        .0;
+    click(&mut state, close);
+    let buffer = draw(&mut state, 90, 32);
+    for y in area.y..area.bottom() {
+        assert!((area.x..area.right()).all(|x| buffer[(x, y)].symbol() == " "));
+    }
+    assert!(state.hit_regions.miller_columns.is_none());
+    let actions = key(&mut state, KeyCode::Enter);
+    let [Action::Navigation(open)] = actions.as_slice() else {
+        panic!("Expected folder navigation, got {actions:?}");
+    };
+    let (tx, _) = tokio::sync::mpsc::channel(4);
+    let load = dispatch_navigation::dispatch(&tx, open.clone(), &mut state).unwrap();
+    assert!(matches!(
+        load.as_slice(),
+        [Action::Folders(FolderAction::LoadFolderRoot)]
+    ));
 }
 
 #[test]
@@ -1099,20 +1209,17 @@ fn tab_traversal_preserves_workspace_and_operates_queue_tools() {
     draw(&mut state, 120, 32);
     for _ in 0..32 {
         key(&mut state, KeyCode::Tab);
-        if state.view == View::Queue && state.now_playing_focus == NowPlayingFocus::Tools {
+        if state.view == View::Queue {
             break;
         }
     }
     assert_eq!(state.view, View::Queue);
-    let actions = key(&mut state, KeyCode::Enter);
-    assert!(matches!(
-        actions.as_slice(),
-        [Action::Queue(
-            textamp::app::action::QueueAction::ToggleQueueShuffle
-        )]
-    ));
-    key(&mut state, KeyCode::BackTab);
-    assert_eq!(state.now_playing_focus, NowPlayingFocus::Tracks);
+    assert!(state.tui_queue_type_focused);
+    key(&mut state, KeyCode::Right);
+    assert!(key(&mut state, KeyCode::Enter).is_empty());
+    assert!(state.palette.open);
+    assert_eq!(state.palette.path, ["Queue", "Queue Tools"]);
+    state.palette.open = false;
     key(&mut state, KeyCode::BackTab);
     assert_eq!(state.view, View::Browse);
     assert!(state.tui_artist_focus.is_some());
@@ -1123,6 +1230,7 @@ fn tab_traversal_preserves_workspace_and_operates_queue_tools() {
 fn arrows_reach_transport_controls_and_tab_leaves_the_panel() {
     use textamp::app::{action::PlaybackAction, transport_controls::TransportControl as Control};
     let mut state = fixture();
+    state.playback.status = textamp::app::PlayStatus::Paused;
     state.playback.duration_ms = 123_000;
     draw(&mut state, 140, 40);
     key_input::handle_key(
@@ -1148,7 +1256,10 @@ fn arrows_reach_transport_controls_and_tab_leaves_the_panel() {
     key(&mut state, KeyCode::Down); // Lyrics
     assert!(matches!(
         key(&mut state, KeyCode::Enter).as_slice(),
-        [Action::Playback(PlaybackAction::ShowLyrics)]
+        [
+            Action::Navigation(NavigationAction::SetView(View::NowPlaying)),
+            Action::Playback(PlaybackAction::ShowLyrics)
+        ]
     ));
     key(&mut state, KeyCode::Down); // Mute
     assert!(matches!(
@@ -1280,7 +1391,12 @@ fn review_layouts_keep_the_transport_and_drawer_frames_inside_the_window() {
             let tools = &state.hit_regions.queue_menus;
             assert!(tools.iter().all(|(rect, _)| rect.bottom() <= height - 2));
             if view == View::Browse {
-                assert!(tools[0].0.y < transport.area.y);
+                assert_eq!(transport.area.right(), width);
+                assert!(
+                    tools
+                        .iter()
+                        .all(|(rect, _)| rect.bottom() <= transport.area.top())
+                );
             }
         }
         if let Some(columns) = &state.hit_regions.miller_columns {
@@ -1672,7 +1788,7 @@ fn album_artwork_captions_move_below_large_covers_and_keep_the_year() {
     column.artwork_visible = true;
     state.artist_nav.columns = vec![column];
     for large in [false, true] {
-        state.large_artwork = large;
+        state.album_grid = large;
         let buffer = draw(&mut state, 80, 32);
         let rows = buffer
             .content
@@ -1689,7 +1805,9 @@ fn album_artwork_captions_move_below_large_covers_and_keep_the_year() {
             .expect("album caption includes its year");
         let inner = state.hit_regions.miller_columns.as_ref().unwrap().columns[0].inner;
         if large {
-            assert_eq!(x, usize::from(inner.x));
+            let (_, tile, _) = state.hit_regions.miller_item_rows[0];
+            let midpoint = x + "Night Signals (2024)".len() / 2;
+            assert!(midpoint.abs_diff(usize::from(tile.x + tile.width / 2)) <= 1);
             assert!(y > usize::from(inner.y + 1));
         } else {
             assert!(x > usize::from(inner.x));
@@ -1714,7 +1832,7 @@ fn filtered_artwork_clicks_select_the_visible_original_item() {
     let mut state = fixture();
     state.tui_sidebar_visible = false;
     state.tui_queue_visible = false;
-    state.large_artwork = true;
+    state.album_grid = true;
     let mut column = BrowseColumn::new(
         "Albums",
         (0..20)
@@ -1797,4 +1915,103 @@ fn tab_moves_between_columns_without_changing_their_selected_items() {
     key(&mut state, KeyCode::BackTab);
     assert_eq!(state.artist_nav.focused_column, 1);
     assert_eq!(state.artist_nav.columns[1].selected_index, 2);
+}
+
+#[test]
+fn workspace_keyboard_reaches_history_on_the_queue_rail() {
+    use textamp::app::{action::QueueAction, tui_navigation::RailControl};
+    let mut state = fixture();
+    state.tui_queue_visible = false;
+    draw(&mut state, 120, 32);
+    for _ in 0..12 {
+        key(&mut state, KeyCode::Tab);
+        if state.tui_rail_focus.is_some() {
+            break;
+        }
+    }
+    assert_eq!(state.tui_rail_focus, Some(RailControl::Next));
+    key(&mut state, KeyCode::Down);
+    assert_eq!(state.tui_rail_focus, Some(RailControl::History));
+    assert!(matches!(
+        key(&mut state, KeyCode::Enter).as_slice(),
+        [
+            Action::Queue(QueueAction::ShowHistory(true)),
+            Action::Navigation(NavigationAction::ToggleQueuePanel),
+        ]
+    ));
+    key(&mut state, KeyCode::BackTab);
+    assert!(state.tui_rail_focus.is_none());
+    assert_eq!(state.view, View::Browse);
+}
+
+#[test]
+fn workspace_empty_library_keeps_the_queue_divider_in_each_theme() {
+    let mut state = fixture();
+    state.artist_nav.columns.clear();
+    state.queue.tracks.clear();
+    for theme in textamp::app::theme::ThemeName::all() {
+        state.theme = *theme;
+        for open in [true, false] {
+            state.tui_queue_visible = open;
+            let buffer = draw(&mut state, 120, 32);
+            let divider = if let Some(queue) = &state.hit_regions.queue_content {
+                queue.track_list.x - 1
+            } else {
+                let first_tab = state.hit_regions.queue_tabs[0].0.x;
+                (first_tab - 5..first_tab)
+                    .rev()
+                    .find(|x| buffer[(*x, 0)].symbol() == "│")
+                    .unwrap()
+            };
+            assert!(
+                matches!(buffer[(divider, 0)].symbol(), "│"),
+                "{theme:?}, open={open}"
+            );
+            assert_eq!(buffer[(divider, 8)].symbol(), "│");
+        }
+    }
+}
+
+#[test]
+fn workspace_artwork_tick_requests_visible_grid_tiles_past_the_first_band() {
+    use textamp::app::{Event, action::SystemAction, dispatch::handle_core_event};
+    let mut state = fixture();
+    state.album_grid = true;
+    state.tui_sidebar_visible = false;
+    state.tui_queue_visible = false;
+    let mut column = BrowseColumn::new(
+        "Random Albums",
+        (0..40)
+            .map(|index| BrowseItem::Album {
+                key: format!("album-{index}"),
+                title: format!("Album {index}"),
+                artist: "Artist".into(),
+                year: None,
+                thumb: Some(format!("cover-{index}")),
+                is_placeholder: false,
+            })
+            .collect(),
+    );
+    column.artwork_visible = true;
+    state.artist_nav.columns = vec![column];
+    draw(&mut state, 135, 40);
+    let visible: Vec<usize> = state
+        .hit_regions
+        .miller_item_rows
+        .iter()
+        .map(|(_, _, row)| *row)
+        .collect();
+    assert!(visible.len() > 5);
+    for index in visible.iter().take(5) {
+        state
+            .artwork
+            .grid_cache
+            .insert(format!("album-{index}"), vec![0]);
+    }
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let actions = handle_core_event(Event::Tick, &mut state, &tx);
+    assert!(actions.iter().any(|action| matches!(action,
+        Action::System(SystemAction::LoadAlbumArt(rows)) if rows.first().is_some_and(|(key, _)| key == &format!("album-{}", visible[5]))
+    )));
+    assert_eq!(state.artist_nav.columns[0].selected_index, 0);
 }

@@ -109,10 +109,6 @@ pub fn dispatch(
         QueueAction::PlayTrackFromCategory(idx) => {
             if idx < state.library.selected_album_tracks.len() {
                 crate::app::queue_edit::record(state, "Play tracks");
-                // Report stop for currently playing track before switching
-
-                // Generate new session ID for this playback context
-
                 // Clear radio state if switching from radio mode
                 if state.playback_mode == PlaybackMode::Radio {
                     state.radio.clear();
@@ -219,6 +215,36 @@ pub fn dispatch(
                 }
             }
         }
+        QueueAction::SelectHistory(id) => {
+            if let Some(index) = state.listening_history.iter().position(|p| p.id == id) {
+                state.history_cursor = index;
+            }
+        }
+        QueueAction::HistoryTrack(id, command) => {
+            if let Some(play) = state.listening_history.iter().find(|p| p.id == id) {
+                if let Some(track) = play.resolve(state) {
+                    follow_ups.extend(crate::app::command_palette::run(
+                        crate::app::state::PaletteCommandKind::FromTrackContext {
+                            kind: command,
+                            track: Box::new(track),
+                        },
+                        state,
+                    ));
+                } else {
+                    state.set_status("Track unavailable in the current library".into());
+                }
+            }
+        }
+        QueueAction::ShowHistory(show) => {
+            state.scroll.history_offset = None;
+            state.scroll.history_click = None;
+            state.showing_queue_history = show;
+            state.history_cursor = 0;
+        }
+        QueueAction::ClearHistory => {
+            state.listening_history = crate::app::listening_history::save(None)?;
+            state.history_cursor = 0;
+        }
         QueueAction::ClearQueue => {
             // Preserve the complete session before clearing; undo restores the queue
             // without unexpectedly restarting stopped playback.
@@ -292,16 +318,19 @@ pub fn dispatch(
                 &std::collections::BTreeSet::from([idx]),
             ));
         }
+        QueueAction::RemoveQueueSide { row, above } => {
+            let len = state.playback_tracks().len();
+            if row < len {
+                let range = if above { 0..row } else { row + 1..len };
+                follow_ups.extend(remove_tracks(event_tx, state, audio, &range.collect()));
+            }
+        }
         QueueAction::JumpToQueueIndex(idx) => {
-            // Jump to and play a specific track in the queue (without modifying queue order)
             if idx < state.queue.tracks.len() {
-                // Report stop for currently playing track before switching
-
-                // Generate new session ID for this playback context
-
+                state.set_playback_mode(PlaybackMode::Queue);
+                let idx = crate::app::queue_edit::before_jump(state, idx);
                 state.queue.index = Some(idx);
                 state.list_state.queue_index = idx;
-                state.set_playback_mode(PlaybackMode::Queue);
                 helpers::play_current_track(event_tx, state, audio);
             }
         }
@@ -384,7 +413,8 @@ pub fn dispatch(
                     FolderTrackPlan::Ready(_) => {}
                     FolderTrackPlan::MissingCatalogTracks => {
                         state.set_error(
-                            "Folder tracks are no longer in the catalog; choose Refresh Library".into(),
+                            "Folder tracks are no longer in the catalog; choose Refresh Library"
+                                .into(),
                         );
                         return Ok(vec![]);
                     }
@@ -540,7 +570,8 @@ pub fn dispatch(
                     FolderTrackPlan::Ready(_) => {}
                     FolderTrackPlan::MissingCatalogTracks => {
                         state.set_error(
-                            "Folder tracks are no longer in the catalog; choose Refresh Library".into(),
+                            "Folder tracks are no longer in the catalog; choose Refresh Library"
+                                .into(),
                         );
                         return Ok(vec![]);
                     }
@@ -609,9 +640,65 @@ pub fn dispatch(
                 return Ok(vec![QueueAction::EnqueueTracksNext(tracks_to_add).into()]);
             }
         }
+        QueueAction::PromptImportPlaylist => {
+            if state.sources.active.navidrome().is_none() || state.downloads.is_offline() {
+                state.set_error("Connect to a writable playlist library to import".into());
+                return Ok(vec![]);
+            }
+            state.popups.close_all();
+            state
+                .popups
+                .set_input_dialog(Some(crate::app::state::InputDialog {
+                    title: "Import Playlist".into(),
+                    input: Default::default(),
+                    action_type: crate::app::state::InputDialogAction::ImportPlaylist {
+                        generation: state.library_generation,
+                    },
+                }));
+        }
+        QueueAction::ImportPlaylist { generation, path } => {
+            if generation != state.library_generation || state.downloads.is_offline() {
+                return Ok(vec![]);
+            }
+            if state.sources.active.navidrome().is_none() {
+                return Ok(vec![]);
+            }
+            if !matches!(
+                state.library.catalog_loading,
+                crate::app::catalog_loading::State::Ready
+            ) {
+                state.set_error("The full track catalog is required to import a playlist".into());
+                return Ok(vec![]);
+            }
+            let catalog = state.library.all_tracks.clone();
+            crate::app::sources::navidrome::effects::spawn(
+                state,
+                event_tx,
+                "playlist-import",
+                async move {
+                    let (name, keys) = crate::app::tasks::spawn_blocking(move || {
+                        crate::services::playlist_export::read_playlist(&path, &catalog)
+                    })
+                    .await??;
+                    let addition = crate::app::sources::navidrome::playlist_edit::Addition::Tracks(
+                        keys.into(),
+                    );
+                    Ok(vec![
+                        crate::app::sources::navidrome::NavAction::Command(
+                            crate::app::sources::navidrome::commands::Command::CreatePlaylist {
+                                generation,
+                                name,
+                                addition: Some(addition),
+                            },
+                        )
+                        .into(),
+                    ])
+                },
+            );
+        }
         QueueAction::PromptExportPlaylist { format, queue } => {
             let (title, tracks) = if queue {
-                ("Queue".to_owned(), state.playback_tracks().to_vec())
+                ("Queue".to_owned(), state.playback_tracks())
             } else if let Some(column) = state.playlist_nav.columns.get(1).filter(|column| {
                 !state.playlist_nav.loading
                     && state.playlist_nav.columns.first().and_then(|root| root.selected_item()).is_some_and(|selected| matches!(&column.play_all_row, Some(crate::app::state::PlayAllRow::Playlist { rating_key, .. }) if rating_key == selected.key()))
@@ -628,7 +715,7 @@ pub fn dispatch(
                         .and_then(|root| root.selected_item())
                         .map(|item| item.title().to_owned())
                         .unwrap_or_else(|| column.title.clone()),
-                    column.tracks.clone(),
+                    column.tracks.as_slice(),
                 )
             } else {
                 state.set_error("Open a complete playlist before exporting".into());
@@ -638,10 +725,13 @@ pub fn dispatch(
                 state.set_error("No tracks to export".into());
                 return Ok(vec![]);
             }
-            if let Err(error) = crate::services::playlist_export::encode(&tracks, format) {
-                state.set_error(error.to_string());
-                return Ok(vec![]);
-            }
+            let contents = match crate::services::playlist_export::encode(tracks, format) {
+                Ok(text) => std::sync::Arc::new(text.into_bytes()),
+                Err(error) => {
+                    state.set_error(error.to_string());
+                    return Ok(vec![]);
+                }
+            };
             let name: String = title
                 .chars()
                 .map(|c| {
@@ -664,15 +754,14 @@ pub fn dispatch(
                     input: path.to_string_lossy().as_ref().into(),
                     action_type: crate::app::state::InputDialogAction::ExportPlaylist {
                         generation: state.library_generation,
-                        tracks,
+                        contents,
                         format,
                     },
                 }));
         }
         QueueAction::ExportPlaylist {
             generation,
-            tracks,
-            format,
+            contents,
             path,
         } => {
             if generation != state.library_generation {
@@ -683,7 +772,7 @@ pub fn dispatch(
             let target = path.clone();
             crate::app::tasks::spawn(async move {
                 let result = crate::app::tasks::spawn_blocking(move || {
-                    crate::services::playlist_export::write(&target, &tracks, format)
+                    crate::services::playlist_export::write(&target, &contents)
                 })
                 .await
                 .map_err(|error| crate::app::action::AsyncError {
@@ -747,10 +836,10 @@ pub fn dispatch(
             result,
         } => match result {
             Ok(playlist) => {
-                std::sync::Arc::make_mut(&mut state.library.playlists)
-                    .retain(|existing| existing.rating_key != playlist.rating_key);
-                std::sync::Arc::make_mut(&mut state.library.playlists).push(playlist);
-                state.replace_playlists(state.library.playlists.as_ref().clone());
+                let mut playlists = state.library.playlists.as_ref().clone();
+                playlists.retain(|existing| existing.rating_key != playlist.rating_key);
+                playlists.push(playlist);
+                state.replace_playlists(playlists);
                 state
                     .desktop_collapsed_sections
                     .retain(|section| section != "Playlists");

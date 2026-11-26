@@ -221,6 +221,7 @@ async fn inactive_scan_clear_and_failure_preserve_other_cache_and_playback() {
         &choice,
         request.wrapping_sub(1),
         &Ok(cache::ScanResult {
+            folder_radio: None,
             updated: 123,
             warning: None
         }),
@@ -383,6 +384,7 @@ async fn clear_cancels_scan_and_late_completion_cannot_repopulate_or_switch() {
         &choice,
         request,
         &Ok(cache::ScanResult {
+            folder_radio: None,
             updated: 123,
             warning: None
         }),

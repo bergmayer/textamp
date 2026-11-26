@@ -208,18 +208,18 @@ impl Recommendations {
     }
     /// Artist affinity prefers the server's artist metadata. If it cannot
     /// supply recommendations, an analyzed track is an explicit sonic seed.
-    pub async fn artist(&self, artist: &str, seed: Option<&str>) -> Result<Vec<Track>> {
-        let native = self.similar(artist, false).await;
+    pub async fn artist_mix(&self, artist_key: &str, seed_key: Option<&str>) -> Result<Vec<Track>> {
+        let native = self.similar(&self.session.id(artist_key)?, false).await;
         if native.as_ref().is_ok_and(|tracks| !tracks.is_empty()) {
             return native;
         }
-        if let Some(seed) = seed.filter(|_| {
+        if let Some(seed) = seed_key.filter(|_| {
             self.sonic_allowed
                 && (self.binding.is_some()
                     || self.direct.initialized()
                     || self.session.extensions.contains("sonicSimilarity"))
         }) {
-            return self.similar(seed, true).await;
+            return self.similar(&self.session.id(seed)?, true).await;
         }
         native
     }

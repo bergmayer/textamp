@@ -19,13 +19,13 @@ Swift calls the bridge on a serial worker queue. It receives coalesced view
 snapshots separately from playback-clock updates; it does not perform network or
 disk work on the main actor. Artwork bytes come from the shared caches. Character
 art uses the same half-block and Braille encoders as the terminal presentation.
-Named themes use the shared semantic palette for content and native navigation titles. Enabled text maintains at least 4.5:1 contrast on its reading surfaces; System uses iOS semantic colors, with secondary text opacity adjusted when necessary for legibility. Artist details offer Radio and browser search controls; Search settings choose Google or DuckDuckGo. Browser search opens the system browser.
+Named themes use the shared semantic palette for content and native navigation titles. Enabled text maintains at least 4.5:1 contrast on its reading surfaces; System uses iOS semantic colors, with secondary text opacity adjusted when necessary for legibility. Artist Biography offers browser search; Search settings choose Google or DuckDuckGo. Browser search opens the system browser.
 SwiftUI observes the properties each view reads, so playback-clock updates do not
 invalidate library navigation, Settings or toolbar menus.
 
 In wide iPad windows, Library opens in the leading sidebar and Play Queue on the right. The sidebar button hides or shows Library while preserving the current columns.
 The lists and details between them form a horizontally scrollable column chain.
-Selecting a row reveals the next column. Tap a list title to filter, use its
+Library has Switch Library and Settings controls at the top right. Selecting a row reveals the next column. An artist’s album list opens with their portrait and biography excerpt. Tap …more for the full biography. Similar Artists appears below the albums. Album pages scroll from the cover, artist, genre, year and playback controls through the tracks to the Similar Albums cover grid and Similar Artists portraits. Play Album sits beneath the artwork. The person icon on the left opens Artist Biography. The record icon on the right opens Album Info in a resizable sheet. Play Album Next, Add Album to Queue and Download sit alongside Back in compact navigation and in each column header in a wide iPad workspace. When space is tight, additional actions are in the toolbar’s More menu. Tap a list title to filter, use its
 header controls for playback and View Options, or close a column and its
 descendants with the × button. The bottom queue button hides or shows the queue
 beside Library or Now Playing. In the docked queue, choose Queue Tools → Edit Queue
@@ -47,7 +47,7 @@ Settings uses SwiftUI forms, switches for independent options, navigation-link
 pickers for themes, artwork, web search and streaming quality, and a stepper for
 the Singles track limit. Streaming quality selects an explicit bitrate through
 the shared settings reducer; changing it takes effect on the next track.
-The Play Queue antenna menu lists queue types first, then Repeat and Continue with Related Tracks in its bottom Playback section. The bottom bar provides Play Queue, Search and the command palette. Available commands recently chosen from the palette appear first for ten subsequent openings, including across launches. They also remain in their normal menu groups. Available selection commands appear directly before the menu groups. Music searches also appear under Discover. Compact layouts also include Library to return to the root. Tapping the mini-player opens Now Playing in the wide iPad workspace. In compact windows, tap the transport bar to open Now Playing, or drag it upward. The panel follows the drag and opens fully when you release it after a swipe. A downward swipe from the header or center, a tap on the handle, or the close button returns it to the bar. A short, slow drag settles back to full height. Lyrics supports both large and medium sheet heights.
+The Play Queue antenna menu lists queue types first, then Repeat and Continue with Related Tracks in its bottom Playback section. The bottom bar provides Play Queue, Search and the command palette. Available commands recently chosen from the palette appear first for ten subsequent openings, including across launches. They also remain in their normal menu groups. Available selection commands appear directly before the menu groups. Music searches also appear under Discover. Compact layouts also include Library to return to the root. Tapping the mini-player opens Now Playing in the wide iPad workspace. In compact windows, tap the transport bar to open Now Playing, or drag it upward. The panel follows the drag and opens fully when you release it after a swipe. Swipe up past the transport to read the playing song’s metadata, lyrics and Similar Tracks. Swipe down through the details to return to the artwork. From the top, a downward swipe minimizes the player. The handle and close button also return it to the bar. A short, slow drag settles back to full height. Lyrics supports both large and medium sheet heights.
 Failed Navidrome library loads retain existing cached data and offer Retry in the status area. The recovery notice stays visible until retried or dismissed. The command palette omits status notices so they cannot obscure commands; closing it restores the notice.
 
 The mini-player keeps artwork, title, artist and transport controls in a separate
@@ -61,7 +61,7 @@ cannot close a different sheet. Desktop-only commands are omitted from the mobil
 palette. Palette music searches use the selected row or focused details, including similar
 tracks, then the surrounding artist or album context, then playback. Search commands are
 disabled without a music subject. Apple Music and YouTube are enabled by default;
-Spotify is optional in Search settings. Apple Music sends the original query directly to the Music app, including punctuation and queries with no catalog match. Use ⌘⇧A on a hardware keyboard for Search Apple Music. Textamp opens the Apple Music search URL as an app-only universal link. iOS reports whether the link opened; Music controls the resulting screen. Spotify and YouTube prefer their installed app and use web results if no app accepts the handoff.
+Spotify is optional in Search settings. For a selected song, album, or artist, Textamp checks Apple’s U.S. catalog for an exact match and opens its link in Music. An ambiguous or missing match, or an unavailable catalog, falls back to the original search link. Music controls whether it displays search results after launch. Use ⌘⇧A for Search Apple Music. Spotify and YouTube prefer their installed app and use web results if no app accepts the handoff.
 Long-press the Home Screen icon and choose Search to open library search. Matching playlists appear before tracks and open in the library.
 Available recent and selection-specific commands precede the shared menu groups. Tapping
 a group opens its commands and submenus; the navigation-bar Back button returns
@@ -105,7 +105,7 @@ contextual actions. A separate Queue Tools menu includes Save Queue as Playlist 
 by the source. Now Playing exposes artist, album and track navigation, seeking,
 volume and lyrics. Playback actions use icons with accessible labels. Column
 headers hold compact playback controls when they fit, with a second row at narrow
-widths. Album filters match both album titles and artist names. Visualizers
+widths. Filtering an album list matches album titles and artist names. Visualizers
 are not part of the mobile presentation.
 
 Long-press menus download playlists, albums and tracks through the shared download
@@ -116,6 +116,8 @@ the endpoint, while dismissing the picker preserves the selected track.
 Named themes select a matching alternate app icon. System includes light and dark
 icon variants. Assets are generated from the shared palettes with
 `cargo run --example app_icons`; iOS owns icon-change confirmation.
+
+The Radio button in the Library header starts Play Random Albums by default. Touch and hold it to choose a different station. Textamp remembers the choice on that device. Stations that need a seed or category open their usual selection screen.
 
 ## Build
 
@@ -191,9 +193,9 @@ restored after process termination. Network reachability updates offline state.
 Downloaded metadata and audio remain available; network-only discovery reports
 “Unavailable offline”.
 
-Long browser lists expose a persistent scroll thumb. Tap the scroll track to jump or drag the thumb to scrub. Alphabetically sorted lists also have a letter index. Drag two fingers across library rows to enter selection mode. Tap rows or drag again to change the selection, then tap Done. In an editable playlist the gesture opens playlist edit mode. Column titles stay on one line and scroll after ten seconds when truncated, unless Reduce Motion is enabled.
+Long browser lists expose a persistent scroll thumb. Tap the scroll track to jump or drag the thumb to scrub. Alphabetically sorted lists also have a letter index. Drag two fingers across library rows to enter selection mode. Tap rows or drag again to change the selection, then tap Done. In an editable playlist the gesture opens playlist edit mode. Category headings use the system large title. Album, artist, playlist, and folder names use the smaller system headline. Column titles stay on one line and scroll after ten seconds when truncated, unless Reduce Motion is enabled.
 
-Library uses a large leading navigation title. In compact layouts its bottom-bar button returns to the root. Back moves up one hierarchy level; holding Back offers return to the prior explicit library location, also exposed by the adjacent return arrow while history exists. Library-location history retains six entries. Settings and Now Playing share the main bottom bar. Detail playback controls sit beneath artwork; holding Play offers Play and Play Next. Following-track operations are contextual menu commands. Now Playing uses one position scrubber in its main transport area, with a compact handle over the shared waveform and time labels underneath. Before samples are available, the same control displays a normal progress track; waveform arrival preserves the control, geometry and active drag. Its expand control opens a landscape waveform with a Done button; closing it restores the prior orientation. Waveform and transport seeking share the playback engine.
+Library uses a large leading navigation title. In compact layouts its bottom-bar button returns to the root. Back moves up one hierarchy level; holding Back offers return to the prior explicit library location, when history is available. Library-location history retains six entries. Settings and Now Playing share the main bottom bar. Detail playback controls sit beneath artwork; holding Play offers Play and Play Next. Following-track operations are contextual menu commands. Now Playing uses one position scrubber in its main transport area, with a compact handle over the shared waveform and time labels underneath. Before samples are available, the same control displays a normal progress track; waveform arrival preserves the control, geometry and active drag. Waveform and transport seeking share the playback engine.
 
 Cache settings show shared background work, playlist track-list completion counts and percentage, artwork checks, completion, and errors. Playlist metadata proceeds independently of bounded artwork downloads.
 

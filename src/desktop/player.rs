@@ -4,7 +4,7 @@ use super::*;
 use gpui_kit::assets::IconName as Glyph;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::{
-    Icon, Selectable, Sizable,
+    Disableable, Icon, Selectable, Sizable,
     button::ButtonVariants,
     description_list::DescriptionList,
     menu::{DropdownMenu, PopupMenuItem},
@@ -115,7 +115,7 @@ impl Desktop {
                         .h(px(super::motion::TRANSPORT_HEIGHT))
                         .flex_none()
                         .flex()
-                        .child(div().flex_1().min_w_0().child(self.transport(None, cx)))
+                        .child(div().flex_1().min_w_0().child(self.transport(false, cx)))
                         .child(
                             div()
                                 .w(px(310.))
@@ -127,7 +127,7 @@ impl Desktop {
             })
             .when(!self.snapshot.separate_player, |view| {
                 view.child(
-                    div().absolute().right_2().top_2().child(
+                    div().absolute().right(px(4.)).top_2().child(
                         Button::new("close-fullscreen")
                             .debug_selector(|| "close-fullscreen".into())
                             .ghost()
@@ -192,7 +192,7 @@ impl Desktop {
     fn now_playing_metadata(&self, cx: &mut Context<Self>) -> AnyElement {
         let model = &self.snapshot.player;
         if model.track.is_none() {
-            return super::about::themed_artwork(cx);
+            return super::about::themed_artwork("now-playing-ansi-logo", cx);
         }
         let mut metadata = DescriptionList::horizontal()
             .columns(1)
@@ -299,193 +299,237 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        use super::motion::{self, SheetGeometry};
-        use gpui_kit::base::motion::{Transition, transition};
-        let expanded = self.snapshot.player.active;
-        let progress = transition(
+        use super::motion;
+        use gpui_kit::base::motion::{Spring, spring};
+        let expanded = self.sheet_open();
+        let progress = spring(
             "single-player-sheet",
             if expanded { 1_f32 } else { 0_f32 },
-            Transition::new(self.presentation_duration(motion::PLAYER_DURATION)),
+            Spring::new(self.presentation_duration(motion::PLAYER_DURATION)),
             window,
             cx,
         );
-        let hero_side = (f32::from(self.sheet_header_height) - motion::TRANSPORT_HEIGHT - 32.)
+        let (library, sidebar_width) = self.library_workspace(window, cx);
+        let player_width = f32::from(self.sheet_size.width - sidebar_width);
+        let reader = self
+            .snapshot
+            .surface
+            .as_ref()
+            .filter(|model| expanded && model.player_reader)
+            .cloned();
+        if let Some(model) = reader.as_ref() {
+            if self
+                .player_reader
+                .as_ref()
+                .is_none_or(|view| !view.read(cx).matches(model))
+            {
+                self.player_reader = Some(cx.new(|cx| {
+                    super::surface_view::SurfaceView::new(
+                        model.clone(),
+                        true,
+                        self.engine.commands.clone(),
+                        self.engine.snapshot.clone(),
+                        window,
+                        cx,
+                    )
+                }));
+            }
+        } else {
+            self.player_reader = None;
+        }
+        let show_body = reader.is_some() || self.show_visualizer;
+        let header_height = if show_body {
+            self.sheet_header_height
+        } else {
+            self.sheet_size.height
+        };
+        let hero_side = (f32::from(header_height) - 32.)
             .max(90.)
-            .min((f32::from(self.sheet_size.width) - 260.).max(90.));
-        let mut geometry =
-            SheetGeometry::at(progress, f32::from(self.sheet_size.height), hero_side);
-        geometry.artwork_x = self.transport_artwork_x + (16. - self.transport_artwork_x) * progress;
-        let transport = self.transport(Some(progress), cx).into_any_element();
-        let library = self.library_workspace(window, cx);
-        let metadata = (progress > 0.).then(|| self.now_playing_metadata(cx));
-        let body = (progress > 0.).then(|| self.player_content(false, cx));
-        let cover = self.transport_art.clone();
+            .min((player_width - 260.).max(90.));
         let owner = cx.entity().downgrade();
-        let header_owner = cx.entity().downgrade();
-        let header_default = px(crate::ui::layout::player_header(
-            f32::from(self.sheet_size.height),
-            f32::from(self.sheet_size.width),
-        ));
-        let header_min = px(motion::TRANSPORT_HEIGHT + 32. + 128.).min(header_default);
-        let visualizer_min = (self.sheet_size.height - header_default).max(px(80.));
-        let header = resizable_panel()
-            .size(header_default)
-            .size_range(header_min..header_default)
-            .child(
-                canvas(
-                    move |bounds, window, cx| {
-                        let changed = header_owner
-                            .update(cx, |this, _| {
-                                if this.sheet_header_height == bounds.size.height {
-                                    false
-                                } else {
-                                    this.sheet_header_height = bounds.size.height;
-                                    true
+        let rising_sheet = (progress > 0.).then(|| {
+            let sheet = {
+                let metadata = self.now_playing_metadata(cx);
+                let body = self
+                    .player_reader
+                    .clone()
+                    .map(|view| view.into_any_element())
+                    .or_else(|| self.show_visualizer.then(|| self.player_content(false, cx)));
+                let cover = self.transport_art.clone();
+                let header_owner = cx.entity().downgrade();
+                let header_default = px(crate::ui::layout::player_header(
+                    f32::from(self.sheet_size.height),
+                    player_width,
+                ) - motion::TRANSPORT_HEIGHT);
+                let header_min = px(32. + 128.).min(header_default);
+                let visualizer_min = (self.sheet_size.height - header_default).max(px(1.));
+                let header = resizable_panel()
+                    .size(header_default)
+                    .size_range(header_min..header_default)
+                    .child(
+                        canvas(
+                            move |bounds, window, cx| {
+                                let changed = header_owner
+                                    .update(cx, |this, _| {
+                                        if this.sheet_header_height == bounds.size.height {
+                                            false
+                                        } else {
+                                            this.sheet_header_height = bounds.size.height;
+                                            true
+                                        }
+                                    })
+                                    .unwrap_or(false);
+                                if changed {
+                                    let owner = header_owner.clone();
+                                    window.defer(cx, move |_, cx| {
+                                        let _ = owner.update(cx, |_, cx| cx.notify());
+                                    });
                                 }
-                            })
-                            .unwrap_or(false);
-                        if changed {
-                            let owner = header_owner.clone();
-                            window.defer(cx, move |_, cx| {
-                                let _ = owner.update(cx, |_, cx| cx.notify());
-                            });
-                        }
-                    },
-                    |_, _, _, _| {},
-                )
-                .size_full(),
-            );
-        let panels = v_resizable(SharedString::from(format!(
-            "single-player-panels-{}",
-            self.layout_epoch
-        )))
-        .child(header)
-        .child(
-            resizable_panel()
-                .size_range(visualizer_min..Pixels::MAX)
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .size_full(),
+                    );
+                let panels = v_resizable(SharedString::from(format!(
+                    "single-player-panels-{}",
+                    self.layout_epoch
+                )))
+                .child(header)
+                .child(
+                    resizable_panel()
+                        .size_range(visualizer_min..Pixels::MAX)
+                        .child(
+                            div()
+                                .debug_selector(|| "visualizer-pane".into())
+                                .size_full()
+                                .children(body),
+                        ),
+                );
+                let mut sheet = div()
+                    .relative()
+                    .size_full()
+                    .overflow_hidden()
+                    .bg(cx.theme().background)
+                    .when(
+                        self.snapshot.theme == crate::app::theme::ThemeName::BrushedAluminum,
+                        |sheet| sheet.child(super::theme::aluminum_surface()),
+                    )
+                    .when(show_body, |v| {
+                        v.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .top_0()
+                                .h(self.sheet_size.height)
+                                .child(panels),
+                        )
+                    });
+                sheet = sheet.child(
+                    div()
+                        .absolute()
+                        .left(px(hero_side + 40.))
+                        .right(px(48.))
+                        .top(px(16.))
+                        .h(px(hero_side))
+                        .debug_selector(|| "now-playing-metadata".into())
+                        .when(self.snapshot.player.track.is_none(), |view| {
+                            view.flex().flex_col()
+                        })
+                        .overflow_y_scrollbar()
+                        .child(
+                            div()
+                                .mb_2()
+                                .flex()
+                                .justify_start()
+                                .text_size(px(18.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(self.now_playing_title(cx)),
+                        )
+                        .child(metadata),
+                );
+
+                sheet = sheet.child(
+                    div()
+                        .id("player-sheet-artwork")
+                        .focusable()
+                        .tab_stop(true)
+                        .focus(|style| style.border_1().border_color(cx.theme().selection))
+                        .debug_selector(|| "transport-artwork".into())
+                        .absolute()
+                        .left(px(16.))
+                        .top(px(16.))
+                        .size(px(hero_side))
+                        .rounded(px(5.))
+                        .bg(cx.theme().muted)
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .role(Role::Button)
+                        .aria_label("Open Mini Player")
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, window, cx| this.enter_mini(window, cx)))
+                        .child(
+                            cover
+                                .map(|cover| {
+                                    img(cover)
+                                        .size_full()
+                                        .object_fit(ObjectFit::Contain)
+                                        .into_any_element()
+                                })
+                                .unwrap_or_else(|| {
+                                    Icon::new(Glyph::Music2)
+                                        .size(px(hero_side * 0.45))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .into_any_element()
+                                }),
+                        ),
+                );
+
+                sheet
+            };
+            let sheet = sheet
+                .when(expanded, |sheet| {
+                    sheet.child(
+                        div().absolute().right(px(4.)).top_2().child(
+                            Button::new("collapse-player-sheet")
+                                .debug_selector(|| "collapse-player-sheet".into())
+                                .ghost()
+                                .small()
+                                .icon(Icon::new(Glyph::ChevronDown))
+                                .accessibility_label("Show Library")
+                                .tooltip("Show Library · ⌘1")
+                                .on_click(cx.listener(|this, _, _, _| {
+                                    this.command(PaletteCommandKind::GotoLibrary)
+                                })),
+                        ),
+                    )
+                })
+                .into_any_element();
+            div()
+                .debug_selector(|| "now-playing-sheet".into())
+                .absolute()
+                .left(sidebar_width)
+                .right_0()
+                .top(self.sheet_size.height * (1. - progress.clamp(0., 1.)))
+                .h(self.sheet_size.height)
+                .shadow_lg()
+                .occlude()
                 .child(
                     div()
-                        .debug_selector(|| "visualizer-pane".into())
-                        .size_full()
-                        .opacity(progress)
-                        .when_some(body, |view, body| view.child(body)),
-                ),
-        );
-        let mut sheet = div()
-            .absolute()
-            .left_0()
-            .bottom_0()
-            .w_full()
-            .h(px(geometry.height))
-            .overflow_hidden()
-            .occlude()
-            .bg(cx.theme().background)
-            .when(progress == 0., |sheet| sheet.bg(cx.theme().title_bar))
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .top_0()
-                    .h(self.sheet_size.height)
-                    .child(panels),
-            );
-        sheet = sheet.child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px(geometry.controls_y))
-                .child(transport),
-        );
-        if let Some(metadata) = metadata {
-            sheet = sheet.child(
-                div()
-                    .absolute()
-                    .left(px(hero_side + 40.))
-                    .right(px(48.))
-                    .top(px(16.))
-                    .h(px(hero_side))
-                    .opacity(progress)
-                    .debug_selector(|| "now-playing-metadata".into())
-                    .when(self.snapshot.player.track.is_none(), |view| {
-                        view.flex().flex_col()
-                    })
-                    .overflow_y_scrollbar()
-                    .child(
-                        div()
-                            .mb_2()
-                            .flex()
-                            .justify_start()
-                            .text_size(px(18.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(self.now_playing_title(cx)),
-                    )
-                    .child(metadata),
-            );
-        }
-
-        sheet = sheet.child(
-            div()
-                .id("player-sheet-artwork")
-                .debug_selector(|| "transport-artwork".into())
-                .absolute()
-                .left(px(geometry.artwork_x))
-                .top(px(geometry.artwork_y))
-                .size(px(geometry.artwork_side))
-                .opacity(progress)
-                .rounded(px(5.))
-                .bg(cx.theme().muted)
-                .overflow_hidden()
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(!expanded, |art| {
-                    art.role(Role::Button)
-                        .aria_label("Show Now Playing")
-                        .cursor_pointer()
-                })
-                .on_click(cx.listener(|this, _, _, _| {
-                    if !this.snapshot.player.active {
-                        this.command(PaletteCommandKind::GotoNowPlaying);
-                    }
-                }))
-                .child(
-                    cover
-                        .map(|cover| {
-                            img(cover)
-                                .size_full()
-                                .object_fit(ObjectFit::Contain)
-                                .into_any_element()
+                        .debug_selector(|| "sheet-player-content".into())
+                        .when(expanded, |sheet| {
+                            sheet
+                                .track_focus(self.pane_focus.handle(super::keyboard::Pane::Library))
+                                .tab_group()
                         })
-                        .unwrap_or_else(|| {
-                            Icon::new(Glyph::Music2)
-                                .size(px(geometry.artwork_side * 0.45))
-                                .text_color(cx.theme().muted_foreground)
-                                .into_any_element()
-                        }),
-                ),
-        );
-
-        let sheet = sheet
-            .when(expanded, |sheet| {
-                sheet.child(
-                    div().absolute().right_2().top_2().child(
-                        Button::new("collapse-player-sheet")
-                            .debug_selector(|| "collapse-player-sheet".into())
-                            .ghost()
-                            .small()
-                            .icon(Icon::new(Glyph::ChevronDown))
-                            .accessibility_label("Show Library")
-                            .tooltip("Show Library · ⌘1")
-                            .on_click(cx.listener(|this, _, _, _| {
-                                this.command(PaletteCommandKind::GotoLibrary)
-                            })),
-                    ),
+                        .size_full()
+                        .overflow_hidden()
+                        .child(sheet),
                 )
-            })
-            .into_any_element();
-        div()
+        });
+        let workspace = div()
             .relative()
             .size_full()
             .flex()
@@ -515,12 +559,31 @@ impl Desktop {
                 .absolute()
                 .size_full(),
             )
-            .child(div().flex_1().min_h_0().child(library))
-            .child(div().flex_none().h(px(motion::TRANSPORT_HEIGHT)))
-            .child(sheet)
-            .into_any_element()
+            .child(library)
+            .children(rising_sheet)
+            .into_any_element();
+        self.queue_dock(workspace, window, cx)
     }
 
+    pub(super) fn enter_mini(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.mini_return_size = Some(window.viewport_size());
+        window.resize(size(px(360.), px(396.)));
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn leave_mini(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.resize(self.mini_return_size.take().unwrap_or(self.library_size));
+        #[cfg(target_os = "macos")]
+        if let Some((_, surface)) = &self.text_surface {
+            let surface = surface.clone();
+            window.defer(cx, move |window, cx| {
+                surface.update(cx, |view, cx| view.activate(window, cx))
+            });
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
     pub(super) fn mini_player(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let mut controls = div().flex().items_center().justify_center().gap_4();
         for (id, icon, label, action) in [
@@ -557,20 +620,59 @@ impl Desktop {
                 PlaybackAction::ShowLyrics,
             ),
         ] {
-            controls = controls.child(
-                Button::new(id)
-                    .small()
-                    .ghost()
-                    .size(px(36.))
-                    .icon(Icon::new(icon).size(px(24.)))
-                    .tooltip(label)
-                    .on_click(cx.listener(move |this, _, _, _| {
-                        let _ = this
-                            .engine
-                            .commands
-                            .try_send(Command::Action(action.clone().into()));
-                    })),
-            );
+            let button = Button::new(id).small().tooltip(label).on_click(cx.listener(
+                move |this, _, window, cx| {
+                    if matches!(action, PlaybackAction::ShowLyrics) {
+                        this.leave_mini(window, cx);
+                        this.command(PaletteCommandKind::GotoNowPlaying);
+                    }
+                    let _ = this
+                        .engine
+                        .commands
+                        .try_send(Command::Action(action.clone().into()));
+                },
+            ));
+            controls = controls.child(super::theme::playback_button(
+                button,
+                icon,
+                self.snapshot.theme,
+            ));
+        }
+        if self.mini_return_size.is_some() {
+            return div()
+                .relative()
+                .size_full()
+                .bg(cx.theme().background)
+                .child(
+                    div()
+                        .id("mini-artwork-return")
+                        .focusable()
+                        .tab_stop(true)
+                        .focus(|style| style.border_1().border_color(cx.theme().selection))
+                        .debug_selector(|| "mini-artwork-return".into())
+                        .size_full()
+                        .cursor_pointer()
+                        .role(Role::Button)
+                        .aria_label("Return to Full Window")
+                        .on_click(cx.listener(|this, _, window, cx| this.leave_mini(window, cx)))
+                        .child(self.square_artwork(cx)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .px_2()
+                        .py_1()
+                        .bg(cx.theme().title_bar.opacity(0.90))
+                        .child(controls)
+                        .child(
+                            gpui_kit::component::slider::Slider::new(&self.seek_slider)
+                                .disabled(!self.snapshot.seekable),
+                        ),
+                )
+                .into_any_element();
         }
         if window.viewport_size().height < px(280.) {
             return div()
@@ -664,29 +766,158 @@ impl Desktop {
             )
             .into_any_element()
     }
-    pub(super) fn now_playing(
-        &mut self,
-        include_information: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let presentation = self.player_content(include_information, cx);
+    pub(super) fn now_playing(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let presentation = self.player_content(true, cx);
         div()
             .size_full()
             .flex()
             .flex_col()
             .child(div().flex_1().min_h_0().child(presentation))
-            .when(self.snapshot.player.active, |view| {
-                view.child(self.transport(None, cx))
+            .when(
+                self.snapshot.player.active && self.role != WindowRole::Library,
+                |view| view.child(self.transport(false, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn history_row(&self, index: usize) -> AnyElement {
+        use gpui_kit::component::menu::ContextMenuExt;
+        let p = &self.snapshot.listening_history[index];
+        let id = p.id.clone();
+        let menu_id = id.clone();
+        let menu_commands = self.engine.commands.clone();
+        let commands = self.engine.commands.clone();
+        let policy = crate::app::track_context::ContextPolicy {
+            queued: false,
+            ..self.snapshot.context_policy
+        };
+        let entries = crate::app::track_context::track_context_with_policy(
+            policy,
+            p.track.as_ref().unwrap_or(&Default::default()),
+            true,
+        );
+        let art = p.track.as_ref().and_then(|t| {
+            t.parent_rating_key
+                .as_deref()
+                .and_then(|key| self.cached_artwork(key))
+                .or_else(|| self.cached_artwork(&t.rating_key))
+        });
+        gpui_kit::component::list::ListItem::new(("history-track", index))
+            .when_some(
+                super::theme::aluminum_list_stripe(self.snapshot.theme, index),
+                |row, stripe| row.bg(stripe),
+            )
+            .debug_selector(move || format!("history-track-{index}"))
+            .w_full()
+            .h(px(40.))
+            .px_1()
+            .py_0()
+            .selected(index == self.snapshot.history_cursor)
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when_some(art, |row, image| {
+                        row.child(img(image).size(px(32.)).flex_none())
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().truncate().child(p.title.clone()))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(11.))
+                                    .child(format!("{} · {}", p.artist, p.album)),
+                            ),
+                    ),
+            )
+            .on_click(move |event, _, _| {
+                use crate::app::action::QueueAction;
+                let action = if event.click_count() == 2 {
+                    crate::app::listening_history::track_action(
+                        &id,
+                        crate::app::track_context::ContextKind::PlayTrack,
+                    )
+                } else {
+                    QueueAction::SelectHistory(id.clone()).into()
+                };
+                let _ = commands.try_send(Command::Action(action));
+            })
+            .context_menu(move |mut menu, _, _| {
+                use crate::app::track_context::ContextKind;
+                for entry in &entries {
+                    if matches!(entry.kind, ContextKind::Separator) {
+                        menu = menu.separator();
+                        continue;
+                    }
+                    let label = entry.label.clone();
+                    let command = entry.kind.clone();
+                    let id = menu_id.clone();
+                    let commands = menu_commands.clone();
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
+                        let _ = commands.try_send(Command::Action(
+                            crate::app::listening_history::track_action(&id, command.clone()),
+                        ));
+                    }));
+                }
+                menu
             })
             .into_any_element()
     }
 
     pub(super) fn queue_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let queue = self.player_queue(cx);
+        let history = self.snapshot.showing_queue_history;
+        let queue = if history {
+            let scroll = self
+                .scroll_handles
+                .entry("listening-history".into())
+                .or_default()
+                .clone();
+            let owner = cx.entity().downgrade();
+            let rows = uniform_list(
+                "history-tracks",
+                self.snapshot.listening_history.len(),
+                move |range, _, cx| {
+                    owner
+                        .update(cx, |this, _| {
+                            range
+                                .map(|index| this.history_row(index))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                },
+            )
+            .track_scroll(&scroll)
+            .size_full();
+            div()
+                .size_full()
+                .flex()
+                .child(div().flex_1().min_w_0().h_full().child(rows))
+                .child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .w(px(8.))
+                        .h_full()
+                        .child(Scrollbar::vertical(&scroll).viewport_from_layout()),
+                )
+                .into_any_element()
+        } else {
+            self.player_queue(cx)
+        };
         let queue_owner = cx.entity().downgrade();
         let measure_queue = self.role == WindowRole::Queue;
         let queue = div()
-            .debug_selector(|| "now-playing-queue".into())
+            .debug_selector(|| "play-queue".into())
+            .track_focus(self.pane_focus.handle(super::keyboard::Pane::Queue))
+            .tab_group()
             .on_prepaint(move |bounds, window, cx| {
                 if !measure_queue {
                     return;
@@ -708,85 +939,29 @@ impl Desktop {
             .size_full()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_0()
             .bg(cx.theme().sidebar)
             .child(
                 div()
+                    .h(px(36.))
                     .px_3()
-                    .pt_3()
+                    .flex_none()
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .justify_end()
                     .child(
                         div()
                             .debug_selector(|| "queue-heading".into())
-                            .text_size(px(16.))
+                            .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Play Queue"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child({
-                                let choices = self.snapshot.queue_modes.clone();
-                                let commands = self.engine.commands.clone();
-                                let active = self.snapshot.queue_mode != "Manual Queue";
-                                Button::new("queue-mode")
-                                    .debug_selector(|| "queue-mode".into())
-                                    .ghost()
-                                    .small()
-                                    .icon(Icon::new(Glyph::ListStart))
-                                    .selected(active)
-                                    .when(active, |button| button.primary())
-                                    .accessibility_label("Queue Type")
-                                    .tooltip(format!("Queue Type: {}", self.snapshot.queue_mode))
-                                    .dropdown_menu(move |mut menu, _, _| {
-                                        for choice in &choices {
-                                            let commands = commands.clone();
-                                            let command = choice.command.clone();
-                                            let selected = choice.selected;
-                                            menu = menu.item(
-                                                PopupMenuItem::new(choice.label.clone())
-                                                    .checked(selected)
-                                                    .disabled(choice.disabled.is_some())
-                                                    .on_click(move |_, _, _| {
-                                                        if !selected {
-                                                            let _ = commands.try_send(
-                                                                Command::Palette(command.clone()),
-                                                            );
-                                                        }
-                                                    }),
-                                            );
-                                        }
-                                        menu
-                                    })
-                            })
-                            .child(self.queue_tools(cx))
-                            .when(!self.snapshot.separate_player, |header| {
-                                header.child(
-                                    Button::new("close-queue")
-                                        .ghost()
-                                        .small()
-                                        .icon(Icon::new(Glyph::ListMusic))
-                                        .selected(true)
-                                        .primary()
-                                        .accessibility_label("Hide Play Queue")
-                                        .tooltip("Hide Play Queue")
-                                        .on_click(cx.listener(|this, _, _, _| {
-                                            let _ =
-                                                this.engine.commands.try_send(Command::ToggleQueue);
-                                        })),
-                                )
-                            }),
+                            .child(if history { "History" } else { "Next" }),
                     ),
             )
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
-                    .px_3()
+                    .px_1()
                     .flex()
                     .flex_col()
                     .child(queue),
@@ -802,6 +977,204 @@ impl Desktop {
             .into_any_element()
     }
 
+    fn sidebar_radio(&self, cx: &Context<Self>) -> AnyElement {
+        use gpui_kit::component::Disableable;
+        let stations = &self.snapshot.library_stations;
+        let id = |s: &crate::library::station::Station| {
+            s.identifier.clone().unwrap_or_else(|| s.key.clone())
+        };
+        let current = crate::app::radio_navigation::shortcut_station(
+            stations,
+            self.snapshot.preferred_station.as_deref(),
+        );
+        let command = current.map(crate::app::radio_navigation::shortcut_command);
+        let label = current.map_or("Radio", |s| s.title.as_str());
+        let choices: Vec<_> = stations
+            .iter()
+            .map(|s| {
+                (
+                    id(s),
+                    s.title.clone(),
+                    current.is_some_and(|c| c.key == s.key),
+                )
+            })
+            .collect();
+        let commands = self.engine.commands.clone();
+        Button::new("sidebar-radio")
+            .debug_selector(|| "sidebar-radio".into())
+            .ghost()
+            .xsmall()
+            .w(px(30.))
+            .h(px(30.))
+            .icon(Icon::new(Glyph::Radio).size(px(20.)))
+            .disabled(current.is_none())
+            .accessibility_label(format!("Play {label}"))
+            .tooltip(format!("{label} · Hold to choose a station"))
+            .on_click(cx.listener(move |this, _, _, _| {
+                if let Some(command) = &command {
+                    this.command(command.clone());
+                }
+            }))
+            .context_menu(move |mut menu, _, _| {
+                for (id, title, selected) in &choices {
+                    let commands = commands.clone();
+                    let id = id.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(title.clone())
+                            .checked(*selected)
+                            .on_click(move |_, _, _| {
+                                let _ = commands.try_send(Command::PreferStation(id.clone()));
+                            }),
+                    );
+                }
+                menu
+            })
+            .open_on_hold(true)
+            .into_any_element()
+    }
+
+    pub(super) fn queue_shortcuts(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use gpui_kit::component::sidebar::SidebarItem;
+        let visible = self.role == WindowRole::Queue || self.snapshot.queue_open;
+        div()
+            .track_focus(self.pane_focus.handle(super::keyboard::Pane::Rail))
+            .tab_group()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(3.))
+            .gap_1()
+            .bg(cx.theme().sidebar)
+            .children(
+                [
+                    (false, Glyph::ListMusic, "Playing Next"),
+                    (true, Glyph::ClockArrowLeft, "Listening History"),
+                ]
+                .into_iter()
+                .map(|(history, icon, label)| {
+                    let selected = visible && self.snapshot.showing_queue_history == history;
+                    let item = gpui_kit::component::sidebar::SidebarMenuItem::new(label)
+                        .collapsed(true)
+                        .active(selected)
+                        .w(px(30.))
+                        .h(px(30.))
+                        .p_0()
+                        .icon(Icon::new(icon))
+                        .accessibility_label(if selected {
+                            format!("Hide {label}")
+                        } else {
+                            label.to_owned()
+                        })
+                        .on_click(cx.listener(move |this, _, _, _| {
+                            if selected {
+                                let _ = this.engine.commands.try_send(Command::ToggleQueue);
+                                return;
+                            }
+                            let mut actions =
+                                vec![crate::app::action::QueueAction::ShowHistory(history).into()];
+                            if !visible {
+                                actions.push(
+                                    crate::app::action::NavigationAction::ToggleQueuePanel.into(),
+                                );
+                            }
+                            let _ = this.engine.commands.try_send(Command::GuardedActions {
+                                generation: this.snapshot.generation,
+                                target: None,
+                                actions,
+                            });
+                        }));
+                    div()
+                        .debug_selector(move || format!("queue-rail-{history}"))
+                        .w(px(30.))
+                        .h(px(30.))
+                        .child(item.render(label, window, cx))
+                }),
+            )
+            .child(div().h(px(1.)).w(px(24.)).my_1().bg(cx.theme().border))
+            .children([
+                Button::new("settings-toolbar")
+                    .debug_selector(|| "sidebar-settings".into())
+                    .ghost()
+                    .xsmall()
+                    .w(px(30.))
+                    .h(px(30.))
+                    .icon(Icon::new(Glyph::Settings2).size(px(20.)))
+                    .tooltip("Settings · ⌘,")
+                    .accessibility_label("Settings")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)))
+                    .into_any_element(),
+                Button::new("sidebar-search")
+                    .debug_selector(|| "sidebar-search".into())
+                    .ghost()
+                    .xsmall()
+                    .w(px(30.))
+                    .h(px(30.))
+                    .icon(Icon::new(Glyph::Search).size(px(20.)))
+                    .accessibility_label("Search")
+                    .tooltip("Search · ⌘F")
+                    .on_click(
+                        cx.listener(|this, _, _, _| this.command(PaletteCommandKind::OpenSearch)),
+                    )
+                    .into_any_element(),
+                Button::new("sidebar-palette")
+                    .debug_selector(|| "sidebar-palette".into())
+                    .ghost()
+                    .xsmall()
+                    .w(px(30.))
+                    .h(px(30.))
+                    .icon(Icon::new(Glyph::Command).size(px(20.)))
+                    .accessibility_label("Command Palette")
+                    .tooltip("Command Palette · ⇧⌘P")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
+                    .into_any_element(),
+                self.sidebar_radio(cx),
+            ])
+            .child(div().flex_1())
+            .child(self.queue_mode_button())
+            .child(self.queue_tools(cx))
+            .when(visible, |rail| {
+                let history = self.snapshot.showing_queue_history;
+                let label = if history {
+                    "Clear History"
+                } else {
+                    "Clear Queue"
+                };
+                let empty = if history {
+                    self.snapshot.listening_history.is_empty()
+                } else {
+                    self.snapshot
+                        .queue_tools
+                        .iter()
+                        .find(|tool| {
+                            tool.tool == crate::app::presentation::NpSidebarButton::ClearQueue
+                        })
+                        .is_none_or(|tool| tool.disabled_reason.is_some())
+                };
+                rail.child(
+                    Button::new("queue-clear")
+                        .debug_selector(|| "queue-clear".into())
+                        .ghost()
+                        .small()
+                        .icon(Icon::new(Glyph::Trash))
+                        .tooltip(label)
+                        .accessibility_label(label)
+                        .disabled(empty)
+                        .on_click(cx.listener(move |this, _, _, _| {
+                            let _ = this.engine.commands.try_send(Command::Action(
+                                crate::app::queue_controls::clear_tab(history).into(),
+                            ));
+                        })),
+                )
+            })
+            .pb_1()
+            .into_any_element()
+    }
+
     pub(super) fn queue_dock(
         &mut self,
         content: AnyElement,
@@ -809,7 +1182,10 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use gpui_kit::base::motion::{Spring, spring};
-        let shown = self.snapshot.queue_open && !self.snapshot.separate_player;
+        if self.snapshot.separate_player {
+            return content;
+        }
+        let shown = self.snapshot.queue_open;
         let progress = spring(
             "queue-dock",
             if shown { 1_f32 } else { 0_f32 },
@@ -818,22 +1194,22 @@ impl Desktop {
             cx,
         )
         .clamp(0., 1.);
-        self.queue_progress = progress;
         if !shown && progress == 0. {
             self.queue_focused = false;
         }
         let queue = (progress > 0.).then(|| self.queue_panel(cx));
-        let width = self.queue_width;
+        let rail = px(motion::SIDEBAR_RAIL_WIDTH);
+        let width = rail + (self.queue_width - rail) * progress;
         let settled = shown && progress == 1.;
         let owner = cx.entity().downgrade();
-        h_resizable(SharedString::from(format!(
+        let panels = h_resizable(SharedString::from(format!(
             "queue-dock-panels-{}-{settled}",
             self.layout_epoch
         )))
         .child(
             resizable_panel().size_range(px(350.)..Pixels::MAX).child(
                 div()
-                    .debug_selector(|| "now-playing-main".into())
+                    .debug_selector(|| "workspace-content".into())
                     .size_full()
                     .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
                         this.queue_focused = false;
@@ -842,60 +1218,106 @@ impl Desktop {
                     .child(content),
             ),
         )
-        .when_some(queue, |panels, queue| {
-            panels.child(
-                resizable_panel()
-                    .size(width * progress)
-                    .fixed()
-                    .size_range(if !settled {
-                        width * progress..width * progress
-                    } else {
-                        px(240.)
-                            ..(window.viewport_size().width * 0.4)
-                                .min(px(480.))
-                                .max(px(240.))
-                    })
-                    .child(
-                        div()
-                            .debug_selector(|| "queue-dock".into())
-                            .relative()
-                            .size_full()
-                            .overflow_hidden()
-                            .border_l_2()
-                            .border_color(cx.theme().border)
-                            .on_prepaint(move |bounds, window, cx| {
-                                if settled {
-                                    let changed = owner
-                                        .update(cx, |this, _| {
-                                            let changed = this.queue_width != bounds.size.width;
-                                            this.queue_width = bounds.size.width;
-                                            changed
-                                        })
-                                        .unwrap_or(false);
-                                    if changed {
-                                        let owner = owner.clone();
-                                        window.defer(cx, move |_, cx| {
-                                            let _ = owner.update(cx, |_, cx| cx.notify());
-                                        });
-                                    }
+        .child(
+            resizable_panel()
+                .size(width)
+                .fixed()
+                .size_range(if !settled {
+                    width..width
+                } else {
+                    px(140.)..px(500.)
+                })
+                .child(
+                    div()
+                        .debug_selector(|| "queue-dock".into())
+                        .relative()
+                        .size_full()
+                        .overflow_hidden()
+                        .when(
+                            self.snapshot.theme != crate::app::theme::ThemeName::BrushedAluminum,
+                            |pane| pane.border_l_2().border_color(cx.theme().border),
+                        )
+                        .on_prepaint(move |bounds, window, cx| {
+                            if settled {
+                                let changed = owner
+                                    .update(cx, |this, _| {
+                                        let changed = this.queue_width != bounds.size.width;
+                                        this.queue_width = bounds.size.width;
+                                        changed
+                                    })
+                                    .unwrap_or(false);
+                                if changed {
+                                    let owner = owner.clone();
+                                    window.defer(cx, move |_, cx| {
+                                        let _ = owner.update(cx, |_, cx| cx.notify());
+                                    });
                                 }
-                            })
-                            .child(
+                            }
+                        })
+                        .when_some(queue, |pane, queue| {
+                            pane.child(
                                 div()
                                     .absolute()
                                     .left_0()
-                                    .top(px(40.) * (1. - progress))
+                                    .top_0()
                                     .opacity(progress)
-                                    .w_full()
-                                    .h_full()
+                                    .right(rail)
+                                    .bottom_0()
                                     .child(queue),
-                            ),
-                    ),
+                            )
+                        }),
+                ),
+        );
+        div()
+            .relative()
+            .size_full()
+            .child(panels)
+            .child(
+                div()
+                    .debug_selector(|| "library-queue-rail".into())
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(rail)
+                    .occlude()
+                    .child(self.queue_shortcuts(window, cx)),
             )
-        })
-        .into_any_element()
+            .into_any_element()
     }
 
+    pub(super) fn queue_mode_button(&self) -> impl IntoElement {
+        let choices = self.snapshot.queue_modes.clone();
+        let commands = self.engine.commands.clone();
+        let active = self.snapshot.queue_mode != "Manual Queue";
+        Button::new("queue-mode")
+            .debug_selector(|| "queue-mode".into())
+            .ghost()
+            .small()
+            .icon(Icon::new(Glyph::ListStart))
+            .selected(active)
+            .when(active, |button| button.primary())
+            .accessibility_label("Queue Type")
+            .tooltip(format!("Queue Type: {}", self.snapshot.queue_mode))
+            .dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |mut menu, _, _| {
+                for choice in &choices {
+                    let commands = commands.clone();
+                    let command = choice.command.clone();
+                    let selected = choice.selected;
+                    menu = menu.item(
+                        PopupMenuItem::new(choice.label.clone())
+                            .checked(selected)
+                            .disabled(choice.disabled.is_some())
+                            .on_click(move |_, _, _| {
+                                if !selected {
+                                    let _ = commands.try_send(Command::Palette(command.clone()));
+                                }
+                            }),
+                    );
+                }
+                menu
+            })
+    }
     pub(super) fn queue_tools(&mut self, _cx: &mut Context<Self>) -> AnyElement {
         let tools = self.snapshot.queue_tools.clone();
         let commands = self.engine.commands.clone();
@@ -908,10 +1330,13 @@ impl Desktop {
             .icon(Icon::new(Glyph::ClipboardPenLine))
             .accessibility_label(crate::app::queue_controls::Menu::Tools.label())
             .tooltip("Queue Tools")
-            .dropdown_menu(move |mut menu, _, _| {
+            .dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |mut menu, _, _| {
                 let mut previous = None;
                 for tool in &tools {
-                    if previous.replace(tool.group).is_some_and(|group| group != tool.group) {
+                    if previous
+                        .replace(tool.group)
+                        .is_some_and(|group| group != tool.group)
+                    {
                         menu = menu.separator();
                     }
                     let commands = commands.clone();
@@ -934,16 +1359,11 @@ impl Desktop {
             .into_any_element()
     }
 
-    fn player_information(
-        &mut self,
-        artwork_size: f32,
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn player_information(&mut self, artwork_size: f32, cx: &mut Context<Self>) -> AnyElement {
         let artwork = self.square_artwork(cx);
         let metadata = self.now_playing_metadata(cx);
         h_resizable(SharedString::from(format!(
-            "player-information-{}-{compact}",
+            "player-information-{}",
             self.layout_epoch
         )))
         .child(
@@ -984,15 +1404,10 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let model = self.snapshot.player.clone();
-        let compact = !model.active;
         let fullscreen = model.fullscreen;
-        let artwork_size = if compact {
-            90.
-        } else {
-            (f32::from(self.sheet_size.height) * 0.65).clamp(176., 500.)
-        };
+        let artwork_size = (f32::from(self.sheet_size.height) * 0.65).clamp(176., 500.);
         if self.role == WindowRole::NowPlaying && self.snapshot.separate_player && !fullscreen {
-            let information = self.player_information(artwork_size, compact, cx);
+            let information = self.player_information(artwork_size, cx);
             return div()
                 .size_full()
                 .p_4()
@@ -1227,10 +1642,9 @@ impl Desktop {
                 .child(div().flex_1().min_h_0().child(visual))
                 .into_any_element();
         }
-        let information =
-            include_information.then(|| self.player_information(artwork_size, compact, cx));
+        let information = include_information.then(|| self.player_information(artwork_size, cx));
         let presentation = v_resizable(SharedString::from(format!(
-            "player-presentation-{}-{compact}-{include_information}",
+            "player-presentation-{}-{include_information}",
             self.layout_epoch
         )))
         .when_some(information, |panels, information| {
@@ -1265,7 +1679,7 @@ impl Desktop {
             .flex()
             .flex_col()
             .gap_3()
-            .p(px(if compact { 8. } else { 16. }))
+            .p_4()
             .child(div().flex_1().min_h_0().child(presentation))
             .into_any_element()
     }
@@ -1311,9 +1725,8 @@ impl Desktop {
         let artwork = track
             .parent_rating_key
             .as_ref()
-            .and_then(|key| self.image_cache.get(key))
-            .or_else(|| self.image_cache.get(&track.rating_key))
-            .cloned();
+            .and_then(|key| self.cached_artwork(key))
+            .or_else(|| self.cached_artwork(&track.rating_key));
         let context = crate::app::track_context::track_context_with_policy(
             crate::app::track_context::ContextPolicy {
                 queued: true,
@@ -1448,13 +1861,9 @@ impl Desktop {
             .as_ref()
             .filter(|column| !column.rows.is_empty())
         else {
-            use gpui_kit::component::empty::{Empty, EmptyDescription, EmptyHeader, EmptyTitle};
+            use gpui_kit::component::empty::{Empty, EmptyHeader, EmptyTitle};
             return Empty::new()
-                .header(
-                    EmptyHeader::new()
-                        .title(EmptyTitle::new().child("Queue is empty"))
-                        .description(EmptyDescription::new().child("Add music from your library.")),
-                )
+                .header(EmptyHeader::new().title(EmptyTitle::new().child("Queue is empty")))
                 .into_any_element();
         };
         let scroll = self
@@ -1503,12 +1912,18 @@ impl Desktop {
             .overflow_hidden()
             .child(
                 div().flex_1().min_w_0().h_full().child(
-                    uniform_list("player-queue", len, move |range, _, cx| {
+                    uniform_list("player-queue", len, move |range, window, cx| {
                         owner
                             .update(cx, |this, cx| {
                                 range
                                     .map(|row| {
-                                        this.browser_row(super::browser::PLAYER_QUEUE, row, cx)
+                                        this.browser_row(
+                                            super::browser::PLAYER_QUEUE,
+                                            row,
+                                            Some(row),
+                                            window,
+                                            cx,
+                                        )
                                     })
                                     .collect::<Vec<_>>()
                             })
@@ -1519,7 +1934,7 @@ impl Desktop {
                 ),
             )
             .child(
-                div().relative().flex_none().w(px(12.)).h_full().child(
+                div().relative().flex_none().w(px(8.)).h_full().child(
                     Scrollbar::vertical(&scroll)
                         .mode(gpui_kit::component::scroll::ScrollbarMode::Always)
                         .viewport_from_layout(),

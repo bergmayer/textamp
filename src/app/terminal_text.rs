@@ -121,7 +121,11 @@ fn raw_document(state: &AppState) -> Option<Document> {
             field.selected,
             secret,
         )
-    } else if let Some(dialog) = state.popups.input_dialog() {
+    } else if let Some(dialog) = state
+        .popups
+        .input_dialog()
+        .filter(|i| !i.action_type.is_playlist_file())
+    {
         (
             Target::Input(dialog.title.clone()),
             dialog.input.to_string(),

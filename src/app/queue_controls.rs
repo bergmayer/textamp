@@ -1,6 +1,24 @@
 //! Queue-tool ordering, availability, state and commands shared by all frontends.
 use super::{Action, AppState, action::*, presentation::NpSidebarButton as Tool, state::*};
 
+pub fn clear_tab(history: bool) -> QueueAction {
+    if history {
+        QueueAction::ClearHistory
+    } else {
+        QueueAction::ClearQueue
+    }
+}
+
+pub fn can_clear_tab(state: &AppState) -> bool {
+    if state.showing_queue_history {
+        !state.listening_history.is_empty()
+    } else {
+        definition(state, Tool::ClearQueue)
+            .disabled_reason
+            .is_none()
+    }
+}
+
 /// A command's current presentation state, without geometry or widget types.
 #[derive(Clone)]
 pub struct Definition {

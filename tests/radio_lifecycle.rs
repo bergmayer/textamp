@@ -14,7 +14,10 @@ use tokio::sync::mpsc;
 mod common;
 
 fn track(key: &str) -> Track {
-    serde_json::from_value(serde_json::json!({"ratingKey":key,"title":key})).unwrap()
+    serde_json::from_value(
+        serde_json::json!({"ratingKey":key,"parentRatingKey":format!("album-{key}"),"title":key}),
+    )
+    .unwrap()
 }
 
 fn station() -> ActiveStation {
@@ -135,6 +138,12 @@ impl Player {
         let mut state = common::navidrome_state();
         state.set_playback_mode(PlaybackMode::Radio);
         state.radio.tracks = vec![track("first"), track("last")];
+        state.radio.introduced_albums = state
+            .radio
+            .tracks
+            .iter()
+            .filter_map(textamp::library::radio::album_key)
+            .collect();
         state.radio.track_index = Some(0);
         state.playback.status = PlayStatus::Playing;
         Self {
@@ -175,9 +184,13 @@ async fn prefetch_finishing_on_last_track_does_not_skip_it() {
     assert!(p.reduce(refill(&["new", "new"])).is_empty());
     assert_eq!(p.state.current_track().unwrap().rating_key, "last");
     assert_eq!(
-        p.state.radio.tracks.len(),
-        3,
-        "deduplicate within the response too"
+        p.state
+            .radio
+            .tracks
+            .iter()
+            .map(|t| t.rating_key.as_str())
+            .collect::<Vec<_>>(),
+        ["last", "new"]
     );
     assert_eq!(p.state.playback.status, PlayStatus::Playing);
 }

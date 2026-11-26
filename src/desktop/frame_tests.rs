@@ -74,7 +74,9 @@ fn sidebar_group_click_targets(cx: &mut TestAppContext) {
     heading.label = "Playlists".into();
     heading.playlist_key = None;
     initial.sidebar = vec![heading];
-    initial.sidebar.extend(std::iter::repeat_n(playlist.clone(), 512));
+    initial
+        .sidebar
+        .extend(std::iter::repeat_n(playlist.clone(), 512));
     initial.collapsed_sidebar_sections = vec!["Playlists".into()];
     let mut long_group = initial.clone();
     long_group.sidebar.push(playlist);
@@ -404,7 +406,7 @@ fn newly_opened_album_columns_fit_titles_and_do_not_exceed_parent(cx: &mut TestA
         }]);
         album.revision = widths.len() as u64;
         album.artwork_visible = covers;
-        album.large_artwork = large;
+        album.album_grid = large;
         next.columns.push(album);
         cx.update(|window, cx| view.update(cx, |view, cx| view.apply_snapshot(next, window, cx)));
         for _ in 0..6 {
@@ -442,9 +444,10 @@ fn newly_opened_album_columns_fit_titles_and_do_not_exceed_parent(cx: &mut TestA
                     "large artwork caption overlaps the image"
                 );
                 assert!(
-                    (label.left() - cover.left()).abs() <= px(1.),
-                    "large artwork caption must align left"
+                    (label.center().x - cover.center().x).abs() <= px(1.),
+                    "large artwork caption must be centered below the cover"
                 );
+                assert!(label.size.height >= px(28.), "allow two caption lines");
             } else {
                 assert!(
                     label.left() >= cover.right(),
@@ -452,7 +455,7 @@ fn newly_opened_album_columns_fit_titles_and_do_not_exceed_parent(cx: &mut TestA
                 );
             }
         }
-        if widths.len() < 3 {
+        if !large {
             let label = cx.debug_bounds("browser-title-album").expect("album title");
             let text_width = cx.update(|window, cx| {
                 let mut style = window.text_style();
@@ -546,11 +549,11 @@ fn equal_columns_keep_a_readable_minimum_and_scroll_horizontally(cx: &mut TestAp
     }]);
     grouped.columns[0].revision += 1;
     grouped.columns[0].artwork_visible = true;
-    grouped.columns[0].large_artwork = true;
+    grouped.columns[0].album_grid = true;
     let mut tracks = grouped.columns[0].clone();
     tracks.identity = "playlist-album-tracks".into();
     tracks.artwork_visible = true;
-    tracks.large_artwork = false;
+    tracks.album_grid = false;
     tracks.rows = std::sync::Arc::new(vec![browser::Row {
         download_action: None,
         download_id: None,
@@ -967,7 +970,7 @@ fn return_opens_and_alphabet_rail_uses_available_height(cx: &mut TestAppContext)
     initial.columns[0].alphabet_ascending = Some(true);
     let identity = initial.columns[0].identity.clone();
     let (engine, _updates, mut commands) = Engine::fixture(initial.clone());
-    let (_, cx) = cx.add_window_view(move |window, cx| {
+    let (view, cx) = cx.add_window_view(move |window, cx| {
         let mut view = Desktop::new(
             std::sync::Arc::new(engine),
             WindowRole::Library,
@@ -995,16 +998,84 @@ fn return_opens_and_alphabet_rail_uses_available_height(cx: &mut TestAppContext)
         "letters must use the rail: {first:?} {last:?} {rail:?}"
     );
     while commands.try_recv().is_ok() {}
+    cx.simulate_click(last.center(), Default::default());
+    let clicked: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+    assert!(matches!(
+        clicked.as_slice(),
+        [Command::JumpLetter {
+            column: 0,
+            letter: 'Z',
+            ..
+        }]
+    ));
     cx.simulate_keystrokes("enter");
     let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
     assert!(sent.iter().any(|c| matches!(
         c,
         Command::Navigate {
             column_delta: 1,
-            row_delta: 0
+            row_delta: 0,
+            ..
         }
     )));
     assert!(!sent.iter().any(|c| matches!(c, Command::Activate { .. })));
+    let viewport = cx.debug_bounds("column-viewport-0").unwrap();
+    view.update(cx, |view, cx| {
+        view.letter_shortcuts = None;
+        cx.notify();
+    });
+    draw(cx);
+    assert_eq!(cx.debug_bounds("column-viewport-0"), Some(viewport));
+}
+
+#[gpui::test]
+fn artwork_mini_returns_to_library_and_now_playing(cx: &mut TestAppContext) {
+    cx.update(init);
+    for sheet in [false, true] {
+        let mut initial = snapshot();
+        initial.player.active = sheet;
+        let (engine, _updates, mut commands) = Engine::fixture(initial.clone());
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let mut view = Desktop::new(
+                std::sync::Arc::new(engine),
+                WindowRole::Library,
+                WindowRegistry::default(),
+                window,
+                cx,
+            );
+            view.snapshot = initial;
+            view
+        });
+        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        for _ in 0..5 {
+            draw(cx);
+        }
+        let cover = cx
+            .debug_bounds(if sheet {
+                "transport-artwork"
+            } else {
+                "transport-cover-slot"
+            })
+            .unwrap();
+        cx.simulate_click(cover.center(), Default::default());
+        draw(cx);
+        let art = cx.debug_bounds("mini-artwork-return").unwrap();
+        cx.simulate_click(art.center(), Default::default());
+        for _ in 0..4 {
+            draw(cx);
+        }
+        assert!(cx.debug_bounds("mini-artwork-return").is_none());
+        assert_eq!(cx.debug_bounds("collapse-player-sheet").is_some(), sheet);
+        assert!(
+            !std::iter::from_fn(|| commands.try_recv().ok()).any(|c| matches!(
+                c,
+                Command::Palette(
+                    crate::app::state::PaletteCommandKind::GotoNowPlaying
+                        | crate::app::state::PaletteCommandKind::GotoLibrary
+                )
+            ))
+        );
+    }
 }
 
 #[gpui::test]
@@ -1070,11 +1141,49 @@ fn apple_music_shortcut_invokes_the_native_menu_command(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn equal_width_details_share_space_and_split_view_has_no_player_chevron(cx: &mut TestAppContext) {
+fn long_album_link_wraps_within_the_track_detail_value_column(cx: &mut TestAppContext) {
     cx.update(init);
     let mut initial = snapshot();
-    initial.split_player = true;
     initial.preview = Some(catalog::Preview {
+        title: "Flip The Switch".into(),
+        track: Some(Default::default()),
+        rows: vec![(
+            "Album".into(),
+            "Bridges To Babylon [1997] (Expanded Edition With Additional Tracks)".into(),
+        )],
+        ..Default::default()
+    });
+    let (engine, _updates, _commands) = Engine::fixture(initial.clone());
+    let (_view, cx) = cx.add_window_view(move |window, cx| {
+        let mut view = Desktop::new(
+            std::sync::Arc::new(engine),
+            WindowRole::Library,
+            WindowRegistry::default(),
+            window,
+            cx,
+        );
+        view.snapshot = initial;
+        view
+    });
+    cx.simulate_resize(gpui::size(px(820.), px(650.)));
+    draw(cx);
+    draw(cx);
+    let pane = cx.debug_bounds("details-pane").unwrap();
+    let button = cx.debug_bounds("detail-link-0").unwrap();
+    let value = cx.debug_bounds("detail-value-0").unwrap();
+    assert!(value.left() >= button.left() && value.right() <= pane.right());
+    assert!(
+        value.size.height > px(22.) && button.size.height >= value.size.height,
+        "{button:?} {value:?}"
+    );
+}
+
+#[gpui::test]
+fn equal_width_details_share_space(cx: &mut TestAppContext) {
+    cx.update(init);
+    let mut initial = snapshot();
+    initial.preview = Some(catalog::Preview {
+        track_artwork: true,
         title: "A long track title that wraps across several lines in a narrow detail column"
             .into(),
         rows: (0..20)
@@ -1103,7 +1212,7 @@ fn equal_width_details_share_space_and_split_view_has_no_player_chevron(cx: &mut
         (column.size.width - details.size.width).abs() < px(2.),
         "column {column:?}; details {details:?}"
     );
-    assert!(cx.debug_bounds("expand-player-sheet").is_none());
+    assert!(cx.debug_bounds("library-back").is_none());
     let artwork = cx.debug_bounds("details-artwork").expect("details artwork");
     assert!(artwork.size.width > px(80.));
     assert!(
@@ -1234,6 +1343,7 @@ fn queue_drag(cx: &mut TestAppContext, role: WindowRole) {
         .into();
     let mut initial = snapshot();
     initial.queue_open = true;
+    initial.player.active = true;
     initial.separate_player = role == WindowRole::Queue;
     initial.playback_queue = Some(browser::queue(&state));
     let (engine, _updates, mut commands) = Engine::fixture(initial.clone());
@@ -1276,6 +1386,167 @@ fn queue_drag(cx: &mut TestAppContext, role: WindowRole) {
     assert_eq!((drop.0.row, drop.1.row, drop.2), (0, 2, true));
     assert!(browser::valid(&state, drop.0));
     assert!(browser::valid(&state, drop.1));
+}
+
+#[gpui::test]
+fn album_grid_keys_distinguish_horizontal_movement_from_opening(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        init(cx);
+        cx.bind_keys([
+            gpui::KeyBinding::new("right", super::MoveRight, Some("Textamp")),
+            gpui::KeyBinding::new("left", super::MoveLeft, Some("Textamp")),
+            gpui::KeyBinding::new("enter", super::Activate, Some("Textamp")),
+        ]);
+    });
+    let mut initial = snapshot();
+    initial.columns[0].album_grid = true;
+    let (engine, _updates, mut commands) = Engine::fixture(initial.clone());
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = Desktop::new(
+                std::sync::Arc::new(engine),
+                WindowRole::Library,
+                WindowRegistry::default(),
+                window,
+                cx,
+            );
+            view.snapshot = initial;
+            view.focus.focus(window, cx);
+            view
+        });
+        gpui_kit::base::Root::new(view, window, cx)
+    });
+    draw(cx);
+    while commands.try_recv().is_ok() {}
+    cx.simulate_keystrokes("right left enter");
+    let keys = std::iter::from_fn(|| commands.try_recv().ok())
+        .filter_map(|command| match command {
+            Command::Navigate {
+                column_delta,
+                row_delta: 0,
+                ..
+            } => Some(column_delta),
+            Command::Activate { following: false } => Some(0),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(keys, vec![1, -1, 0]);
+}
+
+#[gpui::test]
+fn artist_album_list_opens_its_own_biography(cx: &mut TestAppContext) {
+    cx.update(init);
+    let mut initial = snapshot();
+    initial.columns[0].artist_header = Some((
+        "artist".into(),
+        "Artist".into(),
+        "A long biography. ".repeat(100),
+    ));
+    initial.columns[0].album_grid = true;
+    initial.columns[0].artwork_visible = true;
+    initial.columns[0].rows = std::sync::Arc::new(
+        (0..3)
+            .map(|i| browser::Row {
+                key: format!("album-{i}"),
+                title: if i == 1 {
+                    "An unusually long album title ".repeat(4)
+                } else {
+                    format!("Album {i}")
+                },
+                kind: browser::Kind::Album,
+                download_action: None,
+                download_id: None,
+                download_status: None,
+                year: None,
+            })
+            .collect(),
+    );
+    initial.columns[0].similar_artists = (0..12)
+        .map(|index| crate::library::models::Artist {
+            rating_key: format!("related-{index}"),
+            title: format!("Related Artist {index}"),
+            ..Default::default()
+        })
+        .collect();
+    let (engine, _updates, mut commands) = Engine::fixture(initial.clone());
+    let (view, cx) = cx.add_window_view(move |window, cx| {
+        let mut view = Desktop::new(
+            std::sync::Arc::new(engine),
+            WindowRole::Library,
+            WindowRegistry::default(),
+            window,
+            cx,
+        );
+        view.snapshot = initial;
+        view
+    });
+    cx.simulate_resize(gpui::size(px(1100.), px(800.)));
+    draw(cx);
+    let page = cx.debug_bounds("artist-page-0").unwrap();
+    let portrait = cx.debug_bounds("artist-portrait-0").unwrap();
+    assert!((portrait.center().x - page.center().x).abs() <= px(1.));
+    let excerpt = cx.debug_bounds("artist-bio-excerpt-0").unwrap();
+    let button = cx.debug_bounds("artist-header-bio-0").unwrap();
+    assert!(excerpt.size.height <= px(54.) && excerpt.bottom() <= button.top());
+    let [first, second, third] = [
+        "browser-artwork-0-0",
+        "browser-artwork-0-1",
+        "browser-artwork-0-2",
+    ]
+    .map(|key| cx.debug_bounds(key).unwrap());
+    assert_eq!(first.size, gpui::size(px(72.), px(72.)));
+    assert_eq!(first.size, second.size);
+    assert_eq!(first.top(), second.top());
+    assert_eq!(
+        first.top(),
+        third.top(),
+        "the wide column fits a third cover"
+    );
+    assert!(second.left() >= first.right() && third.left() >= second.right());
+    cx.simulate_resize(gpui::size(px(800.), px(620.)));
+    draw(cx);
+    let page = cx.debug_bounds("artist-page-0").unwrap();
+    let first = cx.debug_bounds("browser-artwork-0-0").unwrap();
+    let third = cx.debug_bounds("browser-artwork-0-2").unwrap();
+    if page.size.width < px(408.) {
+        assert_eq!(first.left(), third.left());
+        assert!(third.top() >= first.bottom());
+    }
+    let button = cx.debug_bounds("artist-header-bio-0").unwrap();
+    cx.simulate_click(button.center(), Default::default());
+    assert!(std::iter::from_fn(||commands.try_recv().ok()).any(|command| matches!(command,
+        Command::GuardedActions {actions,..} if matches!(actions.as_slice(),
+            [crate::app::Action::Search(crate::app::action::SearchAction::ShowArtistBio {artist_key,..})] if artist_key=="artist"))));
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            let column = &mut view.snapshot.columns[0];
+            column.artist_header.as_mut().unwrap().2.clear();
+            column.bio_search = Some(Default::default());
+            cx.notify();
+        })
+    });
+    draw(cx);
+    for element in ["artist-header-bio-0", "artist-portrait-0"] {
+        let bounds = cx.debug_bounds(element).unwrap();
+        assert!((bounds.center().x - page.center().x).abs() <= px(1.));
+    }
+    let first_before = cx.debug_bounds("browser-artwork-0-0").unwrap();
+    let related_before = cx.debug_bounds("related-artist-cover-0").unwrap();
+    assert_eq!(first_before.size, related_before.size);
+    assert_eq!(first_before.left(), related_before.left());
+    cx.simulate_event(gpui::ScrollEvent {
+        position: first_before.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-140.))),
+        modifiers: Default::default(),
+        touch_phase: gpui::TouchPhase::Moved,
+        source: gpui::ScrollSource::Pointer,
+    });
+    draw(cx);
+    let album_shift = first_before.top() - cx.debug_bounds("browser-artwork-0-0").unwrap().top();
+    let artist_shift =
+        related_before.top() - cx.debug_bounds("related-artist-cover-0").unwrap().top();
+    assert!(album_shift > px(0.));
+    assert_eq!(album_shift, artist_shift);
 }
 
 #[gpui::test]
@@ -1390,18 +1661,71 @@ fn track_header_icons_route_option_clicks_and_collection_headers_ignore_option(
     };
     for row in [album, playlist] {
         let controls = catalog::collection_controls(&row, &tracks);
-        assert_eq!(controls.len(), 2);
+        let is_album = matches!(row, crate::app::state::PlayAllRow::Album { .. });
+        let count = if is_album { 3 } else { 2 };
+        assert_eq!(controls.len(), count);
         assert!(controls.iter().all(|control| control.alternate.is_none()));
         view.update(cx, |view, cx| {
+            view.snapshot.preview = None;
+            view.snapshot.columns[0].album_page = is_album.then(|| {
+                let mut info = crate::app::sources::navidrome::album_notes::AlbumInfo::default();
+                info.review
+                    .push(crate::app::sources::navidrome::album_notes::Passage {
+                        text: "Review".into(),
+                        italic: false,
+                    });
+                (
+                    "album".into(),
+                    catalog::Preview {
+                        kind: catalog::PreviewKind::Album,
+                        title: "Album".into(),
+                        subtitle: "Artist".into(),
+                        rows: vec![("Year".into(), "2012".into())],
+                        artist_bio: Some(catalog::Control::new(
+                            "Artist Biography",
+                            crate::app::action::SearchAction::ShowArtistBio {
+                                artist_key: "artist".into(),
+                                artist_name: "Artist".into(),
+                            },
+                        )),
+                        album_info: Some(info),
+                        ..Default::default()
+                    },
+                )
+            });
             view.snapshot.columns[0].header_controls = controls;
             cx.notify();
         });
         draw(cx);
+        if is_album {
+            let play = cx.debug_bounds("column-control-0-0").unwrap();
+            let next = cx.debug_bounds("column-control-0-1").unwrap();
+            let append = cx.debug_bounds("column-control-0-2").unwrap();
+            let bio = cx.debug_bounds("album-bio-0").unwrap();
+            let info = cx.debug_bounds("album-notes-0").unwrap();
+            let heading = cx.debug_bounds("details-heading").unwrap();
+            let metadata = cx.debug_bounds("details-metadata").unwrap();
+            assert!(heading.bottom() <= play.top() && play.bottom() <= metadata.top());
+            assert_eq!(bio.center().y, info.center().y);
+            assert!(bio.center().x < play.center().x && play.center().x < info.center().x);
+            cx.simulate_click(bio.center(), Default::default());
+            assert!(std::iter::from_fn(||commands.try_recv().ok()).any(|command| matches!(command,
+                Command::GuardedActions {actions,..} if matches!(actions.as_slice(),
+                    [crate::app::Action::Search(crate::app::action::SearchAction::ShowArtistBio {artist_key,..})] if artist_key=="artist"))));
+            assert_eq!(next.center().y, append.center().y);
+            assert!(next.center().y < play.center().y);
+        }
         for option in [false, true] {
-            for index in 0..2 {
+            for index in 0..count {
                 while commands.try_recv().is_ok() {}
                 let button = cx
-                    .debug_bounds(["column-control-0-0", "column-control-0-1"][index])
+                    .debug_bounds(
+                        [
+                            "column-control-0-0",
+                            "column-control-0-1",
+                            "column-control-0-2",
+                        ][index],
+                    )
                     .expect("collection header control");
                 cx.simulate_click(
                     button.center(),
@@ -1581,19 +1905,22 @@ fn queue_spans_now_playing_height(cx: &mut TestAppContext, separate: bool) {
         for _ in 0..6 {
             draw(cx);
         }
-        let queue = cx
-            .debug_bounds("now-playing-queue")
-            .expect("independent queue");
-        assert!(queue.size.height > px(height - 140.), "{queue:?}");
+        let queue = cx.debug_bounds("play-queue").expect("independent queue");
+
         let tools = cx.debug_bounds("queue-tools").unwrap();
         let mode = cx.debug_bounds("queue-mode").unwrap();
-        assert!((tools.center().y - mode.center().y).abs() < px(1.));
-        assert!(tools.top() < queue.top() + px(70.));
+        assert!(mode.bottom() <= tools.top());
         if separate {
-            assert!(queue.size.width > px(width - 20.));
+            assert!(queue.size.height > px(height - 140.), "{queue:?}");
+            assert!(tools.top() > queue.center().y);
+            assert!(queue.size.width >= px(width - super::motion::SIDEBAR_RAIL_WIDTH - 2.));
             assert!(cx.debug_bounds("transport-bar").is_none());
         } else {
-            let main = cx.debug_bounds("now-playing-main").unwrap();
+            let bar = cx.debug_bounds("transport-bar").unwrap();
+            assert!((bar.size.width - px(width)).abs() <= px(2.));
+            assert!(tools.bottom() <= bar.top());
+            assert!((queue.bottom() - bar.top()).abs() < px(2.));
+            let main = cx.debug_bounds("workspace-content").unwrap();
             assert!((queue.top() - main.top()).abs() < px(2.));
             assert!((queue.bottom() - main.bottom()).abs() < px(2.));
             assert!(cx.debug_bounds("collapse-player-sheet").is_some());
@@ -1617,7 +1944,7 @@ fn queue_spans_now_playing_height(cx: &mut TestAppContext, separate: bool) {
                 draw(cx);
             }
             assert!(
-                (cx.debug_bounds("now-playing-queue").unwrap().size.width - queue.size.width).abs()
+                (cx.debug_bounds("play-queue").unwrap().size.width - queue.size.width).abs()
                     > px(30.)
             );
         }
@@ -1690,14 +2017,14 @@ fn alphabet_jump_centers_selection_and_clamps_at_list_end(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn single_window_transport_keeps_alignment_and_exposes_expand_control(cx: &mut TestAppContext) {
+fn single_window_transport_keeps_alignment_between_sidebars(cx: &mut TestAppContext) {
     cx.update(|cx| {
         init(cx);
     });
     let mut initial = snapshot();
     initial.now_playing = "A current track".into();
     initial.artist = "Artist name".into();
-    let (engine, _updates, _commands) = Engine::fixture(initial.clone());
+    let (engine, _updates, mut commands) = Engine::fixture(initial.clone());
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let mut view = Desktop::new(
             std::sync::Arc::new(engine),
@@ -1713,10 +2040,25 @@ fn single_window_transport_keeps_alignment_and_exposes_expand_control(cx: &mut T
     for _ in 0..5 {
         draw(cx);
     }
-    assert!(cx.debug_bounds("queue-reveal").is_some());
-    assert!(cx.debug_bounds("now-playing-queue").is_none());
-    assert!(cx.debug_bounds("queue-tools").is_none());
-    let artwork = cx.debug_bounds("transport-artwork").unwrap();
+    assert!(cx.debug_bounds("queue-rail-false").is_some());
+    assert!(cx.debug_bounds("play-queue").is_none());
+    assert!(cx.debug_bounds("queue-tools").is_some());
+    let rail = cx.debug_bounds("library-queue-rail").unwrap();
+    for history in [false, true] {
+        let shortcut = cx
+            .debug_bounds(if history {
+                "queue-rail-true"
+            } else {
+                "queue-rail-false"
+            })
+            .unwrap();
+        cx.simulate_click(shortcut.center(), Default::default());
+        assert!(std::iter::from_fn(|| commands.try_recv().ok()).any(|command|
+            matches!(command, Command::GuardedActions {actions, ..}
+                if matches!(actions.as_slice(), [crate::app::Action::Queue(crate::app::action::QueueAction::ShowHistory(tab)), crate::app::Action::Navigation(crate::app::action::NavigationAction::ToggleQueuePanel)] if *tab == history))));
+    }
+    let history = cx.debug_bounds("queue-rail-true").unwrap();
+    let artwork = cx.debug_bounds("transport-cover-slot").unwrap();
     let seek = cx.debug_bounds("transport-seek-row").unwrap();
     assert!(
         artwork.bottom() <= seek.center().y,
@@ -1736,19 +2078,38 @@ fn single_window_transport_keeps_alignment_and_exposes_expand_control(cx: &mut T
     let mut next = view.read_with(cx, |view, _| view.snapshot.clone());
     next.player_window_request += 1;
     cx.update(|window, cx| view.update(cx, |view, cx| view.apply_snapshot(next, window, cx)));
-    for _ in 0..20 {
+    let transport = cx.debug_bounds("transport-bar").unwrap();
+    let mut intermediate = None;
+    for _ in 0..60 {
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(16));
         draw(cx);
+        assert_eq!(cx.debug_bounds("queue-rail-true"), Some(history));
+        if let Some(sheet) = cx.debug_bounds("now-playing-sheet")
+            && sheet.top() < transport.top() - px(4.)
+            && sheet.bottom() > transport.top() + px(4.)
+        {
+            intermediate = Some(sheet);
+        }
     }
+    let moving = intermediate.expect("sheet passes behind the stationary transport");
+    let settled = cx.debug_bounds("now-playing-sheet").unwrap();
+    assert!((moving.size.height - settled.size.height).abs() < px(2.));
+    assert_eq!(cx.debug_bounds("transport-bar").unwrap(), transport);
     let playing = cx.debug_bounds("transport-play").unwrap();
     assert!(
         (playing.center().x - library.center().x).abs() < px(3.),
         "{library:?} {playing:?}"
     );
-    assert!(cx.debug_bounds("expand-player-sheet").is_none());
+
     assert!(cx.debug_bounds("collapse-player-sheet").is_some());
-    assert!(cx.debug_bounds("now-playing-queue").is_none());
+    assert!(cx.debug_bounds("play-queue").is_none());
+    let sheet = cx.debug_bounds("now-playing-sheet").unwrap();
+    let sidebar = cx.debug_bounds("navigation-sidebar").unwrap();
+    assert!(
+        sheet.left() >= sidebar.right() - px(2.) && (sheet.right() - rail.left()).abs() <= px(2.),
+        "sheet={sheet:?} sidebar={sidebar:?} rail={rail:?}"
+    );
     let mut next = view.read_with(cx, |view, _| view.snapshot.clone());
     next.queue_open = true;
     cx.update(|window, cx| view.update(cx, |view, cx| view.apply_snapshot(next, window, cx)));
@@ -1757,15 +2118,16 @@ fn single_window_transport_keeps_alignment_and_exposes_expand_control(cx: &mut T
             .advance_clock(std::time::Duration::from_millis(16));
         draw(cx);
     }
-    let queue = cx.debug_bounds("now-playing-queue").unwrap();
+    let queue = cx.debug_bounds("play-queue").unwrap();
     let tools = cx
         .debug_bounds("queue-tools")
         .expect("Now Playing queue tools menu");
     let mode = cx.debug_bounds("queue-mode").expect("queue mode menu");
-    assert!(tools.left() >= mode.right() && tools.right() <= queue.right());
-    assert!((tools.center().y - mode.center().y).abs() < px(1.));
-    assert!(tools.top() >= queue.top() && tools.bottom() <= queue.top() + px(70.));
-    let boundary = cx.debug_bounds("now-playing-main").unwrap().right();
+    assert!(tools.left() >= queue.right());
+    assert!(mode.bottom() <= tools.top());
+    let bar = cx.debug_bounds("transport-bar").unwrap();
+    assert!(queue.bottom() <= bar.top() && tools.bottom() <= bar.top());
+    let boundary = cx.debug_bounds("workspace-content").unwrap().right();
     let from = gpui::point(boundary - px(2.), px(100.));
     let to = gpui::point(boundary - px(120.), px(100.));
     cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::default());
@@ -1847,8 +2209,7 @@ fn now_playing_metadata_fits_and_transport_uses_the_available_width(cx: &mut Tes
         "now-playing-field-Track",
         "now-playing-field-Bit rate",
         "now-playing-field-Channels",
-        "now-playing-field-Container",
-        "now-playing-field-Codec",
+        "now-playing-field-Format",
     ] {
         let field = cx.debug_bounds(label).expect(label);
         assert!(
@@ -1870,9 +2231,12 @@ fn now_playing_metadata_fits_and_transport_uses_the_available_width(cx: &mut Tes
     assert!(play.right() < seek.left(), "{play:?} {bar:?}");
     assert!(volume.left() > play.right());
     assert!((volume.center().y - play.center().y).abs() < px(2.));
-    let status = cx.debug_bounds("utility-status").unwrap();
-    let reveal = cx.debug_bounds("queue-reveal").unwrap();
-    assert!(status.right() < reveal.left(), "{status:?} {reveal:?}");
+    let sidebar = cx.debug_bounds("toggle-sidebar").unwrap();
+    let reveal = cx.debug_bounds("queue-rail-false").unwrap();
+    assert!(sidebar.bottom() < bar.top() && reveal.bottom() < bar.top());
+    assert_eq!(bar.left(), px(1300.) - bar.right());
+    assert!(sidebar.right() < info.left() && reveal.left() > info.right());
+    assert_eq!(sidebar.bottom(), reveal.bottom());
     assert!(reveal.size.width >= px(30.));
     assert!(reveal.right() < px(1300.));
     assert!(cx.debug_bounds("transport-queue").is_none());
@@ -1890,33 +2254,11 @@ fn now_playing_metadata_fits_and_transport_uses_the_available_width(cx: &mut Tes
         assert!(text.left() >= info.left() && text.right() <= info.right());
     }
     while commands.try_recv().is_ok() {}
-    for (selector, expected) in [
-        (
-            "transport-title",
-            crate::app::library_details::Destination::Track,
-        ),
-        (
-            "transport-artist",
-            crate::app::library_details::Destination::Artist,
-        ),
-        (
-            "transport-album",
-            crate::app::library_details::Destination::Album,
-        ),
-    ] {
-        while commands.try_recv().is_ok() {}
-        let bounds = cx.debug_bounds(selector).unwrap();
-        cx.simulate_click(bounds.center(), Default::default());
-        let clicks: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
-        assert!(clicks.iter().any(|command| matches!(command, Command::Palette(crate::app::state::PaletteCommandKind::FromTrackContext { kind: crate::app::track_context::ContextKind::ShowDetails(destination), .. }) if *destination == expected)));
-        assert!(!clicks.iter().any(|command| matches!(
-            command,
-            Command::Palette(
-                crate::app::state::PaletteCommandKind::GotoLibrary
-                    | crate::app::state::PaletteCommandKind::GotoNowPlaying
-            )
-        )));
-    }
+    let metadata = cx.debug_bounds("transport-track-text").unwrap();
+    cx.simulate_click(metadata.center(), Default::default());
+    assert!(
+        !std::iter::from_fn(|| commands.try_recv().ok()).any(|c| matches!(c, Command::Palette(_)))
+    );
     let title = cx.debug_bounds("now-playing-track-title").unwrap();
     cx.simulate_click(title.center(), Default::default());
     assert!(
@@ -2113,6 +2455,7 @@ fn up_next_shows_first_unstarted_track_and_empty_queue(cx: &mut TestAppContext) 
 fn column_heading_compacts_when_constrained_and_restores_when_short(cx: &mut TestAppContext) {
     cx.update(init);
     let mut initial = snapshot();
+    initial.columns[0].named_heading = true;
     initial.columns[0].title =
         "tracks — A very long album name 日本語 with an important distinguishing suffix 78/79"
             .into();
@@ -2132,7 +2475,7 @@ fn column_heading_compacts_when_constrained_and_restores_when_short(cx: &mut Tes
     for _ in 0..8 {
         draw(cx);
     }
-    assert!(cx.debug_bounds("column-heading-0-compact").is_some());
+    assert!(cx.debug_bounds("column-heading-0-small").is_some());
     cx.update(|_, cx| {
         view.update(cx, |view, cx| {
             view.snapshot.columns[0].title = "tracks — Short".into();
@@ -2143,6 +2486,85 @@ fn column_heading_compacts_when_constrained_and_restores_when_short(cx: &mut Tes
         draw(cx);
     }
     assert!(cx.debug_bounds("column-heading-0-full").is_some());
+}
+
+#[gpui::test]
+fn radio_child_in_player_sidebar_and_transport_disclosure(cx: &mut TestAppContext) {
+    cx.update(init);
+    let mut state = AppState::new();
+    for (key, title) in [
+        (None, "Stations"),
+        (Some("decades".to_string()), "Decade Mix"),
+    ] {
+        state
+            .station_nav
+            .push_column(crate::app::state::StationColumn::new(
+                key,
+                title.into(),
+                vec![],
+            ));
+    }
+    let mut initial = snapshot();
+    initial.radio_browser = Some(super::surface::radio_surface(&state));
+    initial.queue_open = true;
+    let (engine, updates, mut commands) = Engine::fixture(initial.clone());
+    let (view, cx) = cx.add_window_view(move |window, cx| {
+        Desktop::new(
+            std::sync::Arc::new(engine),
+            WindowRole::Library,
+            WindowRegistry::default(),
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    cx.update(|w, cx| view.update(cx, |v, cx| v.apply_snapshot(initial.clone(), w, cx)));
+    for _ in 0..40 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        draw(cx);
+    }
+    let up = cx.debug_bounds("expand-player-sheet").unwrap();
+    cx.simulate_click(up.center(), Default::default());
+    assert!(
+        std::iter::from_fn(|| commands.try_recv().ok()).any(|c| matches!(
+            c,
+            Command::Palette(crate::app::state::PaletteCommandKind::GotoNowPlaying)
+        ))
+    );
+    initial.sheet_browser = true;
+    initial.player_window_request += 1;
+    updates.send_replace(initial.clone());
+    cx.update(|w, cx| {
+        view.update(cx, |v, cx| {
+            v.apply_snapshot(initial, w, cx);
+            v.sheet_sidebar_root = false;
+        })
+    });
+    for _ in 0..40 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        draw(cx);
+    }
+    let down = cx.debug_bounds("collapse-player-sheet").unwrap();
+    assert!(
+        (down.center().x - up.center().x).abs() <= px(2.),
+        "{up:?} {down:?}"
+    );
+    let child = cx.debug_bounds("radio-column-1").unwrap();
+    assert!(child.size.width >= cx.debug_bounds("navigation-sidebar").unwrap().size.width - px(4.));
+    assert!(cx.debug_bounds("radio-column-0").is_none());
+    assert!(cx.debug_bounds("expand-player-sheet").is_none());
+    let back = cx.debug_bounds("sheet-browser-back").unwrap();
+    cx.simulate_click(back.center(), Default::default());
+    assert!(
+        std::iter::from_fn(|| commands.try_recv().ok()).any(|c| matches!(
+            c,
+            Command::Action(crate::app::Action::Radio(
+                crate::app::action::RadioAction::NavigateStationsBack
+            ))
+        ))
+    );
 }
 
 #[gpui::test]
@@ -2360,8 +2782,13 @@ fn visualizer_stays_visible_at_its_initial_minimum_and_tabs_fit_their_labels(
     let expand = cx.debug_bounds("expand-visualizer").unwrap();
     assert!(tabs.left() >= row.left() && tabs.right() <= expand.left());
     assert!(expand.right() <= row.right());
-    let queue = cx.debug_bounds("now-playing-queue").unwrap();
-    assert!(cx.debug_bounds("toggle-visualizer").is_none());
+    let queue = cx.debug_bounds("play-queue").unwrap();
+    let toggle = cx.debug_bounds("toggle-visualizer").unwrap();
+    cx.simulate_click(toggle.center(), Default::default());
+    draw(cx);
+    assert!(cx.debug_bounds("visualizer-pane").is_none());
+    cx.simulate_click(toggle.center(), Default::default());
+    draw(cx);
     let initial = cx.debug_bounds("visualizer-pane").unwrap();
     let handle = gpui::point(initial.center().x, initial.top());
     let enlarged = handle - gpui::point(px(0.), px(100.));
@@ -2394,7 +2821,7 @@ fn visualizer_stays_visible_at_its_initial_minimum_and_tabs_fit_their_labels(
         }
         assert!(cx.debug_bounds("visualizer-content").is_some());
         assert!(cx.debug_bounds("visualizer-mode-tabs").is_some());
-        assert_eq!(cx.debug_bounds("now-playing-queue").unwrap(), queue);
+        assert_eq!(cx.debug_bounds("play-queue").unwrap(), queue);
     }
 }
 
@@ -2459,9 +2886,106 @@ fn search_reopens_after_toolbar_dismissal_even_when_closed_snapshot_is_coalesced
 }
 
 #[gpui::test]
-fn queue_and_now_playing_open_independently_and_preserve_library_selection(
-    cx: &mut TestAppContext,
-) {
+fn now_playing_keeps_the_focused_column_and_steps_back(cx: &mut TestAppContext) {
+    cx.update(init);
+    let mut library = snapshot();
+    let mut tracks = library.columns[0].clone();
+    tracks.identity = "album-tracks".into();
+    library.columns.push(tracks);
+    library.focused_column = 1;
+    let (engine, _updates, mut commands) = Engine::fixture(library.clone());
+    let (view, cx) = cx.add_window_view(move |window, cx| {
+        let mut view = Desktop::new(
+            std::sync::Arc::new(engine),
+            WindowRole::Library,
+            WindowRegistry::default(),
+            window,
+            cx,
+        );
+        view.snapshot = library;
+        view
+    });
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    for _ in 0..4 {
+        draw(cx);
+    }
+    let sidebar = cx.debug_bounds("navigation-sidebar").unwrap();
+    let mut player = view.read_with(cx, |v, _| v.snapshot.clone());
+    player.sheet_browser = true;
+    player.player_window_request += 1;
+    cx.update(|w, cx| view.update(cx, |v, cx| v.apply_snapshot(player, w, cx)));
+    for _ in 0..40 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        draw(cx);
+        assert_eq!(cx.debug_bounds("navigation-sidebar").unwrap(), sidebar);
+        if let Some(sheet) = cx.debug_bounds("now-playing-sheet") {
+            assert_eq!(sheet.left(), sidebar.right());
+        }
+    }
+    assert!(cx.debug_bounds("browser-column-1").is_some());
+    assert!(cx.debug_bounds("browser-column-0").is_none());
+    for (preferred, key, configures) in [
+        (None, "randomAlbum", false),
+        (Some("artist-picker"), "artist-picker", true),
+    ] {
+        view.update(cx, |view, cx| {
+            view.snapshot.library_stations = crate::library::station::standard_stations(
+                "fixture",
+                crate::library::capabilities::NAVIDROME,
+            );
+            view.snapshot.preferred_station = preferred.map(str::to_owned);
+            cx.notify();
+        });
+        draw(cx);
+        let right = cx.debug_bounds("library-queue-rail").unwrap();
+        for icon in [
+            "sidebar-radio",
+            "sidebar-search",
+            "sidebar-settings",
+            "sidebar-palette",
+            "queue-rail-true",
+        ] {
+            let bounds = cx.debug_bounds(icon).unwrap();
+            assert!(
+                bounds.left() >= right.left() && bounds.right() <= right.right(),
+                "{icon} outside the right rail"
+            );
+        }
+        let radio = cx.debug_bounds("sidebar-radio").unwrap();
+        cx.simulate_click(radio.center(), Default::default());
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok()).any(|cmd| match cmd {
+                Command::Palette(crate::app::state::PaletteCommandKind::ConfigureStation(
+                    station,
+                )) => configures && station == format!("fixture/{key}"),
+                Command::Palette(crate::app::state::PaletteCommandKind::PlayStation(station)) =>
+                    !configures && station == format!("fixture/{key}"),
+                _ => false,
+            })
+        );
+    }
+    let back = cx.debug_bounds("sheet-browser-back").unwrap();
+    let toggle = cx.debug_bounds("toggle-sidebar").unwrap();
+    assert_eq!(toggle.center().y, back.center().y);
+    assert!(back.left() > toggle.right() && sidebar.right() - back.right() <= px(12.));
+    cx.simulate_click(back.center(), Default::default());
+    assert!(std::iter::from_fn(|| commands.try_recv().ok()).any(
+        |cmd| matches!(cmd,Command::CloseColumn {column:1,identity,..} if identity=="album-tracks")
+    ));
+    let mut parent = view.read_with(cx, |v, _| v.snapshot.clone());
+    parent.columns.pop();
+    parent.focused_column = 0;
+    cx.update(|w, cx| view.update(cx, |v, cx| v.apply_snapshot(parent, w, cx)));
+    draw(cx);
+    cx.simulate_click(back.center(), Default::default());
+    draw(cx);
+    assert!(cx.debug_bounds("sidebar-Artists").is_some());
+    assert!(cx.debug_bounds("collapse-player-sheet").is_some());
+}
+
+#[gpui::test]
+fn queue_stays_open_across_player_and_library_navigation(cx: &mut TestAppContext) {
     cx.update(|cx| {
         init(cx);
         cx.set_reduce_motion(true);
@@ -2471,7 +2995,9 @@ fn queue_and_now_playing_open_independently_and_preserve_library_selection(
             Some("Textamp"),
         )]);
     });
-    let initial = snapshot();
+    let mut initial = snapshot();
+    initial.columns.push(initial.columns[0].clone());
+    initial.focused_column = 1;
     let (engine, _updates, mut commands) = Engine::fixture(initial.clone());
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let mut view = Desktop::new(
@@ -2488,14 +3014,16 @@ fn queue_and_now_playing_open_independently_and_preserve_library_selection(
     for _ in 0..5 {
         draw(cx);
     }
-    let library = cx.debug_bounds("browser-column-0").unwrap();
-    assert!(cx.debug_bounds("now-playing-queue").is_none());
-    let button = cx.debug_bounds("queue-reveal").unwrap();
+    assert!(cx.debug_bounds("browser-column-0").is_some());
+    assert!(cx.debug_bounds("play-queue").is_none());
+    let sidebar = cx.debug_bounds("navigation-sidebar").unwrap();
+    let library_artists = cx.debug_bounds("sidebar-Artists").unwrap();
+    let button = cx.debug_bounds("queue-rail-false").unwrap();
     while commands.try_recv().is_ok() {}
     cx.simulate_click(button.center(), Default::default());
     assert!(
         std::iter::from_fn(|| commands.try_recv().ok())
-            .any(|command| matches!(command, Command::ToggleQueue))
+            .any(|command| matches!(command, Command::GuardedActions{actions,..} if matches!(actions.last(), Some(crate::app::Action::Navigation(crate::app::action::NavigationAction::ToggleQueuePanel)))))
     );
     let mut next = view.read_with(cx, |view, _| view.snapshot.clone());
     next.queue_open = true;
@@ -2503,29 +3031,70 @@ fn queue_and_now_playing_open_independently_and_preserve_library_selection(
     for _ in 0..6 {
         draw(cx);
     }
-    assert!(cx.debug_bounds("now-playing-queue").is_some());
-    assert!(
-        cx.debug_bounds("browser-column-0").unwrap().size.width < library.size.width - px(200.)
-    );
-    assert!(!view.read_with(cx, |view, _| view.snapshot.player.active));
-    while commands.try_recv().is_ok() {}
-    cx.simulate_keystrokes("down");
-    assert!(std::iter::from_fn(|| commands.try_recv().ok()).any(|command|matches!(command,Command::PlayerKey(key) if key.code==crossterm::event::KeyCode::Down)));
+    let queue = cx.debug_bounds("queue-dock").unwrap();
+    assert!((queue.size.width - sidebar.size.width).abs() <= px(2.));
+    assert!(cx.debug_bounds("now-playing-sheet").is_none());
     let mut next = view.read_with(cx, |view, _| view.snapshot.clone());
     next.player_window_request += 1;
     cx.update(|window, cx| view.update(cx, |view, cx| view.apply_snapshot(next, window, cx)));
     for _ in 0..6 {
         draw(cx);
     }
-    assert!(view.read_with(cx, |view, _| view.snapshot.player.active
-        && view.snapshot.queue_open));
+    assert!(cx.debug_bounds("play-queue").is_some());
     let mut next = view.read_with(cx, |view, _| view.snapshot.clone());
+    let original_player = cx.debug_bounds("sheet-player-content").unwrap();
+    let original_queue = cx.debug_bounds("play-queue").unwrap();
+    cx.update(|_, cx| cx.set_reduce_motion(false));
+    next.sheet_browser = true;
+    next.library_window_request += 1;
+    cx.update(|window, cx| view.update(cx, |view, cx| view.apply_snapshot(next, window, cx)));
+    let mut moved = false;
+    for _ in 0..60 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        draw(cx);
+        if let Some(browser) = cx.debug_bounds("navigation-sidebar")
+            && browser.size.width > px(super::motion::SIDEBAR_RAIL_WIDTH + 1.)
+            && browser.size.width < sidebar.size.width - px(1.)
+        {
+            let player = cx.debug_bounds("sheet-player-content").unwrap();
+            assert_eq!(browser.right(), player.left());
+            assert_eq!(cx.debug_bounds("play-queue").unwrap(), original_queue);
+            assert_eq!(browser.left(), sidebar.left());
+            assert!(cx.debug_bounds("sidebar-Artists").is_some());
+            moved = true;
+        }
+    }
+    assert!(
+        moved,
+        "the browser must travel between the rail and its expanded position"
+    );
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    assert!(cx.debug_bounds("browser-column-0").is_none());
+    assert_eq!(cx.debug_bounds("sidebar-Artists").unwrap(), library_artists);
+    cx.simulate_click(library_artists.center(), Default::default());
+    draw(cx);
+    assert!(cx.debug_bounds("browser-column-1").is_some());
+    assert!(cx.debug_bounds("play-queue").is_some());
+    let mut next = view.read_with(cx, |view, _| view.snapshot.clone());
+    let browser = cx.debug_bounds("navigation-sidebar").unwrap();
+    let player = cx.debug_bounds("sheet-player-content").unwrap();
+    assert_eq!(browser.size.width, sidebar.size.width);
+    assert_eq!(browser.left(), sidebar.left());
+    assert_eq!(browser.right(), player.left());
+    assert_eq!(player.right(), original_player.right());
+    assert_eq!(original_queue, cx.debug_bounds("play-queue").unwrap());
+    assert!(cx.debug_bounds("transport-artwork").unwrap().left() >= player.left());
+    next.sheet_browser = false;
     next.library_window_request += 1;
     cx.update(|window, cx| view.update(cx, |view, cx| view.apply_snapshot(next, window, cx)));
     for _ in 0..6 {
         draw(cx);
     }
-    assert!(cx.debug_bounds("now-playing-queue").is_some());
+    assert_eq!(cx.debug_bounds("play-queue"), Some(original_queue));
+    assert!(cx.debug_bounds("library-back").is_none());
+    assert!(cx.debug_bounds("browser-column-0").is_some());
+    assert!(cx.debug_bounds("browser-column-1").is_some());
     assert!(
         view.read_with(cx, |view, _| view.snapshot.columns[0].selected == 0
             && !view.snapshot.player.active)
@@ -2583,7 +3152,7 @@ fn failed_empty_library_retry_dispatches_refresh(cx: &mut TestAppContext) {
         },
     )];
     let (engine, _updates, mut commands) = Engine::fixture(initial.clone());
-    let (_, cx) = cx.add_window_view(move |window, cx| {
+    let (view, cx) = cx.add_window_view(move |window, cx| {
         let mut view = Desktop::new(
             std::sync::Arc::new(engine),
             WindowRole::Library,
@@ -2603,6 +3172,15 @@ fn failed_empty_library_retry_dispatches_refresh(cx: &mut TestAppContext) {
             Command::Palette(crate::app::state::PaletteCommandKind::Refresh)
         ))
     );
+    assert!(cx.debug_bounds("library-empty-wordmark").is_none());
+    view.update(cx, |v, cx| {
+        v.snapshot.error = None;
+        cx.notify();
+    });
+    draw(cx);
+    let logo = cx.debug_bounds("library-empty-wordmark").unwrap();
+    assert!(logo.size.width > px(0.) && logo.size.height > px(0.));
+    assert!(cx.debug_bounds("retry-library").is_none());
 }
 
 #[gpui::test]
@@ -3006,7 +3584,8 @@ fn empty_waveform_hides_time_ruler_and_sidebar_toggle_reclaims_space(cx: &mut Te
         init(cx);
         cx.set_reduce_motion(true);
     });
-    let initial = snapshot();
+    let mut initial = snapshot();
+    initial.sidebar.last_mut().unwrap().parent = Some(crate::app::sidebar::SidebarGroup::Playlists);
     let (engine, _updates, mut commands) = Engine::fixture(initial.clone());
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let mut view = Desktop::new(
@@ -3023,6 +3602,7 @@ fn empty_waveform_hides_time_ruler_and_sidebar_toggle_reclaims_space(cx: &mut Te
     for _ in 0..6 {
         draw(cx);
     }
+    assert!(cx.debug_bounds("sidebar-Fixture Playlist").is_some());
     let width = cx.debug_bounds("browser-column-0").unwrap().size.width;
     let button = cx.debug_bounds("toggle-sidebar").unwrap();
     cx.simulate_click(button.center(), Default::default());
@@ -3043,6 +3623,15 @@ fn empty_waveform_hides_time_ruler_and_sidebar_toggle_reclaims_space(cx: &mut Te
     for _ in 0..6 {
         draw(cx);
     }
+    assert!(cx.debug_bounds("sidebar-Fixture Playlist").is_none());
+    let artists = cx
+        .debug_bounds("sidebar-Artists")
+        .expect("compact Artists destination");
+    cx.simulate_click(artists.center(), Default::default());
+    assert!(
+        std::iter::from_fn(|| commands.try_recv().ok())
+            .any(|command| matches!(command, Command::SidebarOpen { index: 0, .. }))
+    );
     assert!(!view.read_with(cx, |view, _| view.sidebar_visible));
     assert!(cx.debug_bounds("browser-column-0").unwrap().size.width > width + px(100.));
     let mut next = view.read_with(cx, |view, _| view.snapshot.clone());
@@ -3054,6 +3643,15 @@ fn empty_waveform_hides_time_ruler_and_sidebar_toggle_reclaims_space(cx: &mut Te
     for _ in 0..6 {
         draw(cx);
     }
+    let rail = cx.debug_bounds("navigation-sidebar").unwrap();
+    let sheet = cx.debug_bounds("now-playing-sheet").unwrap();
+    assert!((rail.right() - sheet.left()).abs() < px(2.));
+    let artists = cx.debug_bounds("sidebar-Artists").unwrap();
+    cx.simulate_click(artists.center(), Default::default());
+    assert!(
+        std::iter::from_fn(|| commands.try_recv().ok())
+            .any(|command| matches!(command, Command::SidebarOpen { index: 0, .. }))
+    );
     assert!(cx.debug_bounds("waveform-time-ruler").is_none());
     let mut next = view.read_with(cx, |view, _| view.snapshot.clone());
     next.player.waveform = vec![0.2; 128];
@@ -3070,7 +3668,8 @@ fn queue_reveal_preserves_preferred_width_through_animation_and_reversal(cx: &mu
         init(cx);
         cx.set_reduce_motion(false);
     });
-    let initial = snapshot();
+    let mut initial = snapshot();
+    initial.player.active = true;
     let (engine, _updates, _commands) = Engine::fixture(initial.clone());
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let mut view = Desktop::new(
@@ -3080,6 +3679,7 @@ fn queue_reveal_preserves_preferred_width_through_animation_and_reversal(cx: &mu
             window,
             cx,
         );
+        view.presentation = WindowRole::NowPlaying;
         view.snapshot = initial;
         view
     });
@@ -3096,15 +3696,14 @@ fn queue_reveal_preserves_preferred_width_through_animation_and_reversal(cx: &mu
             cx.executor()
                 .advance_clock(std::time::Duration::from_millis(16));
             draw(cx);
-            let (actual, progress) =
-                view.read_with(cx, |view, _| (view.queue_width, view.queue_progress));
+            let actual = view.read_with(cx, |view, _| view.queue_width);
             assert!(
                 (actual - width).abs() < px(3.),
-                "preferred {width:?}, measured {actual:?}, progress {progress}"
+                "preferred {width:?}, measured {actual:?}"
             );
         }
     }
-    let actual = cx.debug_bounds("now-playing-queue").unwrap().size.width;
+    let actual = cx.debug_bounds("queue-dock").unwrap().size.width;
     assert!((actual - width).abs() < px(3.));
 }
 
@@ -3219,24 +3818,82 @@ fn handoff_reveals_graphical_panels_at_their_final_geometry(cx: &mut TestAppCont
     next.player_window_request += 1;
     cx.update(|window, cx| view.update(cx, |view, cx| view.apply_snapshot(next, window, cx)));
     draw(cx);
-    assert_eq!(view.read_with(cx, |view, _| view.queue_progress), 1.);
+    assert!(
+        (cx.debug_bounds("queue-dock").unwrap().size.width
+            - view.read_with(cx, |view, _| view.queue_width))
+        .abs()
+            < px(3.)
+    );
     assert!(view.read_with(cx, |view, _| view.column_motion_until.is_none()));
     let mut next = view.read_with(cx, |view, _| view.snapshot.clone());
     next.queue_open = false;
     cx.update(|window, cx| view.update(cx, |view, cx| view.apply_snapshot(next, window, cx)));
     draw(cx);
-    assert!(view.read_with(cx, |view, _| view.queue_progress) > 0.);
+    assert!(
+        cx.debug_bounds("queue-dock").unwrap().size.width > px(super::motion::SIDEBAR_RAIL_WIDTH)
+    );
 }
 
 #[gpui::test]
-fn queue_dropdowns_share_header_and_leave_transport_geometry_stable(cx: &mut TestAppContext) {
+fn history_track_context_menu_queues_the_clicked_occurrence(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        init(cx);
+        cx.set_reduce_motion(true)
+    });
+    let mut initial = snapshot();
+    initial.queue_open = true;
+    initial.showing_queue_history = true;
+    let track = crate::library::models::Track::from_folder("fixture", "album/song.mp3");
+    let plays = vec![
+        crate::app::listening_history::Play::from_track(&track),
+        crate::app::listening_history::Play::from_track(&track),
+    ];
+    let target = plays[1].id.clone();
+    initial.listening_history = plays.into();
+    let (engine, _updates, mut commands) = Engine::fixture(initial.clone());
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let view = cx.new(|cx| {
+            let mut desktop = Desktop::new(
+                std::sync::Arc::new(engine),
+                WindowRole::Library,
+                WindowRegistry::default(),
+                window,
+                cx,
+            );
+            desktop.snapshot = initial;
+            desktop
+        });
+        gpui_kit::base::Root::new(view, window, cx)
+    });
+    cx.simulate_resize(gpui::size(px(1100.), px(800.)));
+    for _ in 0..5 {
+        draw(cx)
+    }
+    let row = cx.debug_bounds("history-track-1").unwrap();
+    cx.simulate_mouse_down(row.center(), gpui::MouseButton::Right, Default::default());
+    cx.simulate_mouse_up(row.center(), gpui::MouseButton::Right, Default::default());
+    draw(cx);
+    cx.simulate_keystrokes("down down enter");
+    draw(cx);
+    assert!(std::iter::from_fn(||commands.try_recv().ok()).any(|c|matches!(c,Command::Action(crate::app::Action::Queue(crate::app::action::QueueAction::HistoryTrack(id,crate::app::track_context::ContextKind::PlayNextInQueue))) if id==target)));
+}
+#[gpui::test]
+fn queue_tools_stay_in_the_right_sidebar(cx: &mut TestAppContext) {
     cx.update(|cx| {
         init(cx);
         cx.set_reduce_motion(true);
     });
     let mut initial = snapshot();
+    initial.player.active = true;
     initial.queue_open = true;
-    let (engine, _updates, _commands) = Engine::fixture(initial.clone());
+    let mut state = AppState::new();
+    state.queue.tracks = vec![Default::default()].into();
+    initial.queue_tools = crate::app::queue_controls::definitions(&state);
+    initial.listening_history = vec![crate::app::listening_history::Play::from_track(
+        &state.queue.tracks[0],
+    )]
+    .into();
+    let (engine, _updates, mut commands) = Engine::fixture(initial.clone());
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let mut view = Desktop::new(
             std::sync::Arc::new(engine),
@@ -3245,6 +3902,7 @@ fn queue_dropdowns_share_header_and_leave_transport_geometry_stable(cx: &mut Tes
             window,
             cx,
         );
+        view.presentation = WindowRole::NowPlaying;
         view.snapshot = initial;
         view
     });
@@ -3255,34 +3913,79 @@ fn queue_dropdowns_share_header_and_leave_transport_geometry_stable(cx: &mut Tes
     let transport = cx.debug_bounds("transport-bar").unwrap();
     let tools = cx.debug_bounds("queue-tools").unwrap();
     let mode = cx.debug_bounds("queue-mode").unwrap();
-    assert!((tools.center().y - mode.center().y).abs() < px(1.));
-    assert!(tools.left() >= mode.right());
-    assert!(tools.bottom() < transport.top());
+    assert!(mode.bottom() <= tools.top());
+    assert_eq!(tools.center().x, mode.center().x);
+    assert!(tools.bottom() <= transport.top());
+    let clear = cx.debug_bounds("queue-clear").unwrap();
+    assert!(clear.top() >= tools.bottom() && clear.bottom() <= transport.top());
+    for history in [false, true] {
+        view.update(cx, |view, cx| {
+            view.snapshot.showing_queue_history = history;
+            cx.notify();
+        });
+        draw(cx);
+        while commands.try_recv().is_ok() {}
+        cx.simulate_click(clear.center(), Default::default());
+        let actions = std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|cmd| match cmd {
+                Command::Action(action) => Some(action),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            (history, actions.as_slice()),
+            (
+                false,
+                [crate::app::Action::Queue(
+                    crate::app::action::QueueAction::ClearQueue
+                )]
+            ) | (
+                true,
+                [crate::app::Action::Queue(
+                    crate::app::action::QueueAction::ClearHistory
+                )]
+            )
+        ));
+    }
+    let row = cx
+        .debug_bounds("history-track-0")
+        .expect("visible History track");
+    cx.simulate_click(row.center(), Default::default());
+    assert!(
+        std::iter::from_fn(|| commands.try_recv().ok()).any(|command| matches!(
+            command,
+            Command::Action(crate::app::Action::Queue(
+                crate::app::action::QueueAction::SelectHistory(_)
+            ))
+        ))
+    );
+    let dock = cx.debug_bounds("queue-dock").unwrap();
+    let next = cx.debug_bounds("queue-rail-false").unwrap();
+    let history = cx.debug_bounds("queue-rail-true").unwrap();
+    assert!(next.bottom() <= history.top());
+    assert_eq!(next.center().x, history.center().x);
+    assert!(cx.debug_bounds("queue-heading").unwrap().right() < next.left());
+    cx.simulate_click(next.center(), Default::default());
+    assert!(std::iter::from_fn(|| commands.try_recv().ok()).any(|command| matches!(command,
+        Command::GuardedActions { actions, .. } if matches!(actions.as_slice(), [crate::app::Action::Queue(crate::app::action::QueueAction::ShowHistory(false))]))));
+    assert!(dock.bottom() <= transport.top());
+    assert!(mode.left() >= dock.left() && tools.right() <= dock.right());
+
     assert!(cx.debug_bounds("play-queue-tools").is_none());
     let info = cx.debug_bounds("transport-info").unwrap();
     assert!(
         info.size.width >= px(480.),
         "information field must be wide: {info:?}"
     );
-    assert_eq!(
-        transport.size.height,
-        px(crate::ui::layout::TRANSPORT_HEIGHT)
-    );
-    let times = cx.debug_bounds("transport-times").unwrap();
+    assert_eq!(transport.size.height, px(super::motion::TRANSPORT_HEIGHT));
     let seek = cx.debug_bounds("transport-seek-row").unwrap();
-    assert!(times.bottom() <= info.bottom() && times.top() >= seek.top());
-    let expand = cx.debug_bounds("expand-player-sheet").unwrap();
-    assert!((expand.right() - (transport.right() - px(8.))).abs() < px(1.));
-    assert!(expand.left() > info.right());
+    assert!(seek.bottom() <= info.bottom());
+    cx.simulate_click(history.center(), Default::default());
     assert!(
-        info.center().x + px(1.) >= transport.center().x && info.center().x <= px(601.),
-        "info {info:?}"
+        std::iter::from_fn(|| commands.try_recv().ok())
+            .any(|cmd| matches!(cmd, Command::ToggleQueue))
     );
-    assert_eq!(
-        cx.debug_bounds("navigation-sidebar").unwrap().size.width,
-        cx.debug_bounds("queue-dock").unwrap().size.width
-    );
-    assert!(cx.debug_bounds("queue-dock").unwrap().size.width <= px(300.));
+    assert!(cx.debug_bounds("collapse-player-sheet").is_some());
     let mut next = view.read_with(cx, |view, _| view.snapshot.clone());
     next.player.active = true;
     next.player_window_request += 1;
@@ -3292,8 +3995,7 @@ fn queue_dropdowns_share_header_and_leave_transport_geometry_stable(cx: &mut Tes
     }
     assert_eq!(cx.debug_bounds("transport-info").unwrap().size, info.size);
     let collapse = cx.debug_bounds("collapse-player-sheet").unwrap();
-    assert!((collapse.center().x - expand.center().x).abs() < px(1.));
-    assert_eq!(collapse.size, expand.size);
+    assert!(collapse.right() <= cx.debug_bounds("workspace-content").unwrap().right());
     assert_eq!(
         cx.debug_bounds("transport-info").unwrap().left(),
         info.left()
@@ -3515,8 +4217,10 @@ fn column_header_filter_expands_inline_without_scroll_reveal(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn transport_seek_does_not_navigate_and_space_toggles_playback(cx: &mut TestAppContext) {
-    use crate::app::{Action, action::PlaybackAction};
+fn transport_background_toggles_workspace_and_controls_handle_their_own_clicks(
+    cx: &mut TestAppContext,
+) {
+    use crate::app::{Action, action::PlaybackAction, state::PaletteCommandKind};
     cx.update(|cx| {
         init(cx);
         cx.bind_keys([gpui::KeyBinding::new(
@@ -3560,8 +4264,30 @@ fn transport_seek_does_not_navigate_and_space_toggles_playback(cx: &mut TestAppC
         for _ in 0..6 {
             draw(cx);
         }
-        assert_eq!(cx.debug_bounds("expand-player-sheet").is_some(), !active);
+
         while commands.try_recv().is_ok() {}
+        let bar = cx.debug_bounds("transport-bar").unwrap();
+        cx.simulate_click(
+            gpui::point(bar.left() + px(6.), bar.top() + px(6.)),
+            Default::default(),
+        );
+        let clicks: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(matches!(
+            (active, clicks.as_slice()),
+            (
+                false,
+                [Command::Palette(PaletteCommandKind::GotoNowPlaying)]
+            ) | (true, [Command::Palette(PaletteCommandKind::GotoLibrary)])
+        ));
+        let play = cx.debug_bounds("transport-play").unwrap();
+        cx.simulate_click(play.center(), Default::default());
+        let clicks: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(matches!(
+            clicks.as_slice(),
+            [Command::Action(Action::Playback(
+                PlaybackAction::TogglePlayPause
+            ))]
+        ));
         let seek = cx.debug_bounds("transport-seek-row").unwrap();
         cx.simulate_click(
             gpui::point(
@@ -3615,6 +4341,30 @@ fn initial_frame_uses_saved_theme_before_snapshot_updates(cx: &mut TestAppContex
         Some(crate::app::theme::ThemeName::Dracula)
     );
     assert_eq!(cx.update(|_, cx| cx.theme().background), expected);
+}
+
+#[gpui::test]
+fn aluminum_rim_insets_workspace_above_full_width_transport(cx: &mut TestAppContext) {
+    cx.update(init);
+    let mut initial = snapshot();
+    initial.theme = crate::app::theme::ThemeName::BrushedAluminum;
+    let (engine, _updates, _commands) = Engine::fixture(initial);
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        Desktop::new(
+            std::sync::Arc::new(engine),
+            WindowRole::Library,
+            WindowRegistry::default(),
+            window,
+            cx,
+        )
+    });
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    draw(cx);
+    let rim = cx.debug_bounds("aluminum-workspace-rim").unwrap();
+    let transport = cx.debug_bounds("transport-bar").unwrap();
+    assert_eq!(rim.left() - transport.left(), px(6.));
+    assert_eq!(transport.right() - rim.right(), px(6.));
+    assert!(rim.bottom() <= transport.top());
 }
 
 #[gpui::test]
@@ -3687,7 +4437,8 @@ fn column_filter_keeps_child_rows_and_edits_its_own_column(cx: &mut TestAppConte
             command,
             Command::Navigate {
                 column_delta: 1,
-                row_delta: 0
+                row_delta: 0,
+                ..
             }
         ))
     );
@@ -3871,6 +4622,36 @@ fn closing_the_final_column_leaves_an_empty_reopenable_workspace(cx: &mut TestAp
     draw(cx);
     draw(cx);
     assert!(cx.debug_bounds("close-column-0").is_some());
+}
+
+#[gpui::test]
+fn closing_a_sheet_column_returns_to_the_sidebar_root(cx: &mut TestAppContext) {
+    cx.update(init);
+    let mut initial = snapshot();
+    initial.sheet_browser = true;
+    let (engine, _updates, _commands) = Engine::fixture(initial.clone());
+    let (view, cx) = cx.add_window_view(move |window, cx| {
+        let mut desktop = Desktop::new(
+            std::sync::Arc::new(engine),
+            WindowRole::Library,
+            WindowRegistry::default(),
+            window,
+            cx,
+        );
+        desktop.snapshot = initial;
+        desktop.sheet_sidebar_root = false;
+        desktop
+    });
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    for _ in 0..10 {
+        draw(cx);
+    }
+    let close = cx.debug_bounds("close-column-0").unwrap().center();
+    cx.simulate_click(close, Default::default());
+    draw(cx);
+    assert!(view.read_with(cx, |view, _| view.sheet_sidebar_root && view.sheet_open()));
+    assert!(cx.debug_bounds("library-empty-wordmark").is_none());
+    assert!(cx.debug_bounds("close-column-0").is_none());
 }
 
 #[gpui::test]
@@ -4238,6 +5019,18 @@ fn keyboard_tab_reaches_transport_controls_without_switching_workspace(cx: &mut 
     cx.update(|cx| {
         init(cx);
         super::keyboard::init(cx);
+        cx.bind_keys([
+            gpui::KeyBinding::new(
+                "down",
+                super::MoveDown,
+                Some("Textamp && !TextampSlider && !Input"),
+            ),
+            gpui::KeyBinding::new(
+                "enter",
+                super::Activate,
+                Some("Textamp && !TextampSlider && !Input"),
+            ),
+        ]);
     });
     let mut initial = snapshot();
     initial.seekable = true;
@@ -4254,31 +5047,54 @@ fn keyboard_tab_reaches_transport_controls_without_switching_workspace(cx: &mut 
     });
     draw(cx);
     draw(cx);
-    let root = cx.update(|_, cx| view.read(cx).focus.clone());
+    let original = cx.update(|window, cx| window.focused(cx));
     cx.simulate_keystrokes("tab");
-    cx.run_until_parked();
     draw(cx);
-    assert!(!cx.update(|window, _| root.is_focused(window)));
+    let pane = cx.update(|window, cx| window.focused(cx));
+    assert!(pane.is_some() && pane != original);
     cx.simulate_keystrokes("shift-tab");
-    cx.run_until_parked();
     draw(cx);
-    assert!(cx.update(|window, _| root.is_focused(window)));
+    assert_ne!(cx.update(|window, cx| window.focused(cx)), pane);
+    cx.simulate_keystrokes("tab");
+    draw(cx);
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), pane);
+    use super::keyboard::Pane;
+    for _ in 0..12 {
+        if cx.update(|window, cx| {
+            view.read(cx)
+                .pane_focus
+                .handle(Pane::Transport)
+                .contains_focused(window, cx)
+        }) {
+            break;
+        }
+        cx.simulate_keystrokes("tab");
+        draw(cx);
+    }
+    assert!(cx.update(|window, cx| {
+        view.read(cx)
+            .pane_focus
+            .handle(Pane::Transport)
+            .contains_focused(window, cx)
+    }));
     let mut seek = false;
     let mut volume = false;
-    for _ in 0..100 {
-        cx.simulate_keystrokes("tab");
-        cx.run_until_parked();
-        draw(cx);
+    for _ in 0..25 {
         cx.update(|window, cx| {
             let view = view.read(cx);
             seek |= view.seek_focus.is_focused(window);
             volume |= view.volume_focus.is_focused(window);
         });
-        if seek && volume {
+        if seek && volume && cx.update(|window, cx| view.read(cx).volume_focus.is_focused(window)) {
             break;
         }
+        cx.simulate_keystrokes("down");
+        draw(cx);
     }
-    assert!(seek && volume, "both sliders must be keyboard reachable");
+    assert!(
+        seek && volume,
+        "both sliders must be reachable within the transport pane"
+    );
     cx.simulate_keystrokes("right");
     let pending: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
     assert!(pending.iter().any(|command| matches!(
@@ -4293,6 +5109,65 @@ fn keyboard_tab_reaches_transport_controls_without_switching_workspace(cx: &mut 
             | Command::PlayerKey(_)
             | Command::Palette(crate::app::state::PaletteCommandKind::GotoNowPlaying)
     )));
+}
+
+#[gpui::test]
+fn keyboard_queue_rail_opens_history_with_enter(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        init(cx);
+        super::keyboard::init(cx);
+        cx.bind_keys([
+            gpui::KeyBinding::new("down", super::MoveDown, Some("Textamp")),
+            gpui::KeyBinding::new("enter", super::Activate, Some("Textamp")),
+        ]);
+    });
+    let mut initial = snapshot();
+    initial.queue_open = false;
+    let (engine, _updates, mut commands) = Engine::fixture(initial);
+    let (view, cx) = cx.add_window_view(move |window, cx| {
+        Desktop::new(
+            std::sync::Arc::new(engine),
+            WindowRole::Library,
+            WindowRegistry::default(),
+            window,
+            cx,
+        )
+    });
+    let rail = cx.update(|_, cx| {
+        view.read(cx)
+            .pane_focus
+            .handle(super::keyboard::Pane::Rail)
+            .clone()
+    });
+    for _ in 0..12 {
+        draw(cx);
+        if cx.update(|window, cx| rail.contains_focused(window, cx)) {
+            break;
+        }
+        cx.simulate_keystrokes("tab");
+    }
+    assert!(cx.update(|window, cx| rail.contains_focused(window, cx)));
+    cx.simulate_keystrokes("down");
+    draw(cx);
+    cx.simulate_keystrokes("enter");
+    cx.update(|window, cx| {
+        use gpui::InputEvent as _;
+        window.dispatch_event(
+            gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse("enter").unwrap(),
+            }
+            .to_platform_input(),
+            cx,
+        );
+    });
+    draw(cx);
+    assert!(
+        std::iter::from_fn(|| commands.try_recv().ok()).any(|command| {
+            matches!(command, Command::GuardedActions { actions, .. }
+            if actions.iter().any(|action| matches!(action,
+                crate::app::Action::Queue(crate::app::action::QueueAction::ShowHistory(true)))))
+        })
+    );
 }
 
 #[gpui::test]
@@ -4347,7 +5222,7 @@ fn holding_play_opens_choices_without_starting_playback(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn radio_queue_mode_selector_dispatches_manual_mode_from_its_header(cx: &mut TestAppContext) {
+fn radio_queue_mode_selector_dispatches_manual_mode_from_sidebar(cx: &mut TestAppContext) {
     cx.update(|cx| {
         init(cx);
         cx.set_reduce_motion(true);
@@ -4359,6 +5234,7 @@ fn radio_queue_mode_selector_dispatches_manual_mode_from_its_header(cx: &mut Tes
         title: "Play Random Albums".into(),
     });
     let mut initial = snapshot();
+    initial.player.active = true;
     initial.queue_open = true;
     initial.queue_mode = crate::app::queue_modes::label(&state);
     initial.queue_modes = crate::app::queue_modes::choices(&state);
@@ -4380,9 +5256,9 @@ fn radio_queue_mode_selector_dispatches_manual_mode_from_its_header(cx: &mut Tes
     }
     let button = cx
         .debug_bounds("queue-mode")
-        .expect("queue mode is reachable from the queue header");
-    let heading = cx.debug_bounds("queue-heading").expect("queue heading");
-    assert!((heading.center().y - button.center().y).abs() < px(4.));
+        .expect("queue mode is reachable from the sidebar");
+    let rail = cx.debug_bounds("library-queue-rail").unwrap();
+    assert!(button.left() >= rail.left() && button.right() <= rail.right());
     assert!(button.size.width < px(60.));
     cx.simulate_click(button.center(), Default::default());
     draw(cx);
@@ -4490,27 +5366,31 @@ fn lyrics_reader_renders_a_scrollable_reading_area(cx: &mut TestAppContext) {
     }));
     let model = super::surface::project(&state).unwrap();
     assert!(model.toggles[0].checked);
-    let (engine, _updates, _commands) = Engine::fixture(Snapshot {
-        surface: Some(model.clone()),
-        ..Default::default()
-    });
+    let mut initial = snapshot();
+    initial.player.active = true;
+    initial.surface = Some(model);
+    let (engine, _updates, _commands) = Engine::fixture(initial.clone());
     let (_, cx) = cx.add_window_view(move |window, cx| {
-        let view = cx.new(|cx| {
-            super::surface_view::SurfaceView::new(
-                model,
-                false,
-                engine.commands.clone(),
-                engine.snapshot.clone(),
-                window,
-                cx,
-            )
-        });
-        gpui_kit::base::Root::new(view, window, cx)
+        let mut desktop = Desktop::new(
+            std::sync::Arc::new(engine),
+            WindowRole::Library,
+            WindowRegistry::default(),
+            window,
+            cx,
+        );
+        desktop.snapshot = initial;
+        desktop
     });
+    cx.simulate_resize(gpui::size(px(1300.), px(820.)));
     for _ in 0..4 {
         draw(cx);
     }
     let reading = cx.debug_bounds("lyrics-lines").expect("lyrics viewport");
+    let pane = cx
+        .debug_bounds("visualizer-pane")
+        .expect("player detail pane");
+    assert!(reading.top() >= pane.top() && reading.bottom() <= pane.bottom());
+
     assert!(reading.size.height > px(100.));
     let first = cx.debug_bounds("lyrics-line-0").expect("opening lyric");
     let second = cx.debug_bounds("lyrics-line-1").expect("second lyric");

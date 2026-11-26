@@ -54,12 +54,14 @@ pub fn summaries(state: &AppState) -> Vec<CacheLibrary> {
 
 #[derive(Debug, Clone)]
 pub struct ScanResult {
+    pub folder_radio: Option<crate::library::tree::FolderRadio>,
     pub updated: u64,
     pub warning: Option<String>,
 }
 impl ScanResult {
     fn fresh(warning: Option<String>) -> Self {
         Self {
+            folder_radio: None,
             updated: crate::library::cache::now(),
             warning,
         }
@@ -370,7 +372,6 @@ async fn rescan(
     manual: bool,
 ) -> anyhow::Result<ScanResult> {
     let store = choice.cache_store()?;
-    let mut warning = None;
     match choice {
         LibraryChoice::Folder(source) => {
             let ticket = store.ticket(KEY);
@@ -379,16 +380,22 @@ async fn rescan(
                 if let Some(hit) =
                     crate::app::tasks::spawn_blocking(move || read.read::<Tree>(REFRESH_INTERVAL))
                         .await??
-                        .filter(|hit| !hit.stale)
+                        .filter(|hit| !hit.stale && hit.value.radio.is_some())
                 {
                     return Ok(ScanResult {
+                        folder_radio: hit.value.radio,
                         updated: hit.timestamp,
                         warning: None,
                     });
                 }
             }
             let tree = crate::library::tree::scan(source).await?;
+            let folder_radio = tree.radio.clone();
             crate::app::tasks::spawn_blocking(move || ticket.write(&tree)).await??;
+            return Ok(ScanResult {
+                folder_radio,
+                ..ScanResult::fresh(None)
+            });
         }
         LibraryChoice::Navidrome { source, folder, .. } => {
             let ticket = store.ticket("catalog");
@@ -483,11 +490,12 @@ async fn rescan(
                 .into_iter()
                 .chain(analysis)
                 .collect();
-            warning = (!issues.is_empty()).then(|| issues.join("; "));
+            Ok(ScanResult::fresh(
+                (!issues.is_empty()).then(|| issues.join("; ")),
+            ))
         }
         _ => anyhow::bail!("Select a saved library"),
     }
-    Ok(ScanResult::fresh(warning))
 }
 
 /// Cached branch lookup, shared with lazy browsing. Never serves an incomplete

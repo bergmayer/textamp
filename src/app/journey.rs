@@ -99,6 +99,21 @@ pub fn select(launcher: &AdventureLauncherState) -> Vec<Action> {
     ]
 }
 
+pub(crate) fn cancel_preview(state: &mut AppState) {
+    if let Some(JourneyStage::Generating { request_id }) = state
+        .popups
+        .adventure_launcher()
+        .map(|launcher| &launcher.stage)
+        && state
+            .sources
+            .nav_tasks
+            .get("adventure")
+            .is_some_and(|(id, _)| id == request_id)
+    {
+        state.sources.nav_tasks.remove("adventure");
+    }
+}
+
 /// Form traversal excludes fields that do not apply to a seeded radio station.
 pub fn controls(purpose: TrackPickerPurpose) -> &'static [JourneyControl] {
     use JourneyControl::*;

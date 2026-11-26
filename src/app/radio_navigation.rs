@@ -1,6 +1,32 @@
 //! Library navigation and inline configuration for radio stations.
 use super::{Action, AppState, action::*, state::*};
 
+pub(crate) fn shortcut_station<'a>(
+    stations: &'a [crate::library::station::Station],
+    preferred: Option<&str>,
+) -> Option<&'a crate::library::station::Station> {
+    preferred
+        .and_then(|id| {
+            stations
+                .iter()
+                .find(|s| s.identifier.as_deref().unwrap_or(&s.key) == id)
+        })
+        .or_else(|| {
+            stations
+                .iter()
+                .find(|s| s.identifier.as_deref() == Some("randomAlbum"))
+        })
+        .or(stations.first())
+}
+
+pub(crate) fn shortcut_command(station: &crate::library::station::Station) -> PaletteCommandKind {
+    if station.requires_input() {
+        PaletteCommandKind::ConfigureStation(station.key.clone())
+    } else {
+        PaletteCommandKind::PlayStation(station.key.clone())
+    }
+}
+
 pub fn visible(state: &AppState) -> bool {
     (state.view == View::Browse
         || (state.view == View::Queue && state.tui_queue_workspace == TuiWorkspace::Library))
@@ -15,10 +41,18 @@ pub fn inline_input(state: &AppState) -> bool {
                 .adventure_launcher()
                 .is_some_and(|form| form.purpose != TrackPickerPurpose::Journey))
 }
+pub(crate) fn seed_picker(station: &crate::library::station::Station) -> Option<SearchAction> {
+    match station.identifier.as_deref() {
+        Some("sonic") => Some(SearchAction::OpenTrackRadioPicker),
+        Some("stayClose") => Some(SearchAction::OpenStayCloseRadioPicker),
+        Some("artist-picker") => Some(SearchAction::OpenArtistRadioPicker),
+        _ => None,
+    }
+}
 pub fn select(state: &mut AppState, column: usize, key: &str) -> Vec<Action> {
     let Some((index, station)) = state.station_nav.columns.get(column).and_then(|column| {
         column
-            .stations
+            .stations()
             .iter()
             .enumerate()
             .find(|(_, station)| station.key == key)
@@ -51,12 +85,7 @@ pub fn select(state: &mut AppState, column: usize, key: &str) -> Vec<Action> {
     state.station_detail = (!station.is_category()).then(|| station.key.clone());
     if station.is_category() {
         actions.push(RadioAction::DrillIntoStation(station.key, station.title).into());
-    } else if let Some(input) = match station.identifier.as_deref() {
-        Some("sonic") => Some(SearchAction::OpenTrackRadioPicker),
-        Some("stayClose") => Some(SearchAction::OpenStayCloseRadioPicker),
-        Some("artist-picker") => Some(SearchAction::OpenArtistRadioPicker),
-        _ => None,
-    } {
+    } else if let Some(input) = seed_picker(&station) {
         state.track_pane_focused = true;
         actions.push(input.into());
     }
@@ -68,7 +97,7 @@ pub fn configure(state: &mut AppState, key: &str) -> Vec<Action> {
         .station_nav
         .columns
         .iter()
-        .position(|column| column.stations.iter().any(|station| station.key == key))
+        .position(|column| column.stations().iter().any(|station| station.key == key))
     else {
         return vec![];
     };
@@ -101,7 +130,7 @@ pub fn configure(state: &mut AppState, key: &str) -> Vec<Action> {
     for parent in 0..column {
         let next = state.station_nav.columns[parent + 1].key.clone();
         if let Some(index) = state.station_nav.columns[parent]
-            .stations
+            .stations()
             .iter()
             .position(|station| Some(&station.key) == next.as_ref())
         {
@@ -121,7 +150,7 @@ pub fn key(state: &mut AppState, key: crossterm::event::KeyCode) -> Option<Vec<A
             let next = if key == KeyCode::Up {
                 index.saturating_sub(1)
             } else {
-                (index + 1).min(current.stations.len().saturating_sub(1))
+                (index + 1).min(current.stations().len().saturating_sub(1))
             };
             state.station_nav.columns[column].selected_index = next;
             Some(vec![])
@@ -131,8 +160,16 @@ pub fn key(state: &mut AppState, key: crossterm::event::KeyCode) -> Option<Vec<A
             state.station_nav.focused_column = column.saturating_sub(1);
             Some(vec![])
         }
-        KeyCode::Right | KeyCode::Enter => {
-            let station = current.stations.get(index)?.clone();
+        KeyCode::Right => {
+            if state.station_nav.columns.len() > column + 1 {
+                state.station_nav.focused_column += 1;
+            } else if state.station_detail.is_some() {
+                state.track_pane_focused = true;
+            }
+            Some(vec![])
+        }
+        KeyCode::Enter => {
+            let station = current.stations().get(index)?.clone();
             state.track_pane_focused = !station.is_category();
             let actions = select(state, column, &station.key);
             if station.is_category() && state.station_nav.columns.len() > column + 1 {
@@ -141,7 +178,7 @@ pub fn key(state: &mut AppState, key: crossterm::event::KeyCode) -> Option<Vec<A
             Some(actions)
         }
         KeyCode::Char('p') if state.track_pane_focused => Some(vec![
-            RadioAction::PlayStation(current.stations.get(index)?.key.clone()).into(),
+            RadioAction::PlayStation(current.stations().get(index)?.key.clone()).into(),
         ]),
         _ => None,
     }

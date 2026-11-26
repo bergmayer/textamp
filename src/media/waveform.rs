@@ -424,7 +424,6 @@ impl WaveformCache {
     }
 
     /// Prune expired waveform cache entries.
-    /// User doesn't replay songs often, so waveforms can expire faster.
     pub fn prune_expired(&self, ttl_secs: u64) {
         if !self.cache_dir.exists() {
             return;
@@ -507,27 +506,6 @@ impl WaveformCache {
                 total_size = total_size.saturating_sub(size);
             }
         }
-    }
-
-    /// Get cache statistics: (file_count, total_bytes).
-    pub fn stats(&self) -> (usize, u64) {
-        if !self.cache_dir.exists() {
-            return (0, 0);
-        }
-
-        let mut count = 0usize;
-        let mut total = 0u64;
-        if let Ok(entries) = std::fs::read_dir(&self.cache_dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata()
-                    && metadata.is_file()
-                {
-                    count += 1;
-                    total += metadata.len();
-                }
-            }
-        }
-        (count, total)
     }
 
     /// Get total waveform cache size in bytes.

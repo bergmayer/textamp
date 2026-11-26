@@ -1,7 +1,13 @@
 //! Syncs selected WebDAV folder trees using their original paths.
 use super::*;
+use futures::{
+    StreamExt,
+    stream::{FuturesOrdered, FuturesUnordered},
+};
+
 use crate::library::{FolderLocation, FolderSource, MAX_ENTRIES, is_audio, webdav};
 
+const READ_CONCURRENCY: usize = 4;
 const NOMEDIA: &str = ".nomedia";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +133,100 @@ pub async fn sync_webdav_device(
     )
     .await
 }
+async fn selected_files(
+    source: &FolderSource,
+    selection: &WebdavSelection,
+) -> Result<(BTreeSet<String>, BTreeMap<String, String>)> {
+    let mut pending: Vec<_> = selection.folders.iter().cloned().collect();
+    let mut visited = selection.folders.clone();
+    let mut requests = FuturesUnordered::new();
+    ensure!(
+        visited.len() <= MAX_ENTRIES,
+        "WebDAV selection has too many entries"
+    );
+    let mut files = BTreeMap::new();
+    loop {
+        while requests.len() < READ_CONCURRENCY {
+            let Some(folder) = pending.pop() else { break };
+            ensure!(
+                folder.is_empty() || valid_path(&folder),
+                "A WebDAV folder name cannot be stored on this player"
+            );
+            requests.push(async move { webdav::list_with_versions(source, &folder).await });
+        }
+        let Some(listing) = requests.next().await else {
+            break;
+        };
+        for (entry, version) in listing? {
+            if !entry.directory && !is_audio(&entry.name) {
+                continue;
+            }
+            ensure!(
+                valid_path(&entry.path),
+                "A WebDAV path cannot be stored as-is on this player: {}",
+                entry.path
+            );
+            if entry.directory {
+                if visited.insert(entry.path.clone()) {
+                    pending.push(entry.path);
+                }
+            } else {
+                files.insert(entry.path, version);
+            }
+        }
+        ensure!(
+            visited.len() + files.len() <= MAX_ENTRIES,
+            "WebDAV selection has too many entries"
+        );
+    }
+    Ok((visited, files))
+}
+
+async fn plan_file<'a>(
+    source: &FolderSource,
+    root: &Path,
+    manifest: &Manifest,
+    path: &'a String,
+    listed_version: &str,
+) -> Result<PlannedFile<'a>> {
+    let destination = planned_path(root, path).await?;
+    let metadata = match tokio::fs::metadata(&destination).await {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let copy = manifest.files.get(path).map(|entry| {
+        DeviceCopy::from_entry(
+            entry,
+            metadata
+                .as_ref()
+                .is_some_and(|m| m.is_file() && m.len() == entry.bytes),
+        )
+    });
+    ensure!(
+        copy.is_some() || metadata.is_none(),
+        "A file already uses this WebDAV path on the player: {path}"
+    );
+    let validator = copy.as_ref().and_then(DeviceCopy::validator);
+    let remote = if validator.is_some() && validator != Some(listed_version) {
+        webdav::version(source, path).await?
+    } else {
+        None
+    };
+    let version = remote
+        .as_ref()
+        .map(|(version, _)| version.as_str())
+        .filter(|v| !v.is_empty())
+        .unwrap_or(listed_version);
+    let decision = FileDecision::compare(copy.as_ref(), version);
+    Ok(PlannedFile {
+        path,
+        decision,
+        prior_version: copy.and_then(|c| c.version.map(str::to_owned)),
+        observed_version: version.to_owned(),
+    })
+}
+
 pub async fn review_webdav<F: Future<Output = Result<()>>>(
     source: &FolderSource,
     device_id: &str,
@@ -142,38 +242,8 @@ pub async fn review_webdav<F: Future<Output = Result<()>>>(
         "Expected a WebDAV library"
     );
     let downloads = DownloadCopies::new(downloads);
-    let mut pending: Vec<_> = selection.folders.iter().cloned().collect();
-    let mut visited = BTreeSet::new();
     source.validate()?;
-    let mut files = BTreeMap::new();
-    while let Some(folder) = pending.pop() {
-        if !visited.insert(folder.clone()) {
-            continue;
-        }
-        ensure!(
-            folder.is_empty() || valid_path(&folder),
-            "A WebDAV folder name cannot be stored on this player"
-        );
-        for (entry, version) in webdav::list_with_versions(source, &folder).await? {
-            if !entry.directory && !is_audio(&entry.name) {
-                continue;
-            }
-            ensure!(
-                valid_path(&entry.path),
-                "A WebDAV path cannot be stored as-is on this player: {}",
-                entry.path
-            );
-            if entry.directory {
-                pending.push(entry.path);
-            } else {
-                files.insert(entry.path, version);
-            }
-        }
-        ensure!(
-            visited.len() + pending.len() + files.len() <= MAX_ENTRIES,
-            "WebDAV selection has too many entries"
-        );
-    }
+    let (visited, files) = selected_files(source, selection).await?;
     let mut folded = BTreeSet::new();
     ensure!(
         files.keys().all(|path| folded.insert(path.to_lowercase())),
@@ -193,52 +263,32 @@ pub async fn review_webdav<F: Future<Output = Result<()>>>(
                     && entry.bytes > 0),
         "Invalid WebDAV player sync index"
     );
-    recover_publication(target, &root, &mut manifest, Layout::Webdav).await?;
+    let before_recovery = recover_publication(target, &root, &mut manifest, Layout::Webdav).await?;
     let mut report = change_report();
-    let mut decisions = Vec::with_capacity(files.len());
-    for (path, listed_version) in &files {
-        let destination = planned_path(&root, path).await?;
-        let metadata = match tokio::fs::metadata(&destination).await {
-            Ok(metadata) => Some(metadata),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        let copy = manifest.files.get(path).map(|entry| {
-            DeviceCopy::from_entry(
-                entry,
-                metadata
-                    .as_ref()
-                    .is_some_and(|m| m.is_file() && m.len() == entry.bytes),
-            )
-        });
-        ensure!(
-            copy.is_some() || metadata.is_none(),
-            "A file already uses this WebDAV path on the player: {path}"
-        );
-        let validator = copy.as_ref().and_then(DeviceCopy::validator);
-        let remote = if validator.is_some() && validator != Some(listed_version.as_str()) {
-            webdav::version(source, path).await?
-        } else {
-            None
-        };
-        let version = remote
-            .as_ref()
-            .map(|(version, _)| version.as_str())
-            .filter(|v| !v.is_empty())
-            .unwrap_or(listed_version);
-        let decision = FileDecision::compare(copy.as_ref(), version);
-        let (group, reason) = decision.report();
-        report
-            .get_mut(group)
-            .unwrap()
-            .push(report_line(path, reason));
-        decisions.push(PlannedFile {
-            path,
-            decision,
-            prior_version: copy.and_then(|c| c.version.map(str::to_owned)),
-            observed_version: version.to_owned(),
-        });
-    }
+    let decisions = {
+        let mut files = files.iter();
+        let mut plans = FuturesOrdered::new();
+        let mut decisions = Vec::with_capacity(files.len());
+        loop {
+            while plans.len() < READ_CONCURRENCY {
+                let Some((path, version)) = files.next() else {
+                    break;
+                };
+                plans.push_back(plan_file(source, &root, &manifest, path, version));
+            }
+            let Some(plan) = plans.next().await else {
+                break;
+            };
+            let plan = plan?;
+            let (group, reason) = plan.decision.report();
+            report
+                .get_mut(group)
+                .unwrap()
+                .push(report_line(plan.path, reason));
+            decisions.push(plan);
+        }
+        decisions
+    };
     report.get_mut(REMOVE).unwrap().extend(
         manifest
             .files
@@ -279,7 +329,7 @@ pub async fn review_webdav<F: Future<Output = Result<()>>>(
         }
     }
     review(report).await?;
-    validate_review(target, volume, &manifest).await?;
+    validate_review(target, volume, &manifest, before_recovery.as_ref()).await?;
     for plan in &decisions {
         if plan.decision == FileDecision::Keep {
             check_reviewed_copy(&root, &manifest.files[plan.path]).await?;
@@ -290,7 +340,16 @@ pub async fn review_webdav<F: Future<Output = Result<()>>>(
         total: files.len(),
         ..Default::default()
     };
-    let mut summary = Summary::default();
+    let (listens, unconfirmed_listens) =
+        scrobbles::import(target, &root, &mut manifest, None, |path| {
+            crate::library::models::Track::from_folder(&source.id, path)
+        })
+        .await?;
+    let mut summary = Summary {
+        listens,
+        unconfirmed_listens,
+        ..Default::default()
+    };
     for PlannedFile {
         path,
         decision,
@@ -322,6 +381,9 @@ pub async fn review_webdav<F: Future<Output = Result<()>>>(
             .context("Missing WebDAV destination folder")?;
         tokio::fs::create_dir_all(parent).await?;
         let verify = decision == FileDecision::Verify;
+        if verify {
+            target.hydrate(&destination).await?;
+        }
         let parent = parent.to_owned();
         let temporary = crate::app::tasks::spawn_blocking(move || {
             (if verify {
@@ -373,6 +435,10 @@ pub async fn review_webdav<F: Future<Output = Result<()>>>(
         };
         match transfer {
             Some((bytes, signature, digest)) => {
+                manifest.listening_tags.remove(path);
+                if let Some(tags) = scrobbles::file_tags(device_id, path, &temporary).await? {
+                    manifest.listening_tags.insert(path.clone(), tags);
+                }
                 check_volume(target, &root, &volume.uuid).await?;
                 let entry = Entry {
                     path: path.clone(),
@@ -386,7 +452,7 @@ pub async fn review_webdav<F: Future<Output = Result<()>>>(
                 if verify && same_contents(&destination, &temporary, bytes).await? {
                     if manifest.files[path].signature != entry.signature {
                         manifest.files.insert(path.clone(), entry);
-                        save(&root, &manifest).await?;
+                        save(target, &root, &manifest).await?;
                     }
                     summary.reused += 1;
                     status.reused += 1;
@@ -438,16 +504,13 @@ pub async fn review_webdav<F: Future<Output = Result<()>>>(
         .collect();
     for path in removed {
         check_volume(target, &root, &volume.uuid).await?;
-        match tokio::fs::remove_file(safe_path(&root, &path).await?).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+        target.remove(&safe_path(&root, &path).await?).await?;
         manifest.files.remove(&path);
+        manifest.listening_tags.remove(&path);
         summary.removed += 1;
     }
     manifest.synced_folders = Some(selection.folders.clone());
-    save(&root, &manifest).await?;
+    save(target, &root, &manifest).await?;
     Ok(summary)
 }
 
@@ -474,7 +537,7 @@ async fn reconcile_markers(
         check_volume(target, root, &manifest.volume_uuid).await?;
         let path = safe_path(root, &name).await?;
         if tokio::fs::try_exists(&path).await? && tokio::fs::metadata(&path).await?.len() == 0 {
-            tokio::fs::remove_file(path).await?;
+            target.remove(&path).await?;
         }
         manifest.marker_paths.remove(&name);
     }
@@ -488,12 +551,90 @@ async fn reconcile_markers(
         match tokio::fs::File::create_new(&dest).await {
             Ok(file) => {
                 file.sync_all().await?;
+                target.publish(&dest, &dest).await?;
                 manifest.marker_paths.insert(name);
-                save(root, manifest).await?;
+                save(target, root, manifest).await?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
             Err(e) => return Err(e.into()),
         }
     }
-    save(root, manifest).await
+    save(target, root, manifest).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn selected_folders_overlap_and_a_nested_selection_is_listed_once() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = FolderSource {
+            id: "selection-test".into(),
+            name: "Selection".into(),
+            location: FolderLocation::Webdav {
+                url: format!("http://{}/", listener.local_addr().unwrap()),
+                username: None,
+                password_env: None,
+            },
+        };
+        let selection = WebdavSelection {
+            folders: ["A", "A/B", "C", "D", "E"].map(String::from).into(),
+            ..Default::default()
+        };
+        let server = async {
+            let mut seen = BTreeSet::new();
+            for batch in [4, 1] {
+                let mut pending = Vec::new();
+                for _ in 0..batch {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut first_line = String::new();
+                    BufReader::new(&mut socket)
+                        .read_line(&mut first_line)
+                        .await
+                        .unwrap();
+                    assert!(first_line.starts_with("PROPFIND /"));
+                    let path = first_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap()
+                        .trim_matches('/');
+                    assert!(seen.insert(path.to_owned()), "duplicate listing of {path}");
+                    let children = if path == "A" {
+                        "<response><href>/A/B/</href><propstat><prop><resourcetype><collection/></resourcetype></prop><status>HTTP/1.1 200 OK</status></propstat></response>"
+                    } else {
+                        ""
+                    };
+                    let body = format!(
+                        r#"<multistatus xmlns="DAV:">{children}<response><href>/{path}/song.flac</href><propstat><prop><resourcetype/></prop><status>HTTP/1.1 200 OK</status></propstat></response></multistatus>"#
+                    );
+                    pending.push((socket, body));
+                }
+                for (mut socket, body) in pending {
+                    socket.write_all(format!("HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
+            }
+        };
+        let ((folders, files), ()) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    async { selected_files(&source, &selection).await.unwrap() },
+                    server
+                )
+            })
+            .await
+            .expect("all four sibling listings must start before replies are released");
+        assert_eq!(folders, selection.folders);
+        assert_eq!(
+            files.into_keys().collect::<Vec<_>>(),
+            [
+                "A/B/song.flac",
+                "A/song.flac",
+                "C/song.flac",
+                "D/song.flac",
+                "E/song.flac"
+            ]
+        );
+    }
 }

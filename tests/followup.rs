@@ -576,3 +576,28 @@ async fn undo_queue_edit_preserves_current_audio_when_its_track_is_restored() {
     assert_eq!(state.playback.position_ms, 1234);
     assert_eq!(audio.playback_id(), old_audio);
 }
+
+#[tokio::test]
+async fn advancing_consumes_only_the_played_occurrence_and_previous_restores_it() {
+    use textamp::app::{action::PlaybackAction, handlers::dispatch_playback};
+    let mut state = AppState::new();
+    state.set_playback_mode(PlaybackMode::Queue);
+    state.queue.tracks = vec![track("A"), track("B"), track("A")];
+    state.queue.index = Some(0);
+    let (tx, _rx) = mpsc::channel(8);
+    let mut audio = textamp::audio::AudioPlayer::new_without_audio();
+    dispatch_playback::dispatch(&tx, PlaybackAction::Next, &mut state, &mut audio).unwrap();
+    let titles = |state: &AppState| {
+        state
+            .queue
+            .tracks
+            .iter()
+            .map(|t| t.title.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(titles(&state), ["B", "A"]);
+    assert_eq!(state.current_track().unwrap().title, "B");
+    dispatch_playback::dispatch(&tx, PlaybackAction::Previous, &mut state, &mut audio).unwrap();
+    assert_eq!(titles(&state), ["A", "B", "A"]);
+    assert_eq!(state.current_track().unwrap().title, "A");
+}

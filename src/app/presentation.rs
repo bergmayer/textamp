@@ -14,10 +14,20 @@ pub struct HitRegions {
     pub text_input: Option<TextInputRegion>,
     /// First visible display item of each rendered column.
     pub miller_offsets: Vec<(usize, usize)>,
+    /// Grid column and adjacent scroll offsets in display-item coordinates.
+    pub grid_scroll_neighbors: Vec<(usize, usize, usize)>,
     /// Visible artwork item bounds with their column and original item index.
     pub miller_item_rows: Vec<(usize, Rect, usize)>,
+    /// Visible album grids, with their column index, tile count per row, and viewport.
+    pub album_grids: Vec<(usize, usize, Rect)>,
     pub artist_links: Vec<ArtistLink>,
     pub detail_links: Vec<DetailLink>,
+    pub recommendation_pages: Vec<(Rect, usize, usize, usize)>,
+    pub album_related: Vec<(
+        Rect,
+        crate::library::models::Track,
+        super::library_details::Destination,
+    )>,
     /// Full ribbon length and leftmost visible slot from the last frame.
     pub miller_viewport: Option<(usize, usize)>,
     /// Close affordance for the topmost terminal overlay.
@@ -25,6 +35,9 @@ pub struct HitRegions {
     pub popup_outer: Option<Rect>,
     pub motion_hidden: Vec<Rect>,
     pub player_overlay: Option<Rect>,
+    pub transport_artwork: Option<Rect>,
+    pub player_artwork: Option<Rect>,
+    pub player_reader: Option<Rect>,
     pub player_toggle: Option<Rect>,
     pub description_input: Option<Rect>,
     pub sidebar_group: Option<(Rect, usize)>,
@@ -40,11 +53,10 @@ pub struct HitRegions {
     pub settings_about: Option<ScrollableTextRegion>,
     pub library_option_pages: Vec<(Rect, crate::app::sources::options::OptionsPage)>,
     pub library_option_scroll: usize,
-    pub biography_radio: Option<Rect>,
     pub biography_google: Option<Rect>,
     pub biography_text: Option<ScrollableTextRegion>,
     pub settings_textamp: Option<SettingsContentRegion>,
-    /// Actual wrapped help content and viewport, including split layouts.
+    /// Actual wrapped help content and viewport.
     pub help: Option<ScrollableTextRegion>,
     // ── Modal popups (checked first, highest priority) ──────────────────────
     /// Confirm dialog (Yes/No buttons).
@@ -99,6 +111,13 @@ pub struct HitRegions {
     pub player_sync_rows: Vec<(Rect, usize, crate::app::player_sync::Command)>,
     pub station_rows: Vec<(Rect, usize, String)>,
     pub station_play: Option<(Rect, String)>,
+    pub history_rows: Vec<(Rect, usize)>,
+    pub sidebar_toggle: Option<Rect>,
+    pub sidebar_back: Option<Rect>,
+    pub sheet_library_area: Option<Rect>,
+    pub queue_clear: Option<Rect>,
+    pub rail_radio: Option<Rect>,
+    pub queue_tabs: Vec<(Rect, bool)>,
     pub queue_menus: Vec<(Rect, super::queue_controls::Menu)>,
 
     /// Track-details pane regions (right-side pane on Browse view
@@ -367,9 +386,7 @@ pub struct AlphabetStripRegions {
     pub letters: Vec<(Rect, usize)>,
 }
 
-/// Track-details pane click regions — Play button + similar-track
-/// rows. Index space matches `state.track_pane_index`: 0 and 1 are
-/// playback buttons; 2..=N+1 are similar tracks in order.
+/// The three playback controls and visible similar tracks in a detail pane.
 #[derive(Debug, Clone)]
 pub struct TrackPaneRegions {
     pub scroll: u16,
@@ -398,9 +415,18 @@ pub struct CategoryColumnRegion {
     pub item_count: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AlbumScroll {
+    pub first: usize,
+    pub bands: usize,
+    pub max_first: usize,
+}
+
 /// A single Miller column's registered geometry.
 #[derive(Debug, Clone)]
 pub struct MillerColumnRegion {
+    /// Scrollbar units for a column containing tracks and recommendation bands.
+    pub album_scroll: Option<AlbumScroll>,
     /// Wrapped album metadata scroll limit, absent for item columns.
     pub details_max_scroll: Option<usize>,
     /// Which column index in the navigation this represents.

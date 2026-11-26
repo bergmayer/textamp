@@ -373,3 +373,14 @@ async fn mounted_fat32_player_sync_roundtrip() {
         "Mounted FAT32: two decodable files, M3U paths verified, repeat sync reused both files, Downloads untouched"
     );
 }
+
+#[tokio::test]
+#[ignore = "Requires an attached MTP player named by TEXTAMP_TEST_MTP_PLAYER"]
+async fn connected_mtp_player_is_visible_without_a_mount() {
+    let name = std::env::var("TEXTAMP_TEST_MTP_PLAYER").unwrap();
+    assert!(
+        textamp::services::player_sync::mtp::discover()
+            .await
+            .contains(&name)
+    );
+}

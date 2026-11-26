@@ -5,17 +5,25 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-pub fn render(frame: &mut Frame, state: &RenderState<'_>, area: Rect) {
+pub fn render(frame: &mut Frame, state: &RenderState<'_>, single: bool, area: Rect) {
     if area.is_empty() {
         return;
     }
     let colors = &theme().colors;
     let count = state.station_nav.columns.len();
     let total = (count + usize::from(state.station_detail.is_some())).max(1);
-    let visible = total.min((area.width / 28).max(1) as usize);
-    let start = total.saturating_sub(visible);
+    let visible = if single {
+        1
+    } else {
+        total.min((area.width / 28).max(1) as usize)
+    };
+    let start = if single && !state.track_pane_focused {
+        state.station_nav.focused_column.min(total - 1)
+    } else {
+        total.saturating_sub(visible)
+    };
     let width = area.width / visible as u16;
-    for slot in start..total {
+    for slot in start..start + visible {
         let x = area.x + (slot - start) as u16 * width;
         let rect = Rect::new(
             x,
@@ -44,7 +52,7 @@ pub fn render(frame: &mut Frame, state: &RenderState<'_>, area: Rect) {
                 .unwrap_or("Radio")
         };
         let block = Block::default()
-            .title(title)
+            .title(crate::util::column_heading::capitalized(title))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(if focused {
                 colors.border_focused
@@ -59,11 +67,11 @@ pub fn render(frame: &mut Frame, state: &RenderState<'_>, area: Rect) {
             let offset = crate::services::NavigationService::calc_scroll_offset(
                 column.selected_index,
                 inner.height as usize,
-                column.stations.len(),
+                column.stations().len(),
             );
             *selection.offset_mut() = offset;
             let rows = column
-                .stations
+                .stations()
                 .iter()
                 .map(|station| ListItem::new(station.title.as_str()))
                 .collect::<Vec<_>>();
@@ -79,7 +87,7 @@ pub fn render(frame: &mut Frame, state: &RenderState<'_>, area: Rect) {
                 &mut selection,
             );
             for (index, station) in column
-                .stations
+                .stations()
                 .iter()
                 .enumerate()
                 .skip(offset)

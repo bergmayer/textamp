@@ -3,6 +3,14 @@ use anyhow::Result;
 use textamp::app::launch::{Arguments, Mode};
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if std::env::args().nth(1).as_deref() == Some("--mtp-worker") {
+        let location = std::env::args()
+            .nth(2)
+            .ok_or_else(|| anyhow::anyhow!("Missing USB location"))?
+            .parse()?;
+        std::process::exit(textamp::services::player_sync::mtp::run_worker(location));
+    }
     let arguments = Arguments::parse(std::env::args().skip(1), cfg!(feature = "desktop"))?;
     if arguments.help {
         println!(

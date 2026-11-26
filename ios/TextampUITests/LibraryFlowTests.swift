@@ -33,7 +33,7 @@ final class LibraryFlowTests: XCTestCase {
     let artist = app.staticTexts["A Artist"].firstMatch
     XCTAssertTrue(artist.waitForExistence(timeout: 8))
     artist.tap()
-    let album = app.staticTexts["A Album 1 (2000)"].firstMatch
+    let album = albumEntry(app, "A Album 1 (2000)")
     XCTAssertTrue(album.waitForExistence(timeout: 8))
     XCTAssertTrue(artists.isHittable)
     XCTAssertLessThan(artists.frame.maxX, artist.frame.minX)
@@ -210,8 +210,8 @@ final class LibraryFlowTests: XCTestCase {
       app.buttons["Artists"].tap()
       XCTAssertTrue(app.staticTexts["A Artist"].waitForExistence(timeout: 10))
       app.staticTexts["A Artist"].tap()
-      XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForExistence(timeout: 10))
-      app.staticTexts["A Album 1 (2000)"].tap()
+      XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 10))
+      albumEntry(app, "A Album 1 (2000)").tap()
       let track = app.staticTexts["A Track 1.03"].firstMatch
       XCTAssertTrue(track.waitForExistence(timeout: 10))
       track.tap()
@@ -244,8 +244,8 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["Artists"].tap()
     XCTAssertTrue(app.staticTexts["A Artist"].waitForExistence(timeout: 10))
     app.staticTexts["A Artist"].tap()
-    XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForExistence(timeout: 10))
-    app.staticTexts["A Album 1 (2000)"].tap()
+    XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 10))
+    albumEntry(app, "A Album 1 (2000)").tap()
     let track = app.staticTexts["A Track 1.03"].firstMatch
     XCTAssertTrue(track.waitForExistence(timeout: 10))
     track.tap()
@@ -282,7 +282,7 @@ final class LibraryFlowTests: XCTestCase {
       .firstMatch
     XCTAssertTrue(result.waitForExistence(timeout: 8))
     result.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 5))
     if !app.buttons["Remove Download"].exists {
       app.buttons["Download"].tap()
       XCTAssertTrue(app.buttons["Remove Download"].waitForExistence(timeout: 15))
@@ -303,12 +303,9 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertTrue(offline.waitForExistence(timeout: 5))
     app.buttons["View Options"].tap()
     app.buttons["Group by album"].tap()
-    let album = app.staticTexts["A Album 1 (2000)"].firstMatch
+    let album = albumEntry(app, "A Album 1 (2000)")
     XCTAssertTrue(album.waitForExistence(timeout: 5), app.debugDescription)
     album.tap()
-    let details = app.buttons["Album Details"].firstMatch
-    XCTAssertTrue(details.waitForExistence(timeout: 5))
-    details.tap()
     XCTAssertTrue(app.buttons["A Artist"].firstMatch.waitForExistence(timeout: 5))
     app.buttons["A Artist"].firstMatch.tap()
     let albums = app.staticTexts.matching(
@@ -362,7 +359,7 @@ final class LibraryFlowTests: XCTestCase {
     search.typeText("A Track 1.03")
     XCTAssertTrue(choice.waitForExistence(timeout: 8))
     choice.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 5))
     let download = app.buttons["Download"]
     if app.buttons["Remove Download"].exists { app.buttons["Remove Download"].tap() }
     XCTAssertTrue(download.waitForExistence(timeout: 5))
@@ -379,7 +376,7 @@ final class LibraryFlowTests: XCTestCase {
       .firstMatch
     XCTAssertTrue(album.waitForExistence(timeout: 8))
     album.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 5))
     XCTAssertTrue(app.buttons["Download Album"].waitForExistence(timeout: 5))
     XCTAssertFalse(app.buttons["Download Album"].staticTexts.firstMatch.exists)
     XCTAssertEqual(
@@ -419,16 +416,16 @@ final class LibraryFlowTests: XCTestCase {
       .firstMatch
     XCTAssertTrue(result.waitForExistence(timeout: 8))
     result.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 5))
     XCTAssertFalse(app.buttons["Return to Previous Location"].exists)
     app.buttons["Back"].tap()
-    XCTAssertFalse(app.navigationBars["Details"].exists)
+    XCTAssertFalse(app.staticTexts["Details"].exists)
     app.buttons["Back"].press(forDuration: 0.8)
     XCTAssertTrue(app.buttons["Up One Level"].waitForExistence(timeout: 3))
     XCTAssertTrue(app.buttons["Return to Previous Location"].exists)
     capture(app, "Back Navigation Menu")
     app.buttons["Return to Previous Location"].tap()
-    XCTAssertTrue(app.navigationBars["Library"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["library-heading"].waitForExistence(timeout: 5))
     XCTAssertFalse(app.buttons["Back"].exists)
   }
 
@@ -450,7 +447,7 @@ final class LibraryFlowTests: XCTestCase {
       .firstMatch
     XCTAssertTrue(result.waitForExistence(timeout: 8))
     result.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 5))
     XCTAssertTrue(app.staticTexts["A Track 1.03"].exists)
     let play = app.buttons["Play Track"]
     XCTAssertTrue(play.exists)
@@ -464,14 +461,14 @@ final class LibraryFlowTests: XCTestCase {
     let expired = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: toast)
     wait(for: [expired], timeout: 10)
     app.buttons["Back"].tap()
-    XCTAssertFalse(app.navigationBars["Details"].exists)
+    XCTAssertFalse(app.staticTexts["Details"].exists)
     XCTAssertFalse(app.buttons["Return to Previous Location"].exists)
     app.buttons["Back"].press(forDuration: 0.8)
     XCTAssertTrue(app.buttons["Up One Level"].waitForExistence(timeout: 3))
     XCTAssertTrue(app.buttons["Return to Previous Location"].exists)
     app.buttons["Return to Previous Location"].tap()
     app.buttons["bottom-library"].tap()
-    XCTAssertTrue(app.navigationBars["Library"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["library-heading"].waitForExistence(timeout: 5))
     XCTAssertFalse(app.buttons["Return to Previous Location"].exists)
     capture(app, "Library Root Title")
   }
@@ -527,7 +524,7 @@ final class LibraryFlowTests: XCTestCase {
     connectFixture(app)
     app.buttons["sidebar-open-Albums"].tap()
     app.staticTexts["All"].tap()
-    let album = app.staticTexts["A Album 1 (2000)"]
+    let album = albumEntry(app, "A Album 1 (2000)")
     XCTAssertTrue(album.waitForExistence(timeout: 8))
     album.tap()
     let table = app.tables["library-column"]
@@ -558,7 +555,12 @@ final class LibraryFlowTests: XCTestCase {
     let edit = app.buttons["playlist-edit"].firstMatch
     XCTAssertTrue(edit.waitForExistence(timeout: 8))
     let heading = app.buttons["column-title"].firstMatch
-    XCTAssertEqual(heading.frame.midY, edit.frame.midY, accuracy: 2)
+    if UIDevice.current.userInterfaceIdiom == .phone {
+      XCTAssertEqual(app.navigationBars.buttons["Back"].frame.midY, edit.frame.midY, accuracy: 2)
+      XCTAssertLessThan(edit.frame.midY, heading.frame.midY)
+    } else if !app.navigationBars.buttons["Back"].exists {
+      XCTAssertEqual(heading.frame.midY, edit.frame.midY, accuracy: 2)
+    }
     edit.tap()
     XCTAssertEqual(edit.label, "Done")
     let first = table.cells.element(boundBy: 0)
@@ -599,6 +601,33 @@ final class LibraryFlowTests: XCTestCase {
     }, evaluatedWith: table)
     wait(for: [removed], timeout: 8)
   }
+  func testLibraryHeadingStaysFixedWhileRowsScroll() {
+    continueAfterFailure = false
+    let app = XCUIApplication()
+    app.launchArguments = ["--silent", "--test-profile=fixture-validation"]
+    app.launch()
+    connectFixture(app)
+    let heading = app.staticTexts["library-heading"]
+    XCTAssertTrue(heading.waitForExistence(timeout: 5))
+    XCTAssertTrue(app.buttons["Switch Library"].isHittable)
+    XCTAssertTrue(app.buttons["Settings"].firstMatch.isHittable)
+    let originalFrame = heading.frame
+    app.buttons["sidebar-disclosure-Albums"].tap()
+    let row = app.buttons["Random"]
+    XCTAssertTrue(row.waitForExistence(timeout: 5))
+    let before = row.frame.minY
+    app.swipeUp()
+    XCTAssertTrue(!row.isHittable || row.frame.minY < before - 10)
+    XCTAssertEqual(heading.frame, originalFrame)
+    XCTAssertFalse(app.navigationBars.staticTexts["Library"].exists)
+    app.swipeDown()
+    app.buttons["sidebar-open-Albums"].tap()
+    let albums = app.buttons["column-title"]
+    XCTAssertTrue(albums.waitForExistence(timeout: 5))
+    XCTAssertFalse(heading.exists)
+    XCTAssertTrue(app.buttons["Back"].isHittable)
+  }
+
   func testRadioDisclosureAndColumn() {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -614,7 +643,7 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertTrue(arrow.waitForExistence(timeout: 5))
     arrow.tap()
     XCTAssertTrue(app.buttons["Play Random Albums"].waitForExistence(timeout: 5))
-    XCTAssertTrue(app.navigationBars["Library"].exists)
+    XCTAssertTrue(app.staticTexts["library-heading"].exists)
     if !arrow.isHittable { app.swipeDown() }
     arrow.tap()
     XCTAssertFalse(app.buttons["Play Random Albums"].exists)
@@ -633,7 +662,7 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertTrue(arrow.waitForExistence(timeout: 8))
     arrow.tap()
     XCTAssertTrue(playlist.waitForExistence(timeout: 5))
-    XCTAssertTrue(app.navigationBars["Library"].exists)
+    XCTAssertTrue(app.staticTexts["library-heading"].exists)
     arrow.tap()
     XCTAssertFalse(playlist.exists)
     app.buttons["sidebar-open-Playlists"].tap()
@@ -651,7 +680,7 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertFalse(app.buttons["Random"].exists)
     arrow.tap()
     XCTAssertTrue(app.buttons["Random"].waitForExistence(timeout: 3))
-    XCTAssertTrue(app.navigationBars["Library"].exists)
+    XCTAssertTrue(app.staticTexts["library-heading"].exists)
     arrow.tap()
     XCTAssertFalse(app.buttons["Random"].exists)
     app.buttons["sidebar-open-Albums"].tap()
@@ -674,7 +703,7 @@ final class LibraryFlowTests: XCTestCase {
     wait(for: [albums], timeout: 5)
     XCTAssertTrue(app.staticTexts["Random"].exists)
     app.staticTexts["All"].tap()
-    XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForExistence(timeout: 8))
+    XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 8))
     app.navigationBars.buttons.element(boundBy: 0).tap()
     XCTAssertTrue(app.staticTexts["Random"].waitForExistence(timeout: 5))
     app.navigationBars.buttons.element(boundBy: 0).tap()
@@ -722,7 +751,7 @@ final class LibraryFlowTests: XCTestCase {
     artists.tap()
     XCTAssertTrue(app.staticTexts["A Artist"].waitForExistence(timeout: 8))
     app.staticTexts["A Artist"].tap()
-    XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForExistence(timeout: 8))
+    XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 8))
     app.buttons["Command Palette"].firstMatch.tap()
     XCTAssertTrue(app.buttons["Search YouTube"].isEnabled)
     app.buttons["Search YouTube"].tap()
@@ -743,36 +772,72 @@ final class LibraryFlowTests: XCTestCase {
     capture(app, "Library Visibility")
   }
 
-  func testAlbumArtistFilterAndCompactHeader() {
+  func testAlbumFilteringInListAndGrid() {
     continueAfterFailure = false
     let app = XCUIApplication()
-    app.launchArguments = ["--silent"]
+    app.launchArguments = ["--silent", "--test-profile=fixture-validation"]
     app.launch()
     connectFixture(app)
     app.buttons["sidebar-open-Albums"].tap()
     app.staticTexts["All"].tap()
-    XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForExistence(timeout: 8))
+    for layout in ["List", "Grid"] {
+      XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 8))
+      app.buttons["View Options"].tap()
+      app.buttons[layout].tap()
+      app.buttons["column-title"].tap()
+      let field = app.textFields.matching(NSPredicate(format: "placeholderValue BEGINSWITH 'Filter '")).firstMatch
+      XCTAssertTrue(field.waitForExistence(timeout: 5))
+      field.typeText("B Album 2")
+      let selected = albumEntry(app, "B Album 2 (2001)")
+      XCTAssertTrue(selected.waitForExistence(timeout: 8))
+      XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForNonExistence(timeout: 5))
+      field.typeText("x")
+      XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5))
+      field.typeText(XCUIKeyboardKey.delete.rawValue)
+      XCTAssertTrue(selected.waitForExistence(timeout: 5))
+      selected.tap()
+      XCTAssertTrue(app.buttons["Play Album"].waitForExistence(timeout: 8))
+      XCTAssertTrue(app.staticTexts["B Album 2"].exists)
+      app.buttons["Back"].tap()
+      app.buttons["Close Filter"].tap()
+    }
+    XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 8))
+  }
+
+  func testAlbumArtistFilterAndCompactHeader() {
+    continueAfterFailure = false
+    let app = XCUIApplication()
+    app.launchArguments = ["--silent", "--test-profile=fixture-validation"]
+    app.launch()
+    connectFixture(app)
+    app.buttons["sidebar-open-Albums"].tap()
+    app.staticTexts["All"].tap()
+    XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 8))
     app.buttons["column-title"].tap()
     let filter = app.textFields.matching(
       NSPredicate(format: "placeholderValue BEGINSWITH 'Filter '")
     ).firstMatch
     XCTAssertTrue(filter.waitForExistence(timeout: 5))
     filter.typeText("\"B Artist\"")
-    capture(app, "Album Filter Input")
+    XCTAssertTrue(albumEntry(app, "B Album 1 (2001)").waitForExistence(timeout: 5))
+    XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForNonExistence(timeout: 5))
     XCTAssertEqual(filter.value as? String, "\"B Artist\"")
-    XCTAssertTrue(app.staticTexts["B Album 1 (2001)"].waitForExistence(timeout: 5))
-    XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForNonExistence(timeout: 5))
     capture(app, "Album Filter by Artist")
-    app.staticTexts["B Album 1 (2001)"].tap()
+    albumEntry(app, "B Album 1 (2001)").tap()
     let play = app.buttons["Play Album"]
     XCTAssertTrue(play.waitForExistence(timeout: 5))
-    XCTAssertTrue(app.buttons["Play Album Next"].isHittable)
-    XCTAssertTrue(app.buttons["Add Album to Queue"].isHittable)
-    XCTAssertLessThanOrEqual(play.frame.height, 44)
-    XCTAssertLessThan(play.frame.maxY, app.buttons["Album Details"].frame.minY + 1)
-    capture(app, "Compact Album Header")
-    app.buttons["Album Details"].tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+    XCTAssertTrue(app.buttons["album-notes"].waitForExistence(timeout: 8))
+    play.press(forDuration: 0.8)
+    let next = app.buttons.matching(identifier: "Play Album Next")
+    let visibleNext = XCTNSPredicateExpectation(
+      predicate: NSPredicate { _, _ in next.allElementsBoundByIndex.contains { $0.isHittable } },
+      object: nil)
+    XCTAssertEqual(XCTWaiter.wait(for: [visibleNext], timeout: 5), .completed)
+    XCTAssertTrue(app.buttons["Add Album to Queue"].exists)
+    app.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.85)).tap()
+    XCTAssertTrue(app.staticTexts["B Album 1"].exists)
+    XCTAssertLessThan(app.buttons["Add Album to Queue"].frame.midY, play.frame.minY)
     app.swipeUp()
     capture(app, "Detail Section Heading")
   }
@@ -819,9 +884,9 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertTrue(
       app.buttons.matching(NSPredicate(format: "label == 'solarized dark' AND selected == true"))
         .firstMatch.waitForExistence(timeout: 5))
-    app.buttons["System"].tap()
+    app.buttons["system"].tap()
     XCTAssertTrue(
-      app.buttons.matching(NSPredicate(format: "label == 'System' AND selected == true"))
+      app.buttons.matching(NSPredicate(format: "label == 'system' AND selected == true"))
         .firstMatch.waitForExistence(timeout: 5))
     capture(app, "System Appearance Settings")
     app.navigationBars.buttons.element(boundBy: 0).tap()
@@ -943,6 +1008,118 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["Done"].tap()
   }
 
+  func testRadioArtistMixTakesMultipleArtists() {
+    continueAfterFailure = false
+    let app = XCUIApplication()
+    app.launchArguments = ["--silent", "--test-profile=fixture-validation"]
+    app.launch()
+    connectFixture(app)
+    let radio = app.buttons["sidebar-open-Radio"]
+    for _ in 0..<4 where !radio.isHittable { app.swipeUp() }
+    radio.tap()
+    app.buttons["Artist Mix"].tap()
+    let play = app.buttons["Play Mix"]
+    let field = app.textFields["Find artists"]
+    XCTAssertTrue(field.waitForExistence(timeout: 8))
+    XCTAssertFalse(play.isEnabled)
+    func add(_ name: String) {
+      field.tap()
+      field.typeText(name)
+      let result = app.buttons[name]
+      XCTAssertTrue(result.waitForExistence(timeout: 5), app.debugDescription)
+      result.tap()
+      XCTAssertTrue(app.buttons["Remove \(name)"].waitForExistence(timeout: 5))
+    }
+    add("A Artist")
+    XCTAssertTrue(play.isEnabled)
+    add("B Artist")
+    field.tap()
+    field.typeText("C Artist")
+    XCTAssertTrue(app.buttons["C Artist"].waitForExistence(timeout: 5))
+    app.buttons["Remove A Artist"].tap()
+    XCTAssertTrue(app.buttons["Remove A Artist"].waitForNonExistence(timeout: 5))
+    XCTAssertTrue(app.buttons["Remove B Artist"].exists)
+    app.buttons["Clear search"].tap()
+    add("A Artist")
+    play.tap()
+    let queueType = app.buttons["Queue Type"].firstMatch
+    XCTAssertTrue(queueType.waitForExistence(timeout: 8))
+    XCTAssertEqual(queueType.value as? String, "Artist Mix")
+    XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Play A Track' OR label BEGINSWITH 'Play B Track'")).firstMatch.waitForExistence(timeout: 8))
+  }
+
+  func testLibraryRadioRemembersStationAndOpensItsInput() {
+    continueAfterFailure = false
+    let app = XCUIApplication()
+    app.launchArguments = ["--silent", "--test-profile=fixture-validation"]
+    app.launch()
+    connectFixture(app)
+    let radio = app.buttons["library-radio"]
+    XCTAssertTrue(radio.waitForExistence(timeout: 8))
+    if radio.value as? String != "Play Random Albums" {
+      radio.press(forDuration: 0.8)
+      app.buttons["Play Random Albums"].firstMatch.tap()
+    }
+    XCTAssertEqual(radio.value as? String, "Play Random Albums")
+    radio.press(forDuration: 0.8)
+    app.buttons["Decade Mix"].firstMatch.tap()
+    XCTAssertEqual(radio.value as? String, "Decade Mix")
+    radio.tap()
+    XCTAssertTrue(app.buttons["Back"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "2000")).firstMatch.waitForExistence(timeout: 8))
+  }
+
+  func testPlaylistFilesUseSystemPickers() {
+    continueAfterFailure = false
+    let app = openAlbumDetails("A Album 1 (2000)")
+    app.buttons["Add Album to Queue"].tap()
+    runCommand(app, query: "Export Queue as CSV", label: "CSV…")
+    let save = app.buttons["Save"].firstMatch
+    XCTAssertTrue(save.waitForExistence(timeout: 12), app.debugDescription)
+    save.tap()
+    let system = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    let replace = system.alerts.buttons["Replace"]
+    if replace.waitForExistence(timeout: 4) { replace.tap() }
+    XCTAssertTrue(app.buttons["bottom-library"].waitForExistence(timeout: 10))
+    runCommand(app, query: "Import Playlist", label: "Import Playlist…")
+    let file = app.descendants(matching: .any).matching(NSPredicate(
+      format: "label BEGINSWITH 'Queue' AND (elementType == %d OR elementType == %d)",
+      XCUIElement.ElementType.cell.rawValue, XCUIElement.ElementType.button.rawValue)).firstMatch
+    XCTAssertTrue(file.waitForExistence(timeout: 12), app.debugDescription)
+    file.tap()
+    XCTAssertTrue(app.buttons["bottom-library"].waitForExistence(timeout: 10))
+    let playlists = app.buttons["sidebar-open-Playlists"]
+    if !playlists.exists { app.buttons["bottom-library"].tap() }
+    playlists.tap()
+    let imported = app.tables["library-column"].staticTexts["Queue"]
+    XCTAssertTrue(imported.waitForExistence(timeout: 10), app.debugDescription)
+    imported.tap()
+    XCTAssertTrue(app.tables["library-column"].staticTexts["A Track 1.01"].waitForExistence(timeout: 8))
+  }
+
+  func testSavedQueueOpensFromPlaylists() {
+    let app = openAlbumDetails("A Album 1 (2000)")
+    app.buttons["Add Album to Queue"].tap()
+    app.buttons["bottom-queue"].tap()
+    runCommand(app, query: "Save Queue as Playlist", label: "Save Queue as Playlist…")
+    let field = app.textFields["Playlist Name"]
+    XCTAssertTrue(field.waitForExistence(timeout: 5))
+    field.tap()
+    field.typeText("Saved Queue Tracks")
+    app.buttons["Save Playlist"].tap()
+    XCTAssertTrue(field.waitForNonExistence(timeout: 5))
+    app.buttons["bottom-library"].tap()
+    let playlists = app.buttons["sidebar-open-Playlists"]
+    if !playlists.exists { app.buttons["bottom-library"].tap() }
+    XCTAssertTrue(playlists.waitForExistence(timeout: 5))
+    playlists.tap()
+    let saved = app.tables["library-column"].staticTexts["Saved Queue Tracks"]
+    XCTAssertTrue(saved.waitForExistence(timeout: 8))
+    saved.tap()
+    XCTAssertTrue(app.buttons["playlist-edit"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.tables["library-column"].staticTexts["A Track 1.01"].waitForExistence(timeout: 8))
+  }
+
   func testPlaylistDraftSurvivesPalette() {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -952,8 +1129,8 @@ final class LibraryFlowTests: XCTestCase {
     runCommand(app, query: "Library", label: "Library")
     XCTAssertTrue(app.staticTexts["A Artist"].waitForExistence(timeout: 8))
     app.staticTexts["A Artist"].tap()
-    XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForExistence(timeout: 8))
-    app.staticTexts["A Album 1 (2000)"].tap()
+    XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 8))
+    albumEntry(app, "A Album 1 (2000)").tap()
     XCTAssertTrue(app.buttons["Add Album to Queue"].waitForExistence(timeout: 8))
     app.buttons["Add Album to Queue"].tap()
     runCommand(app, query: "Save Queue as Playlist", label: "Save Queue as Playlist…")
@@ -991,8 +1168,8 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["Artists"].tap()
     XCTAssertTrue(app.staticTexts["A Artist"].waitForExistence(timeout: 3))
     app.staticTexts["A Artist"].tap()
-    XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForExistence(timeout: 3))
-    app.staticTexts["A Album 1 (2000)"].tap()
+    XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 3))
+    albumEntry(app, "A Album 1 (2000)").tap()
     XCTAssertTrue(app.buttons["Play Album"].waitForExistence(timeout: 3))
     app.buttons["Play Album"].tap()
     XCTAssertTrue(app.buttons["Pause"].firstMatch.waitForExistence(timeout: 3))
@@ -1010,6 +1187,28 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertTrue(scan.waitForExistence(timeout: 3))
   }
 
+  func testSearchLyricsVisibilitySwitchAtEndOfLibrarySettings() {
+    continueAfterFailure = false
+    let app = XCUIApplication()
+    app.launchArguments = ["--silent", "--test-profile=lyrics-preference"]
+    app.launch()
+    connectFixture(app, audioMuse: true)
+    runCommand(app, query: "Settings", label: "Settings…")
+    XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+    let library = app.buttons["settings-section-Library"]
+    library.tap()
+    if !app.navigationBars["Library"].waitForExistence(timeout: 2), library.isHittable { library.tap() }
+    XCTAssertTrue(app.navigationBars["Library"].waitForExistence(timeout: 5), app.debugDescription)
+    let toggle = app.switches["preference-Search lyrics…"]
+    for _ in 0..<8 where !toggle.isHittable { app.swipeUp() }
+    XCTAssertTrue(toggle.isHittable, app.debugDescription)
+    let previous = toggle.value as? String
+    toggle.tap()
+    let changed = NSPredicate(format: "value != %@", previous ?? "")
+    expectation(for: changed, evaluatedWith: toggle)
+    waitForExpectations(timeout: 4)
+  }
+
   func testSidebarPreferencesPersist() {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -1020,7 +1219,7 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["Settings…"].tap()
     XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
     app.collectionViews.buttons["Library"].tap()
-    XCTAssertTrue(app.navigationBars["Library"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["library-heading"].waitForExistence(timeout: 5))
     XCTAssertTrue(app.staticTexts["Singles: maximum tracks"].exists)
     XCTAssertTrue(app.steppers.firstMatch.exists)
     let folders = app.switches["preference-Folders"]
@@ -1033,7 +1232,7 @@ final class LibraryFlowTests: XCTestCase {
     capture(app, "Sidebar Preferences")
     app.navigationBars.buttons.element(boundBy: 0).tap()
     app.collectionViews.buttons["Library"].tap()
-    XCTAssertTrue(app.navigationBars["Library"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["library-heading"].waitForExistence(timeout: 5))
     for _ in 0..<5 where !folders.isHittable { app.swipeUp() }
     XCTAssertEqual(folders.value as? String, "0")
     folders.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
@@ -1072,14 +1271,14 @@ final class LibraryFlowTests: XCTestCase {
       .firstMatch
     XCTAssertTrue(result.waitForExistence(timeout: 8))
     result.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 8))
     for label in ["Play Track", "Play Next", "Add to Queue"] {
       let button = app.buttons[label]
       XCTAssertTrue(button.exists)
       XCTAssertFalse(button.staticTexts.firstMatch.exists)
     }
     capture(app, "Track Playback Icons")
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 8))
     XCTAssertFalse(app.buttons["Done"].exists)
     app.swipeUp()
     let similar = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'B Track'"))
@@ -1087,48 +1286,40 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertTrue(similar.waitForExistence(timeout: 8))
     capture(app, "Similar Tracks in Details")
     similar.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 8))
     app.buttons["B Album 1"].firstMatch.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
-    XCTAssertFalse(app.buttons["Done"].exists)
-    for label in ["Play Album", "Play Album Next", "Add Album to Queue"] {
-      let button = app.buttons[label]
-      XCTAssertTrue(button.exists)
-      XCTAssertFalse(button.staticTexts.firstMatch.exists)
+    XCTAssertTrue(app.buttons["Play Album"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.buttons["Play Album"].exists)
+    let related = app.tables["library-column"].buttons["A Artist — A Album 1"]
+    for _ in 0..<8 where !related.isHittable { app.tables["library-column"].swipeUp() }
+    XCTAssertTrue(related.isHittable, app.debugDescription)
+    related.tap()
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 8))
+    let table = app.tables["library-column"]
+    let artist = table.buttons["B Artist"]
+    for _ in 0..<10 {
+      if artist.exists && !artist.frame.isEmpty && table.frame.insetBy(dx: 0, dy: 24).contains(CGPoint(x: artist.frame.midX, y: artist.frame.midY)) { break }
+      table.swipeUp(velocity: .slow)
     }
-    capture(app, "Album Playback Icons")
-    app.swipeUp()
-    let album = app.buttons["A Album 1"]
-    XCTAssertTrue(album.waitForExistence(timeout: 8))
-    capture(app, "Similar Albums in Details")
-    album.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
-    app.buttons["A Artist"].firstMatch.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
-    XCTAssertFalse(app.buttons["Done"].exists)
-    app.swipeUp()
-    let artist = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'B Artist'")).firstMatch
     XCTAssertTrue(artist.waitForExistence(timeout: 8))
-    capture(app, "Related Artists in Details")
+    capture(app, "Related Artists in Biography")
     artist.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
+    XCTAssertTrue(albumEntry(app, "B Album 1 (2001)").waitForExistence(timeout: 8))
   }
 
   func testArtistGoogleSearchOpensBrowser() {
     continueAfterFailure = false
     let app = XCUIApplication()
-    app.launchArguments = ["--silent"]
+    app.launchArguments = ["--silent", "--test-profile=fixture-validation"]
     app.launch()
     connectFixture(app)
     app.buttons["Artists"].tap()
     let artist = app.staticTexts["A Artist"]
     XCTAssertTrue(artist.waitForExistence(timeout: 8))
     artist.tap()
-    let details = app.descendants(matching: .any).matching(
-      NSPredicate(format: "label == %@", "Artist Details")
-    ).firstMatch
-    XCTAssertTrue(details.waitForExistence(timeout: 8))
-    details.tap()
+    XCTAssertFalse(app.staticTexts["Artist Details"].exists)
+    albumEntry(app, "A Album 1 (2000)").tap()
+    app.buttons["Artist Biography"].tap()
     let search = app.buttons["Search Google"]
     XCTAssertTrue(search.waitForExistence(timeout: 8))
     search.tap()
@@ -1136,17 +1327,20 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 10))
   }
 
-  private func openAlbumDetails(_ album: String, artist: String = "A Artist") -> XCUIApplication {
+  private func albumEntry(_ app: XCUIApplication, _ title: String) -> XCUIElement {
+    app.descendants(matching: .any).matching(NSPredicate(format: "label == %@ AND (elementType == %d OR elementType == %d)", title, XCUIElement.ElementType.button.rawValue, XCUIElement.ElementType.staticText.rawValue)).firstMatch
+  }
+
+  private func openAlbumDetails(_ album: String, artist: String = "A Artist", profile: String = "fixture-validation", silent: Bool = true) -> XCUIApplication {
     continueAfterFailure = false
     let app = XCUIApplication()
-    app.launchArguments = ["--silent", "--test-profile=fixture-validation"]
+    app.launchArguments = ["--test-profile=\(profile)"] + (silent ? ["--silent"] : [])
     app.launch()
-    if !app.buttons["Artists"].waitForExistence(timeout: 5) { connectFixture(app) }
+    connectFixture(app)
     app.buttons["Artists"].tap()
     XCTAssertTrue(app.staticTexts[artist].waitForExistence(timeout: 8))
     app.staticTexts[artist].tap()
-    app.staticTexts[album].tap()
-    app.buttons["Album Details"].tap()
+    albumEntry(app, album).tap()
     return app
   }
 
@@ -1154,30 +1348,65 @@ final class LibraryFlowTests: XCTestCase {
     let app = XCUIApplication()
     app.launchArguments = ["--silent", "--test-profile=fixture-validation"]
     app.launch()
-    if !app.buttons["Artists"].waitForExistence(timeout: 5) { connectFixture(app) }
+    connectFixture(app)
     runCommand(app, query: "Go to Random Album", label: "Go to Random Album")
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
-    XCTAssertTrue(app.staticTexts["Tracks"].exists)
+    XCTAssertTrue(app.buttons["Play Album"].waitForExistence(timeout: 8))
+    if UIDevice.current.userInterfaceIdiom == .phone {
+      XCTAssertEqual(app.buttons["column-title"].frame.midY, app.buttons["Back"].frame.midY, accuracy: 2)
+    }
+    XCTAssertTrue(app.buttons["Play Album Next"].exists)
   }
 
   #if targetEnvironment(simulator)
   func testAppleMusicKeyboardShortcutReportsMissingApp() {
     let app = openAlbumDetails("A Album 1 (2000)")
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.buttons["Play Album"].waitForExistence(timeout: 8))
     app.typeKey("a", modifierFlags: [.command, .shift])
     XCTAssertTrue(app.alerts.staticTexts["Could not open Apple Music."].waitForExistence(timeout: 8))
     XCTAssertEqual(app.state, .runningForeground)
   }
   #endif
 
+  func testTrackDetailShowsInlineLyricsAndSimilarTracks() {
+    let app = openAlbumDetails("A Album 1 (2000)")
+    let table = app.tables.containing(.button, identifier: "Play Album").firstMatch
+    let track = table.staticTexts["A Track 1.01"]
+    if !track.isHittable { table.swipeUp(velocity: .slow) }
+    track.tap()
+    XCTAssertTrue(app.staticTexts["Synthetic fixture lyrics.\nSecond fixture line."].waitForExistence(timeout: 10))
+    XCTAssertTrue(app.staticTexts["Similar Tracks"].exists)
+    capture(app, "Textamp Track Details")
+    XCTAssertFalse(app.images["track-detail-artwork"].exists)
+  }
+
   func testAlbumDetailsShowsNavidromeNotes() {
     let app = openAlbumDetails("A Album 1 (2000)")
+    XCTAssertTrue(app.buttons["Play Album"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.buttons["Play Album Next"].exists)
+    XCTAssertTrue(app.buttons["Download Album"].exists)
+    XCTAssertTrue(app.buttons["A Artist"].exists)
+    XCTAssertTrue(app.staticTexts["A Album 1"].exists)
+    XCTAssertFalse(app.staticTexts["album-review"].exists)
+    if UIDevice.current.userInterfaceIdiom == .phone {
+      XCTAssertEqual(app.staticTexts["A Album 1"].firstMatch.frame.midX, app.frame.midX, accuracy: 1)
+    }
+    XCTAssertLessThan(app.buttons["Artist Biography"].frame.midX, app.buttons["Play Album"].frame.midX)
+    XCTAssertGreaterThan(app.buttons["album-notes"].frame.midX, app.buttons["Play Album"].frame.midX)
+    XCTAssertFalse(app.buttons["Shuffle Album"].exists)
+    XCTAssertEqual(app.buttons["album-notes"].frame.midY, app.buttons["Play Album"].frame.midY, accuracy: 1)
+    XCTAssertEqual(app.buttons["Play Album Next"].frame.midY, app.buttons["Download Album"].frame.midY, accuracy: 1)
+    XCTAssertEqual(app.buttons["Play Album"].frame.midX, app.staticTexts["A Album 1"].firstMatch.frame.midX, accuracy: 1)
+    capture(app, "Textamp Album Page")
+    XCTAssertFalse(app.buttons["View Options"].exists)
+    let next = app.buttons["Play Album Next"]
+    if !next.isHittable { app.tables["library-column"].swipeUp(velocity: .slow) }
+    XCTAssertTrue(next.isHittable)
+    XCTAssertTrue(app.buttons["Add Album to Queue"].isHittable)
+    let notes = app.buttons["album-notes"]
+    if !notes.isHittable { app.tables["library-column"].swipeUp() }
+    notes.tap()
     let review = app.staticTexts["album-review"]
     XCTAssertTrue(review.waitForExistence(timeout: 8))
-    XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label == %@", "A Album 1")).count, 1)
-    let headerLinks = app.buttons.matching(NSPredicate(format: "label IN %@", ["A Album 1", "A Artist"]))
-    XCTAssertEqual(headerLinks.count, 1)
-    XCTAssertEqual(headerLinks.firstMatch.label, "A Artist")
     let rendered = XCTAttachment(string: review.label)
     rendered.name = "Rendered album review"
     rendered.lifetime = .keepAlways
@@ -1186,10 +1415,116 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertFalse(app.descendants(matching: .any)["album-source-link"].exists)
   }
 
+  func testAlbumScrollsFromTracksToSimilarAlbums() {
+    let orientation = XCUIDevice.shared.orientation
+    if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
+    defer { XCUIDevice.shared.orientation = orientation }
+    let app = openAlbumDetails("A Album 1 (2000)")
+    let table = app.tables.containing(.button, identifier: "Play Album").firstMatch
+    XCTAssertTrue(table.waitForExistence(timeout: 8))
+    if UIDevice.current.userInterfaceIdiom == .pad { capture(app, "Textamp iPad Album Page") }
+    let track = table.cells.matching(NSPredicate(format: "identifier ENDSWITH 'song-0-0-4'")).firstMatch
+    table.swipeUp(velocity: .slow)
+    for _ in 0..<4 where !table.frame.contains(CGPoint(x: track.frame.midX, y: track.frame.midY)) { table.swipeUp(velocity: .slow) }
+    XCTAssertTrue(table.frame.contains(CGPoint(x: track.frame.midX, y: track.frame.midY)))
+    capture(app, "Textamp Album Tracks")
+    let related = table.buttons["B Artist — B Album 1"]
+    for _ in 0..<8 where !related.isHittable { table.swipeUp(velocity: .slow) }
+    XCTAssertTrue(related.isHittable)
+    capture(app, "Textamp Similar Albums")
+  }
+
+  func testSimilarAlbumOpensAlbumPage() {
+    let app = openAlbumDetails("A Album 1 (2000)")
+    let tracks = app.tables["library-column"]
+    let related = tracks.buttons["B Artist — B Album 1"]
+    for _ in 0..<5 where !related.isHittable { tracks.swipeUp() }
+    XCTAssertTrue(related.isHittable, app.debugDescription)
+    related.tap()
+    XCTAssertTrue(app.staticTexts["B Album 1"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.buttons["Play Album"].exists)
+  }
+
+  func testNowPlayingScrollsToMetadataAndSimilarTracks() throws {
+    try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .phone)
+    let app = openAlbumDetails("A Album 1 (2000)")
+    XCTAssertFalse(app.navigationBars.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] %@", "Filter")).firstMatch.exists)
+    let back = app.navigationBars.buttons["Back"]
+    for name in ["Play Album Next", "Add Album to Queue"] {
+      let button = app.navigationBars.buttons[name]
+      XCTAssertTrue(button.waitForExistence(timeout: 5) && button.isHittable, name)
+      XCTAssertEqual(button.frame.midY, back.frame.midY, accuracy: 2)
+    }
+    let download = app.navigationBars.buttons["Download Album"]
+    if download.isHittable {
+      XCTAssertEqual(download.frame.midY, back.frame.midY, accuracy: 2)
+    } else {
+      let overflow = app.navigationBars.buttons["More"]
+      XCTAssertTrue(overflow.isHittable)
+      overflow.tap()
+      XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Download Album")).firstMatch.waitForExistence(timeout: 4), app.debugDescription)
+      app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.65)).tap()
+    }
+    app.buttons["Play Album"].tap()
+    openNowPlaying(app)
+    let scroll = app.scrollViews["playing-scroll"]
+    scroll.buttons["Next Track"].tap()
+    XCTAssertTrue(scroll.buttons["A Track 1.02"].waitForExistence(timeout: 8), app.debugDescription)
+    scroll.swipeUp()
+    XCTAssertTrue(app.staticTexts["Synthetic fixture lyrics.\nSecond fixture line."].waitForExistence(timeout: 10))
+    let similar = app.staticTexts["Similar Tracks"]
+    for _ in 0..<4 where !similar.isHittable { scroll.swipeUp() }
+    XCTAssertTrue(similar.isHittable)
+    XCTAssertFalse(scroll.descendants(matching: .any)["now-playing-artwork"].isHittable)
+    let recommendation = scroll.buttons.matching(NSPredicate(format: "label CONTAINS ' — '")).firstMatch
+    for _ in 0..<3 where !recommendation.isHittable { scroll.swipeUp() }
+    XCTAssertTrue(recommendation.isHittable)
+    scroll.swipeDown()
+    XCTAssertTrue(app.buttons["Close Now Playing"].isHittable)
+  }
+
+  func testAlbumQueueButtonsWorkWithoutStartingPlayback() {
+    let app = openAlbumDetails("A Album 1 (2000)")
+    let append = app.buttons["Add Album to Queue"]
+    XCTAssertTrue(append.waitForExistence(timeout: 8))
+    if !append.isHittable { app.tables["library-column"].swipeUp(velocity: .slow) }
+    append.tap()
+    app.buttons["Play Album Next"].tap()
+    app.buttons["bottom-queue"].tap()
+    XCTAssertTrue(app.staticTexts["A Track 1.01"].firstMatch.waitForExistence(timeout: 8))
+  }
+
+  func testAlbumPlaysWithInlineWaveform() {
+    let app = openAlbumDetails("A Album 1 (2000)")
+    app.buttons["Play Album"].tap()
+    openNowPlaying(app)
+    let slider = app.sliders["waveform-position"]
+    XCTAssertTrue(slider.waitForExistence(timeout: 8))
+    let art = app.descendants(matching: .any)["now-playing-artwork"]
+    XCTAssertTrue(art.exists)
+    XCTAssertEqual(art.frame.midX, slider.frame.midX, accuracy: 1)
+    XCTAssertEqual(art.frame.width, art.frame.height, accuracy: 1)
+    let volume = app.sliders["Volume"]
+    XCTAssertTrue(volume.isHittable)
+    XCTAssertLessThanOrEqual(volume.frame.maxY, app.buttons["bottom-library"].frame.minY)
+    let initialArtwork = art.frame
+    capture(app, "Centered Now Playing")
+    XCTAssertTrue(slider.isHittable)
+    XCTAssertFalse(app.buttons["Expand Waveform"].exists)
+    slider.adjust(toNormalizedSliderPosition: 0.5)
+    let waveform = app.descendants(matching: .any)["playback-waveform"]
+    let ready = expectation(for: NSPredicate { _, _ in
+      (waveform.value as? String)?.contains(":") == true
+    }, evaluatedWith: app)
+    wait(for: [ready], timeout: 15)
+    XCTAssertEqual(art.frame, initialArtwork)
+    XCTAssertTrue(app.buttons["now-playing-toggle"].isHittable)
+  }
+
   func testAlbumDetailsOmitsAppleMusicLinkWithoutReview() {
     let app = openAlbumDetails("A Album 2 (2000)")
     let source = app.descendants(matching: .any)["album-source-link"]
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.buttons["Play Album"].waitForExistence(timeout: 8))
     XCTAssertFalse(source.exists)
     XCTAssertFalse(app.staticTexts["album-review"].exists)
   }
@@ -1197,42 +1532,89 @@ final class LibraryFlowTests: XCTestCase {
   func testAlbumDetailsReceivesLateNotesWithIndependentCredit() {
     let app = openAlbumDetails("B Album 1 (2001)", artist: "B Artist")
     let source = app.descendants(matching: .any)["album-source-link"]
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
+    let notes = app.buttons["album-notes"]
+    XCTAssertTrue(notes.waitForExistence(timeout: 12))
+    notes.tap()
     let review = app.staticTexts["album-review"]
-    XCTAssertFalse(review.exists)
     XCTAssertTrue(review.waitForExistence(timeout: 12))
     XCTAssertTrue(review.label.hasSuffix("\n\nSource: Wikipedia"))
     XCTAssertFalse(source.exists)
   }
 
-  func testAlbumDetailsRelatedArtists() {
-    continueAfterFailure = false
+  func testArtistAlbumGridOpensTheChosenRelease() {
     let app = XCUIApplication()
-    app.launchArguments = ["--silent"]
+    app.launchArguments = ["--silent", "--test-profile=fixture-validation"]
     app.launch()
     connectFixture(app)
     app.buttons["Artists"].tap()
-    XCTAssertTrue(app.staticTexts["A Artist"].waitForExistence(timeout: 8))
-    app.staticTexts["A Artist"].tap()
-    XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForExistence(timeout: 8))
-    app.staticTexts["A Album 1 (2000)"].tap()
-    XCTAssertTrue(app.buttons["Album Details"].waitForExistence(timeout: 8))
-    app.buttons["Album Details"].tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
-    app.swipeUp()
-    XCTAssertTrue(app.staticTexts["15"].exists)
-    XCTAssertTrue(app.staticTexts["15:00"].exists)
-    capture(app, "Album Detail Metadata")
-    app.buttons["A Artist"].firstMatch.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
-    XCTAssertFalse(app.buttons["Done"].exists)
-    app.swipeUp()
-    let artist = app.buttons["B Artist"]
+    app.staticTexts["B Artist"].firstMatch.tap()
+    let first = app.buttons["B Album 1 (2001)"]
+    let second = albumEntry(app, "B Album 2 (2001)")
+    XCTAssertTrue(second.waitForExistence(timeout: 8))
+    XCTAssertEqual(first.frame.minY, second.frame.minY, accuracy: 1)
+    XCTAssertLessThan(first.frame.midX, second.frame.midX)
+    XCTAssertEqual(first.frame.width, second.frame.width, accuracy: 1)
+    if UIDevice.current.userInterfaceIdiom == .phone && app.frame.width < 418 {
+      XCTAssertGreaterThan(second.frame.maxX, app.frame.width * 0.8)
+    }
+    capture(app, "Textamp Artist Album Grid")
+    app.buttons["View Options"].tap()
+    app.buttons["List"].tap()
+    let listRow = app.staticTexts["B Album 1 (2001)"]
+    XCTAssertTrue(listRow.waitForExistence(timeout: 5))
+    XCTAssertFalse(first.exists)
+    app.buttons["View Options"].tap()
+    app.buttons["Grid"].tap()
+    XCTAssertTrue(first.waitForExistence(timeout: 5))
+    second.tap()
+    XCTAssertTrue(app.buttons["Play Album"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.staticTexts["B Album 2"].exists)
+  }
+
+  func testAlbumOpensBiographyAsSoonAsItIsAvailable() {
+    let app = openAlbumDetails("A Album 1 (2000)")
+    let header = app.tables.containing(.button, identifier: "Play Album").firstMatch
+    let biography = header.buttons["Artist Biography"]
+    XCTAssertTrue(biography.waitForExistence(timeout: 10))
+    biography.tap()
+    XCTAssertTrue(app.staticTexts["A synthetic artist biography for native UI testing."].waitForExistence(timeout: 5))
+  }
+
+  func testAlbumDetailsRelatedArtists() {
+    let app = openAlbumDetails("A Album 1 (2000)")
+    let table = app.tables.containing(.button, identifier: "Play Album").firstMatch
+    let artist = table.buttons["B Artist"]
+    for _ in 0..<10 {
+      if artist.exists && !artist.frame.isEmpty && table.frame.insetBy(dx: 0, dy: 24).contains(CGPoint(x: artist.frame.midX, y: artist.frame.midY)) { break }
+      table.swipeUp(velocity: .slow)
+    }
     XCTAssertTrue(artist.waitForExistence(timeout: 8))
-    capture(app, "Related Artists in Details")
+    XCTAssertTrue(artist.isHittable)
+    capture(app, "Textamp Album Recommendations")
     artist.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 8))
-    XCTAssertTrue(app.staticTexts["B Artist"].exists)
+    XCTAssertTrue(albumEntry(app, "B Album 1 (2001)").waitForExistence(timeout: 8))
+    XCTAssertFalse(app.staticTexts["Artist Details"].exists)
+    let preview = app.staticTexts["artist-bio-preview"]
+    let biography = "A synthetic artist biography for native UI testing."
+    let loaded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", biography), object: preview)
+    XCTAssertEqual(XCTWaiter.wait(for: [loaded], timeout: 8), .completed)
+    let artistTable = app.tables.containing(.staticText, identifier: "artist-bio-preview").firstMatch
+    let relatedArtist = artistTable.buttons["C Artist"]
+    for _ in 0..<6 {
+      if relatedArtist.exists && relatedArtist.isHittable && !relatedArtist.frame.isEmpty && artistTable.frame.insetBy(dx: 0, dy: 12).contains(CGPoint(x: relatedArtist.frame.midX, y: relatedArtist.frame.midY)) { break }
+      artistTable.swipeUp(velocity: .slow)
+    }
+    XCTAssertTrue(relatedArtist.isHittable)
+    capture(app, "Textamp Artist Recommendations")
+    for _ in 0..<6 {
+      if app.buttons["Artist Biography"].exists && app.buttons["Artist Biography"].isHittable { break }
+      artistTable.swipeDown(velocity: .slow)
+    }
+    capture(app, "Textamp Artist Albums")
+    app.buttons["Artist Biography"].tap()
+    XCTAssertTrue(app.staticTexts[biography].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.navigationBars.buttons["Search Google"].exists)
+
   }
 
   func testLibraryDetailsQueueAndDownloads() {
@@ -1245,10 +1627,9 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["Artists"].tap()
     XCTAssertTrue(app.staticTexts["A Artist"].waitForExistence(timeout: 10))
     app.staticTexts["A Artist"].tap()
-    XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForExistence(timeout: 10))
-    app.staticTexts["A Album 1 (2000)"].tap()
-    XCTAssertTrue(app.buttons["Album Details"].waitForExistence(timeout: 10))
-    app.buttons["Album Details"].tap()
+    XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 10))
+    albumEntry(app, "A Album 1 (2000)").tap()
+    XCTAssertTrue(app.buttons["Play Album"].waitForExistence(timeout: 10))
     XCTAssertTrue(app.buttons["Play Album"].waitForExistence(timeout: 8))
     app.buttons["Play Album"].tap()
     XCTAssertTrue(app.buttons["bottom-queue"].waitForExistence(timeout: 5))
@@ -1298,7 +1679,7 @@ final class LibraryFlowTests: XCTestCase {
     filter.typeText("1.03")
     XCTAssertTrue(app.staticTexts["A Track 1.03"].firstMatch.waitForExistence(timeout: 5))
     app.staticTexts["A Track 1.03"].firstMatch.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 5))
     app.swipeUp()
     XCTAssertTrue(app.staticTexts["Unavailable offline"].waitForExistence(timeout: 5))
     capture(app, "Offline Track Details")
@@ -1344,6 +1725,33 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertTrue(app.tables["library-column"].cells.firstMatch.waitForExistence(timeout: 5))
   }
 
+  func testRecentSearchResultReopensPlaylistDirectly() {
+    continueAfterFailure = false
+    let app = XCUIApplication()
+    app.launchArguments = ["--silent", "--test-profile=fixture-validation"]
+    app.launch()
+    connectFixture(app)
+    app.buttons["bottom-search"].tap()
+    let field = app.textFields["Search your library"]
+    field.tap()
+    field.typeText("Fixture Playlist")
+    app.staticTexts["Fixture Playlist"].firstMatch.tap()
+    XCTAssertTrue(app.buttons["playlist-edit"].waitForExistence(timeout: 10))
+    app.buttons["bottom-search"].tap()
+    let previous = app.collectionViews.buttons.containing(.staticText, identifier: "Fixture Playlist").firstMatch
+    XCTAssertTrue(previous.waitForExistence(timeout: 5))
+    previous.tap()
+    XCTAssertTrue(app.buttons["playlist-edit"].waitForExistence(timeout: 10))
+    XCTAssertFalse(field.exists)
+    app.buttons["bottom-search"].tap()
+    field.tap()
+    field.typeText("unchosen query")
+    app.navigationBars.buttons.element(boundBy: app.navigationBars.buttons.count - 1).tap()
+    app.buttons["bottom-search"].tap()
+    XCTAssertTrue(previous.waitForExistence(timeout: 5))
+    XCTAssertFalse(app.buttons["unchosen query"].exists)
+  }
+
   func testFuzzySearchShowsResultsWhileTyping() {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -1380,15 +1788,15 @@ final class LibraryFlowTests: XCTestCase {
     let result = app.staticTexts["A Track 1.03"].firstMatch
     XCTAssertTrue(result.waitForExistence(timeout: 10))
     result.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 10))
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 10))
     XCTAssertTrue(app.staticTexts["A Track 1.03"].firstMatch.exists)
     capture(app, "Search Track Details")
     app.buttons["Command Palette"].firstMatch.tap()
     app.buttons["palette-group:Textamp"].tap()
     app.buttons["Settings…"].tap()
     app.buttons["Appearance"].tap()
-    XCTAssertTrue(app.buttons["System"].waitForExistence(timeout: 5))
-    app.buttons["System"].tap()
+    XCTAssertTrue(app.buttons["system"].waitForExistence(timeout: 5))
+    app.buttons["system"].tap()
     let ansi = app.buttons["ANSI half blocks"]
     for _ in 0..<5 {
       if ansi.exists && ansi.isHittable { break }
@@ -1426,12 +1834,12 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertTrue(table.exists)
     XCTAssertFalse(table.otherElements["Section index"].exists)
     app.staticTexts["A Artist"].tap()
-    XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForExistence(timeout: 8))
-    app.staticTexts["A Album 1 (2000)"].press(forDuration: 0.8)
+    XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 8))
+    albumEntry(app, "A Album 1 (2000)").press(forDuration: 0.8)
     XCTAssertTrue(app.buttons["Play Album Next"].waitForExistence(timeout: 3))
     app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.1)).tap()
-    app.staticTexts["A Album 1 (2000)"].tap()
-    XCTAssertTrue(app.buttons["Album Details"].waitForExistence(timeout: 8))
+    albumEntry(app, "A Album 1 (2000)").tap()
+    XCTAssertTrue(app.buttons["Play Album"].waitForExistence(timeout: 8))
     XCTAssertTrue(app.buttons["Play Album"].exists)
     capture(app, "Album Tracks")
     app.buttons["column-title"].tap()
@@ -1475,8 +1883,8 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["Artists"].tap()
     XCTAssertTrue(app.staticTexts["A Artist"].waitForExistence(timeout: 10))
     app.staticTexts["A Artist"].tap()
-    XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForExistence(timeout: 8))
-    app.staticTexts["A Album 1 (2000)"].tap()
+    XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 8))
+    albumEntry(app, "A Album 1 (2000)").tap()
     XCTAssertTrue(app.buttons["Play Album"].waitForExistence(timeout: 8))
     app.buttons["Play Album"].tap()
     openNowPlaying(app)
@@ -1550,13 +1958,10 @@ final class LibraryFlowTests: XCTestCase {
       app.swipeDown()
     }
     app.buttons["Appearance"].tap()
-    let system = app.buttons["System"]
-    let theme = system.isSelected ? app.buttons["norton"] : system
-    for _ in 0..<5 {
-      if theme.exists && theme.isHittable { break }
-      app.swipeUp()
-    }
-    theme.tap()
+    let picker = app.buttons["preference-choice-Theme"]
+    let current = picker.value as? String
+    picker.tap()
+    app.buttons[current?.lowercased() == "norton" ? "system" : "norton"].tap()
     dismissIconNotice(springboard, timeout: 3)
     app.navigationBars.buttons.element(boundBy: 0).tap()
     let after = logoImage()
@@ -1580,7 +1985,7 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["palette-group:Textamp"].tap()
     app.buttons["Settings…"].tap()
     app.buttons["Appearance"].tap()
-    let system = app.buttons["System"]
+    let system = app.buttons["system"]
     system.tap()
     dismissIconNotice(springboard, timeout: 5)
     let norton = app.buttons["norton"]
@@ -1719,7 +2124,7 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["bottom-library"].tap()
     app.buttons["Artists"].tap()
     app.staticTexts["A Artist"].tap()
-    app.staticTexts["A Album 1 (2000)"].tap()
+    albumEntry(app, "A Album 1 (2000)").tap()
     app.cells.matching(NSPredicate(format: "identifier ENDSWITH 'song-0-0-0'")).firstMatch.tap()
     app.buttons["Play Track"].tap()
     openNowPlaying(app)
@@ -1768,6 +2173,51 @@ final class LibraryFlowTests: XCTestCase {
     app.terminate()
   }
 
+  func testFollowingLyricsCentersAndEnlargesTheCurrentLine() throws {
+    continueAfterFailure = false
+    let app = openAlbumDetails("B Album 1 (2001)", artist: "B Artist", silent: false)
+    openNowPlaying(app)
+    app.sliders["Volume"].adjust(toNormalizedSliderPosition: 0)
+    app.buttons["Close Now Playing"].tap()
+    XCTAssertTrue(app.buttons["Close Now Playing"].waitForNonExistence(timeout: 5))
+    app.buttons["Play Album"].tap()
+    openNowPlaying(app)
+    let position = app.sliders["waveform-position"]
+    let waveform = app.descendants(matching: .any)["playback-waveform"]
+    let advancing = expectation(for: NSPredicate { _, _ in
+      let value = waveform.value as? String ?? ""
+      return value.hasPrefix("0:") && value != "0:00"
+    }, evaluatedWith: app)
+    wait(for: [advancing], timeout: 12)
+    position.adjust(toNormalizedSliderPosition: 0.2)
+    app.buttons["Lyrics"].tap()
+    let active = app.staticTexts["lyrics-active-line"]
+    XCTAssertTrue(active.waitForExistence(timeout: 8), app.debugDescription)
+    let follow = app.switches["lyrics-follow"]
+    let scroller = app.scrollViews["lyrics-scroll"]
+    func centered() -> Bool {
+      guard active.exists, scroller.exists else { return false }
+      let viewport = scroller.frame
+      return active.frame.midY > viewport.minY + viewport.height / 3
+        && active.frame.midY < viewport.maxY - viewport.height / 3
+    }
+    let centeredInitially = expectation(for: NSPredicate { _, _ in centered() }, evaluatedWith: app)
+    XCTAssertEqual(XCTWaiter.wait(for: [centeredInitially], timeout: 5), .completed,
+                   "Active \(active.label) \(active.frame), scroll view \(scroller.frame)")
+    let firstLine = active.label
+    let nextLine = expectation(for: NSPredicate(format: "label != %@", firstLine), evaluatedWith: active)
+    wait(for: [nextLine], timeout: 12)
+    let number = try XCTUnwrap(Int(active.label.split(separator: " ").last ?? ""))
+    let adjacent = app.staticTexts["lyrics-line-\(number)"]
+    XCTAssertGreaterThan(active.frame.height, adjacent.frame.height)
+    follow.switches.firstMatch.tap()
+    XCTAssertTrue(active.waitForNonExistence(timeout: 5))
+    scroller.swipeUp()
+    follow.switches.firstMatch.tap()
+    let recentered = expectation(for: NSPredicate { _, _ in centered() }, evaluatedWith: app)
+    wait(for: [recentered], timeout: 5)
+  }
+
   func testLyricsFollowsThePlaybackClock() {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -1779,7 +2229,7 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["Close Now Playing"].tap()
     app.buttons["Artists"].tap()
     app.staticTexts["A Artist"].tap()
-    app.staticTexts["A Album 1 (2000)"].tap()
+    albumEntry(app, "A Album 1 (2000)").tap()
     app.cells.matching(NSPredicate(format: "identifier ENDSWITH 'song-0-0-0'")).firstMatch.tap()
     app.buttons["Play Track"].tap()
     openNowPlaying(app)
@@ -1990,7 +2440,7 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertTrue(theme.isHittable)
     capture(app, "Inline Solarized Dark theme")
     theme.tap()
-    app.buttons["System"].tap()
+    app.buttons["system"].tap()
     dismissIconNotice(XCUIApplication(bundleIdentifier: "com.apple.springboard"), timeout: 1)
     XCTAssertTrue(app.navigationBars["Appearance"].exists)
     returnToSettingsPage(app, title: "Settings")
@@ -2005,7 +2455,7 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["bottom-library"].tap()
     app.buttons["Artists"].tap()
     app.staticTexts["A Artist"].tap()
-    app.staticTexts["A Album 1 (2000)"].tap()
+    albumEntry(app, "A Album 1 (2000)").tap()
     app.cells.matching(NSPredicate(format: "identifier ENDSWITH 'song-0-0-0'")).firstMatch.tap()
     app.buttons["Play Track"].tap()
     openNowPlaying(app)
@@ -2044,9 +2494,9 @@ final class LibraryFlowTests: XCTestCase {
     let theme = app.buttons["preference-choice-Theme"]
     XCTAssertTrue(theme.waitForExistence(timeout: 5))
     theme.tap()
-    XCTAssertTrue(app.buttons["System"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.buttons["system"].waitForExistence(timeout: 5))
     capture(app, "Native theme picker")
-    app.buttons["System"].tap()
+    app.buttons["system"].tap()
     returnToSettingsPage(app, title: "Appearance")
     let artwork = app.buttons["artwork-mode"]
     XCTAssertTrue(artwork.waitForExistence(timeout: 5))
@@ -2148,8 +2598,8 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["Artists"].tap()
     XCTAssertTrue(app.staticTexts["A Artist"].waitForExistence(timeout: 5))
     app.staticTexts["A Artist"].tap()
-    XCTAssertTrue(app.staticTexts["A Album 1 (2000)"].waitForExistence(timeout: 5))
-    app.staticTexts["A Album 1 (2000)"].tap()
+    XCTAssertTrue(albumEntry(app, "A Album 1 (2000)").waitForExistence(timeout: 5))
+    albumEntry(app, "A Album 1 (2000)").tap()
     XCTAssertTrue(app.buttons["column-title"].waitForExistence(timeout: 5))
     app.buttons["column-title"].tap()
     let filter = app.textFields.matching(
@@ -2180,8 +2630,8 @@ final class LibraryFlowTests: XCTestCase {
     app.launch()
     connectFixture(app)
     let names = [
-      "System", "solarized dark", "solarized light", "dark", "dracula", "northern", "hot dog stand",
-      "norton", "platinum", "black and white", "white on black", "amber crt", "phosphor green",
+      "system", "solarized dark", "solarized light", "dark", "dracula", "northern", "hot dog stand",
+      "norton", "platinum", "brushed aluminum", "black and white", "white on black", "amber crt", "phosphor green",
     ]
     for name in names {
       app.buttons["Command Palette"].firstMatch.tap()
@@ -2198,7 +2648,7 @@ final class LibraryFlowTests: XCTestCase {
       returnToSettingsPage(app, title: "Appearance")
       capture(app, "Theme \(name) Settings")
       app.buttons["bottom-library"].tap()
-      XCTAssertTrue(app.navigationBars["Library"].waitForExistence(timeout: 5))
+      XCTAssertTrue(app.staticTexts["library-heading"].waitForExistence(timeout: 5))
       capture(app, "Theme \(name) Library")
     }
   }
@@ -2243,7 +2693,7 @@ final class LibraryFlowTests: XCTestCase {
       .firstMatch
     XCTAssertTrue(track.waitForExistence(timeout: 8))
     track.tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 5))
     app.buttons["Command Palette"].firstMatch.tap()
     app.buttons["palette-group:Textamp"].tap()
     app.buttons["Settings…"].tap()
@@ -2255,7 +2705,7 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["Images"].tap()
     app.navigationBars["Appearance"].buttons.element(boundBy: 0).tap()
     app.buttons["Done"].tap()
-    XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["Details"].waitForExistence(timeout: 5))
     let content = app.scrollViews["detail-content"]
     XCTAssertGreaterThan(content.frame.width, app.frame.width * 0.9)
     XCTAssertTrue(app.staticTexts["A Track 1.01"].firstMatch.exists)
@@ -2281,28 +2731,7 @@ final class LibraryFlowTests: XCTestCase {
     let position = app.sliders["Waveform Position"]
     XCTAssertTrue(position.isHittable)
     XCTAssertLessThan(waveform.frame.maxY, app.buttons["bottom-queue"].frame.minY)
-    app.buttons["Expand Waveform"].tap()
-    XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
-    let expanded = app.sliders["expanded-waveform-position"]
-    wait(
-      for: [
-        expectation(
-          for: NSPredicate { _, _ in
-            app.frame.width > app.frame.height && expanded.isHittable
-              && expanded.frame.maxX <= app.frame.maxX
-              && app.buttons["Done"].frame.maxX <= app.frame.maxX
-          }, evaluatedWith: app)
-      ], timeout: 5)
-    capture(app, "Expanded Playback Waveform")
-    app.buttons["Done"].tap()
-    wait(
-      for: [
-        expectation(
-          for: NSPredicate { _, _ in
-            app.frame.height > app.frame.width && waveform.isHittable
-              && waveform.frame.maxX <= app.frame.maxX
-          }, evaluatedWith: app)
-      ], timeout: 5)
+    XCTAssertFalse(app.buttons["Expand Waveform"].exists)
     capture(app, "Navigable Playback Waveform")
   }
 
@@ -2336,7 +2765,7 @@ final class LibraryFlowTests: XCTestCase {
     XCTAssertTrue(theme.isHittable)
     capture(app, "Hot Dog Stand Appearance")
     theme.tap()
-    app.buttons["System"].tap()
+    app.buttons["system"].tap()
     dismissIconNotice(XCUIApplication(bundleIdentifier: "com.apple.springboard"), timeout: 2)
     capture(app, "Accessible Artwork Settings")
   }
@@ -2380,12 +2809,12 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons["Appearance"].tap()
     checkPalette(app)
     XCTAssertTrue(app.navigationBars["Appearance"].waitForExistence(timeout: 5))
-    app.buttons["System"].tap()
+    app.buttons["system"].tap()
     capture(app, "System Settings")
     app.navigationBars["Appearance"].buttons.element(boundBy: 0).tap()
     app.navigationBars["Settings"].buttons["Done"].tap()
     for _ in 0..<6 {
-      if app.navigationBars["Library"].exists { break }
+      if app.staticTexts["library-heading"].exists { break }
       app.navigationBars.buttons.element(boundBy: 0).tap()
     }
     capture(app, "System Library")
@@ -2453,11 +2882,11 @@ final class LibraryFlowTests: XCTestCase {
     app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Now Playing, '")).firstMatch.tap()
   }
 
-  private func connectFixture(_ app: XCUIApplication) {
+  private func connectFixture(_ app: XCUIApplication, audioMuse: Bool = false) {
     allowFixtureNetwork()
     app.activate()
     let albums = app.buttons["sidebar-open-Albums"]
-    if app.launchArguments.contains("--test-profile=fixture-validation"),
+    if audioMuse || app.launchArguments.contains("--test-profile=fixture-validation"),
       albums.waitForExistence(timeout: 3), !app.buttons["Add Library"].exists { return }
     capture(app, "Fixture initial screen")
     let add = app.buttons["Add Library"]
@@ -2481,8 +2910,22 @@ final class LibraryFlowTests: XCTestCase {
       enter("fixture", into: app.textFields["Username"].firstMatch)
       enter("fixture-password", into: app.secureTextFields["Password"].firstMatch, secure: true)
       enter("Fixture Music", into: app.textFields["Name (optional)"])
+      if audioMuse {
+        app.swipeUp()
+        enter("http://127.0.0.1:48791", into: app.textFields["AudioMuse URL"])
+        enter("fixture", into: app.textFields["audiomuse-username"])
+        let password = app.secureTextFields["audiomuse-password"]
+        for _ in 0..<4 where !password.isHittable { app.collectionViews.firstMatch.swipeUp() }
+        enter("fixture-password", into: password, secure: true)
+      }
       app.swipeUp()
       app.buttons["Connect"].tap()
+      if audioMuse {
+        XCTAssertTrue(app.buttons["Connect"].waitForNonExistence(timeout: 15))
+        app.terminate()
+        app.launch()
+        return
+      }
       dismissIconNotice(XCUIApplication(bundleIdentifier: "com.apple.springboard"), timeout: 1)
       wait(
         for: [
@@ -2497,7 +2940,7 @@ final class LibraryFlowTests: XCTestCase {
     library.tap()
     if app.buttons["Make active"].exists {
       app.buttons["Make active"].tap()
-      XCTAssertTrue(app.navigationBars["Library"].waitForExistence(timeout: 10))
+      XCTAssertTrue(app.staticTexts["library-heading"].waitForExistence(timeout: 10))
       return
     }
     if !app.navigationBars["Settings"].exists {

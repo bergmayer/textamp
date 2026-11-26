@@ -38,17 +38,9 @@ pub fn request(state: &AppState) -> Option<(String, String)> {
     if let Some(column) = state
         .browse_nav()
         .and_then(|n| n.focused())
-        .filter(|c| c.header_selection == crate::app::state::ColumnHeaderSelection::AlbumDetails)
-        && let Some(crate::app::state::PlayAllRow::Album { rating_key, .. }) = &column.play_all_row
+        .filter(|_| crate::app::details::album_info_selection(state).is_some())
     {
-        let thumb = state
-            .library
-            .albums
-            .iter()
-            .find(|a| &a.rating_key == rating_key)
-            .and_then(|a| a.thumb.clone())
-            .or_else(|| column.tracks.iter().find_map(|t| t.parent_thumb.clone()));
-        return thumb.map(|thumb| (rating_key.clone(), thumb));
+        return crate::app::details::album_cover(state, column);
     }
     let track = if state.browse_category == BrowseCategory::Folders {
         state
@@ -113,6 +105,17 @@ pub fn preview(state: &AppState) -> Option<Arc<Vec<u8>>> {
         && let Some(photo) = info.document.images.get(info.image_index)
     {
         return Some(Arc::new(photo.data.clone()));
+    }
+    if let Some(track) =
+        crate::app::sonic_details::selected_track(state).or_else(|| state.pane_track())
+    {
+        crate::app::details::track_cover(state, track)?;
+        return state
+            .artwork
+            .grid_cache
+            .get(&track.rating_key)
+            .cloned()
+            .map(Arc::new);
     }
     let request = request(state);
     request

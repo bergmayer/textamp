@@ -15,8 +15,44 @@ enum Pane {
     Artwork,
     Visualizer,
     Queue,
+    Rail,
     Transport,
     Footer,
+}
+
+/// Step to the parent in the single-column Library or dismiss the player at the root.
+pub fn sheet_back(state: &mut AppState) -> Vec<Action> {
+    if !state.tui_sidebar_visible || state.category_column_focused {
+        return vec![super::action::NavigationAction::SetView(View::Browse).into()];
+    }
+    state.set_view(View::Browse);
+    state.tui_browsing_player = true;
+    if state.desktop_library_root == LibraryRoot::Radio && state.station_nav.can_go_left() {
+        return vec![super::action::RadioAction::NavigateStationsBack.into()];
+    }
+    if state.track_pane_focused
+        || state
+            .browse_nav()
+            .is_some_and(|n| n.focused_column > state.browse_column_offset())
+        || (state.browse_category == BrowseCategory::Folders
+            && state
+                .folder_state
+                .as_ref()
+                .is_some_and(|n| n.focused_column > 0))
+    {
+        super::handlers::key_input::close_focused_browse_column(state);
+    } else {
+        state.tui_sidebar_group = None;
+        state.focus_category_column();
+    }
+    vec![]
+}
+
+pub fn focus_root_after_close(state: &mut AppState) {
+    if state.tui_player_raised() {
+        state.tui_sidebar_group = None;
+        state.focus_category_column();
+    }
 }
 
 /// Whether Describe Music owns the library workspace.
@@ -38,11 +74,29 @@ pub fn traverse(state: &mut AppState, backwards: bool) {
         state.view
     };
     let mut panes = Vec::new();
-    if workspace == View::Browse {
+    let sheet = state.tui_player_raised();
+    if sheet {
+        if state.tui_sidebar_visible || cfg!(target_os = "macos") {
+            let pane = if state.tui_sidebar_visible
+                && !state.category_column_focused
+                && state
+                    .hit_regions
+                    .miller_columns
+                    .as_ref()
+                    .is_some_and(|r| !r.columns.is_empty())
+            {
+                Pane::Column(state.browse_nav().map_or(0, |nav| nav.focused_column))
+            } else {
+                Pane::Sidebar
+            };
+            panes.push(pane);
+        }
+        panes.extend([Pane::Artwork, Pane::Visualizer]);
+    } else if workspace == View::Browse {
         if describing(state) {
             panes.extend([Pane::Description, Pane::DescriptionSubmit]);
         }
-        if state.tui_sidebar_visible {
+        if state.tui_sidebar_visible || cfg!(target_os = "macos") {
             panes.push(Pane::Sidebar);
         }
         if state.tui_sidebar_group.is_some() {
@@ -65,8 +119,6 @@ pub fn traverse(state: &mut AppState, backwards: bool) {
         if super::sonic_details::visible(state).is_some() {
             panes.push(Pane::Related);
         }
-    } else if workspace == View::NowPlaying {
-        panes.extend([Pane::Artwork, Pane::Visualizer]);
     }
     if !state.hit_regions.artist_links.is_empty() {
         panes.push(Pane::Artists);
@@ -74,8 +126,13 @@ pub fn traverse(state: &mut AppState, backwards: bool) {
     if state.tui_queue_visible {
         panes.push(Pane::Queue);
     }
+    if !RailControl::visible(state).is_empty() {
+        panes.push(Pane::Rail);
+    }
     panes.extend([Pane::Transport, Pane::Footer]);
-    let current = if state.tui_footer_focus.is_some() {
+    let current = if state.tui_rail_focus.is_some() {
+        Pane::Rail
+    } else if state.tui_footer_focus.is_some() {
         Pane::Footer
     } else if state.tui_transport_focus.is_some() {
         Pane::Transport
@@ -122,6 +179,7 @@ pub fn traverse(state: &mut AppState, backwards: bool) {
     state.tui_queue_type_focused = false;
     state.tui_transport_focus = None;
     state.tui_footer_focus = None;
+    state.tui_rail_focus = None;
     state.tui_artist_focus = None;
     state.tui_column_header = None;
     state.tui_description_focused = false;
@@ -154,8 +212,18 @@ pub fn traverse(state: &mut AppState, backwards: bool) {
             }
             .map(|link| (*link).clone());
         }
-        Pane::Sidebar => state.category_column_focused = true,
+        Pane::Sidebar => {
+            if state.tui_player_raised() {
+                state.set_view(View::Browse);
+                state.tui_browsing_player = true;
+            }
+            state.category_column_focused = true;
+        }
         Pane::Column(index) => {
+            if sheet {
+                state.set_view(View::Browse);
+                state.tui_browsing_player = true;
+            }
             if super::radio_navigation::visible(state) {
                 state.station_nav.focused_column = index;
             } else if let Some(nav) = state.browse_nav_mut() {
@@ -188,10 +256,12 @@ pub fn traverse(state: &mut AppState, backwards: bool) {
             }
         }
         Pane::Artwork => {
+            state.set_view(View::NowPlaying);
             state.now_playing_focus = NowPlayingFocus::Artwork;
             state.visualizer_tab_focused = false;
         }
         Pane::Visualizer => {
+            state.set_view(View::NowPlaying);
             state.now_playing_focus = NowPlayingFocus::Tracks;
             state.visualizer_tab_focused = true;
         }
@@ -199,6 +269,15 @@ pub fn traverse(state: &mut AppState, backwards: bool) {
             state.set_view(View::Queue);
             state.tui_queue_type_focused = !backwards;
             state.now_playing_focus = NowPlayingFocus::Tracks;
+        }
+        Pane::Rail => {
+            let controls = RailControl::visible(state);
+            state.tui_rail_focus = if backwards {
+                controls.last()
+            } else {
+                controls.first()
+            }
+            .copied();
         }
         Pane::Transport => {
             let controls = super::transport_controls::visible(state);
@@ -213,39 +292,166 @@ pub fn traverse(state: &mut AppState, backwards: bool) {
     }
 }
 
+/// Controls in the always-visible queue shortcut rail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RailControl {
+    Next,
+    History,
+    Settings,
+    Search,
+    Commands,
+    Radio,
+    QueueType,
+    QueueTools,
+    Clear,
+}
+
+impl RailControl {
+    pub fn visible(state: &AppState) -> Vec<Self> {
+        use super::queue_controls::Menu;
+        let regions = &state.hit_regions;
+        let mut controls: Vec<_> = regions
+            .queue_tabs
+            .iter()
+            .map(
+                |(_, history)| {
+                    if *history { Self::History } else { Self::Next }
+                },
+            )
+            .collect();
+        for (key, control) in [
+            (KeyCode::Char(','), Self::Settings),
+            (KeyCode::Char('f'), Self::Search),
+            (KeyCode::Char(':'), Self::Commands),
+        ] {
+            if regions
+                .footer_controls
+                .iter()
+                .any(|(_, index)| FOOTER[*index].0 == key)
+            {
+                controls.push(control);
+            }
+        }
+        if regions.rail_radio.is_some()
+            && state
+                .station_nav
+                .columns
+                .first()
+                .is_some_and(|column| !column.stations().is_empty())
+        {
+            controls.push(Self::Radio);
+        }
+        controls.extend(regions.queue_menus.iter().map(|(_, menu)| match menu {
+            Menu::QueueType => Self::QueueType,
+            Menu::Tools => Self::QueueTools,
+        }));
+        if regions.queue_clear.is_some() && super::queue_controls::can_clear_tab(state) {
+            controls.push(Self::Clear);
+        }
+        controls
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Next => "Playing Next",
+            Self::History => "Listening History",
+            Self::Settings => "Settings",
+            Self::Search => "Search",
+            Self::Commands => "Commands",
+            Self::Radio => "Radio Shortcut",
+            Self::QueueType => "Queue Type",
+            Self::QueueTools => "Queue Tools",
+            Self::Clear => "Clear current queue tab",
+        }
+    }
+
+    pub fn activate(self, state: &mut AppState) -> Vec<Action> {
+        use super::{action::*, queue_controls::Menu};
+        match self {
+            Self::Next | Self::History => {
+                let history = self == Self::History;
+                if state.tui_queue_visible && state.showing_queue_history == history {
+                    return vec![NavigationAction::ToggleQueuePanel.into()];
+                }
+                let mut actions = vec![QueueAction::ShowHistory(history).into()];
+                if !state.tui_queue_visible {
+                    actions.push(NavigationAction::ToggleQueuePanel.into());
+                }
+                actions
+            }
+            Self::Settings | Self::Search | Self::Commands => {
+                state.tui_rail_focus = None;
+                let index = FOOTER
+                    .iter()
+                    .position(|(_, _, label)| *label == self.label())
+                    .unwrap();
+                footer(state, index)
+            }
+            Self::Radio => {
+                let preferred = crate::config::load_config()
+                    .ok()
+                    .and_then(|c| c.ui.library_radio_station);
+                let stations = state
+                    .station_nav
+                    .columns
+                    .first()
+                    .map(|col| col.stations())
+                    .unwrap_or_default();
+                let command =
+                    super::radio_navigation::shortcut_station(stations, preferred.as_deref())
+                        .map(super::radio_navigation::shortcut_command);
+                command
+                    .map(|command| super::command_palette::run(command, state))
+                    .unwrap_or_default()
+            }
+            Self::QueueType => Menu::QueueType.open(state),
+            Self::QueueTools => Menu::Tools.open(state),
+            Self::Clear => super::transport_controls::activate(
+                state,
+                super::transport_controls::TransportControl::Clear,
+            ),
+        }
+    }
+}
+
 /// Footer controls in visual order; their commands use the same keyboard reducer.
 pub const FOOTER: &[(KeyCode, &str, &str)] = &[
+    #[cfg(not(target_os = "macos"))]
     (KeyCode::Char('['), " [ ", "Show / Hide Sidebar"),
     (KeyCode::Left, " ← ", "Back"),
     (KeyCode::Char(','), " ⚙ ", "Settings"),
     (KeyCode::Char('f'), " / ", "Search"),
     (KeyCode::Char(':'), " : ", "Commands"),
+    #[cfg(not(target_os = "macos"))]
     (KeyCode::Char(']'), " ] ", "Show / Hide Queue"),
 ];
 
 /// Activate a footer control through the normal input path.
 pub fn footer(state: &mut AppState, index: usize) -> Vec<Action> {
     state.tui_footer_focus = None;
-    match index {
-        0 => vec![super::action::NavigationAction::ToggleSidebar.into()],
-        1 => vec![super::action::NavigationAction::Back.into()],
-        2 => vec![if state.view == View::Settings {
+    match FOOTER.get(index).map(|entry| entry.0) {
+        Some(KeyCode::Char('[')) => vec![super::action::NavigationAction::ToggleSidebar.into()],
+        Some(KeyCode::Left) => vec![super::action::NavigationAction::Back.into()],
+        Some(KeyCode::Char(',')) => vec![if state.view == View::Settings {
             super::action::NavigationAction::SetView(View::Browse).into()
         } else {
             super::action::SettingsAction::OpenSettings.into()
         }],
-        3 => vec![super::action::SearchAction::OpenSearchPopup.into()],
-        4 => {
+        Some(KeyCode::Char('f')) => vec![super::action::SearchAction::OpenSearchPopup.into()],
+        Some(KeyCode::Char(':')) => {
             state.palette.player_context = false;
             super::command_palette::open(state)
         }
-        5 => vec![super::action::NavigationAction::ToggleQueuePanel.into()],
+        Some(KeyCode::Char(']')) => vec![super::action::NavigationAction::ToggleQueuePanel.into()],
         _ => vec![],
     }
 }
 
 /// Context for the selected terminal control, without tooltip overlays.
 pub fn status(state: &AppState) -> Option<String> {
+    if let Some(control) = state.tui_rail_focus {
+        return Some(control.label().into());
+    }
     if state.tui_queue_type_focused {
         return Some(format!("Queue Type: {}", super::queue_modes::label(state)));
     }
@@ -265,21 +471,9 @@ pub fn status(state: &AppState) -> Option<String> {
         use super::column_controls::ColumnControl::*;
         return Some(
             match focus.control {
-                Details => state
-                    .browse_nav()
-                    .and_then(|nav| nav.columns.get(focus.column))
-                    .map_or("Details", |column| {
-                        if column.has_album_details()
-                            || matches!(column.selected_item(), Some(BrowseItem::Album { .. }))
-                        {
-                            "Album Details"
-                        } else if matches!(column.selected_item(), Some(BrowseItem::Artist { .. }))
-                        {
-                            "Artist Details"
-                        } else {
-                            "Track Details"
-                        }
-                    }),
+                ArtistBio => "Artist Biography",
+                Details => "Album Info",
+                DownloadAlbum => "Download Album",
                 PlaylistEdit => "Edit Playlist / Done",
                 Filter => "Filter Column",
                 Play => "Play",
@@ -287,6 +481,7 @@ pub fn status(state: &AppState) -> Option<String> {
                 Add => "Add to Queue",
                 Options => "View Options",
                 Close => "Close Column",
+                ArtistMix => "Artist Mix",
             }
             .into(),
         );
@@ -303,7 +498,16 @@ pub fn status(state: &AppState) -> Option<String> {
             .map_or(state.track_pane_index, |child| child.details.action_index);
         return super::column_controls::DetailControl::ALL
             .get(index)
-            .map(|control| control.label().to_owned());
+            .map(|control| {
+                use crate::app::playback_controls::TrackRange;
+                control
+                    .label_for(if state.tui_shift_held {
+                        TrackRange::Following
+                    } else {
+                        TrackRange::Single
+                    })
+                    .to_owned()
+            });
     }
     if state.view == View::Browse
         && let Some(id) = state
@@ -330,6 +534,7 @@ pub fn filter_focused(state: &AppState) -> bool {
         && !state.alphabet_strip_focused
         && state.tui_transport_focus.is_none()
         && state.tui_footer_focus.is_none()
+        && state.tui_rail_focus.is_none()
         && state.tui_artist_focus.is_none()
         && !state.tui_description_focused
         && !state.tui_description_submit_focused

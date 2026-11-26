@@ -13,42 +13,23 @@ pub struct Column {
 }
 #[derive(Clone)]
 pub struct Model {
+    pub focused_column: usize,
     pub columns: Vec<Column>,
     pub selected: Option<Station>,
     pub loading: bool,
     pub notice: String,
     pub error: bool,
 }
-pub const ARTIST_PICKER: &str = "desktop:artist-radio";
+pub use crate::app::radio_navigation::select;
 pub fn visible(state: &AppState) -> bool {
     state.view == View::Browse
         && state.browse_category == BrowseCategory::Library
         && state.desktop_library_root == LibraryRoot::Radio
         && state.sources.nav_collection.is_none()
 }
-fn artist_station() -> Station {
-    Station {
-        key: ARTIST_PICKER.into(),
-        title: "Artist Mix".into(),
-        station_type: "station".into(),
-        identifier: Some("artist-picker".into()),
-        thumb: None,
-        art: None,
-        description: Some("Choose one or more artists for continuous artist radio.".into()),
-    }
-}
-pub fn play(key: &str) -> Vec<Action> {
-    if key == ARTIST_PICKER {
-        vec![SearchAction::OpenArtistRadioPicker.into()]
-    } else {
-        vec![RadioAction::PlayStation(key.into()).into()]
-    }
-}
-fn playable_kind(station: &Station) -> bool {
-    !station.is_separator() && !station.is_action() && !station.is_dj_mode() && !station.is_remix()
-}
 pub fn project(state: &AppState) -> Model {
     let mut model = Model {
+        focused_column: state.station_nav.focused_column,
         columns: state
             .station_nav
             .columns
@@ -60,13 +41,7 @@ pub fn project(state: &AppState) -> Model {
                 } else {
                     column.title.clone()
                 },
-                stations: column
-                    .stations
-                    .iter()
-                    .filter(|station| playable_kind(station))
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .into(),
+                stations: column.stations().into(),
                 selected: column.selected_station().map(|station| station.key.clone()),
             })
             .collect(),
@@ -75,7 +50,6 @@ pub fn project(state: &AppState) -> Model {
             .columns
             .get(state.station_nav.focused_column)
             .and_then(StationColumn::selected_station)
-            .filter(|station| playable_kind(station))
             .cloned(),
         loading: state.station_nav.loading,
         error: state.notifications.last_error.is_some(),
@@ -86,28 +60,22 @@ pub fn project(state: &AppState) -> Model {
             .or_else(|| state.notifications.status_message.clone())
             .unwrap_or_default(),
     };
-    if state
-        .sources
-        .active
-        .capabilities()
-        .supports(crate::library::capabilities::Feature::ArtistRadio)
+    if state.popups.artist_radio_picker().is_some()
         && let Some(root) = model.columns.first_mut()
+        && let Some(station) = root
+            .stations
+            .iter()
+            .find(|s| s.identifier.as_deref() == Some("artist-picker"))
     {
-        let mut stations = root.stations.to_vec();
-        stations.insert(2.min(stations.len()), artist_station());
-        root.stations = stations.into();
-    }
-    if state.popups.artist_radio_picker().is_some() {
-        if let Some(root) = model.columns.first_mut() {
-            root.selected = Some(ARTIST_PICKER.into());
-        }
-        model.selected = Some(artist_station());
+        root.selected = Some(station.key.clone());
+        model.selected = Some(station.clone());
     }
     model
 }
 impl Model {
     pub fn revision(&self) -> u64 {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.focused_column.hash(&mut hash);
         self.loading.hash(&mut hash);
         self.notice.hash(&mut hash);
         self.error.hash(&mut hash);
@@ -125,19 +93,6 @@ impl Model {
         }
         hash.finish()
     }
-}
-
-pub fn select(state: &mut AppState, column: usize, key: &str) -> Vec<Action> {
-    if column == 0
-        && key == ARTIST_PICKER
-        && project(state)
-            .columns
-            .first()
-            .is_some_and(|column| column.stations.iter().any(|station| station.key == key))
-    {
-        return vec![SearchAction::OpenArtistRadioPicker.into()];
-    }
-    crate::app::radio_navigation::select(state, column, key)
 }
 
 pub fn key(state: &mut AppState, key: KeyCode) -> Vec<Action> {
@@ -172,7 +127,7 @@ pub fn key(state: &mut AppState, key: KeyCode) -> Vec<Action> {
             state.station_nav.focused_column += 1;
             vec![]
         }
-        KeyCode::Right | KeyCode::Enter => {
+        KeyCode::Enter => {
             let Some(station) = column.stations.get(index) else {
                 return vec![];
             };
@@ -183,10 +138,8 @@ pub fn key(state: &mut AppState, key: KeyCode) -> Vec<Action> {
                 } else {
                     select(state, focused, &station.key)
                 }
-            } else if key == KeyCode::Enter {
-                play(&station.key)
             } else {
-                vec![]
+                vec![RadioAction::PlayStation(station.key.clone()).into()]
             }
         }
         _ => vec![],
@@ -197,7 +150,7 @@ pub fn key(state: &mut AppState, key: KeyCode) -> Vec<Action> {
 mod tests {
     use super::*;
     #[test]
-    fn radio_is_a_repeatable_library_destination_and_artist_radio_is_a_peer() {
+    fn radio_is_a_repeatable_library_destination() {
         let mut state = AppState::new();
         let config = crate::config::Config::default();
         super::super::surface::navigate(PaletteCommandKind::OpenRadioBrowser, &mut state, &config);
@@ -208,10 +161,6 @@ mod tests {
         assert!(!visible(&state));
         super::super::surface::navigate(PaletteCommandKind::OpenRadioBrowser, &mut state, &config);
         assert!(visible(&state));
-        assert!(matches!(
-            play(ARTIST_PICKER).as_slice(),
-            [Action::Search(SearchAction::OpenArtistRadioPicker)]
-        ));
     }
     #[test]
     fn browsing_categories_and_leaves_does_not_start_playback() {
@@ -224,12 +173,17 @@ mod tests {
                 crate::library::capabilities::NAVIDROME,
             ),
         ));
+        let actions = select(&mut state, 0, "nav-radio/artist-picker");
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Search(SearchAction::OpenArtistRadioPicker)]
+        ));
         let actions = select(&mut state, 0, "nav-radio/style");
         assert!(
             matches!(actions.as_slice(), [Action::Radio(RadioAction::DrillIntoStation(key, _))] if key == "nav-radio/style")
         );
         let mut leaf = state.station_nav.columns[0]
-            .stations
+            .stations()
             .iter()
             .find(|station| station.identifier.as_deref() == Some("style"))
             .unwrap()

@@ -730,9 +730,9 @@ impl Render for PlayerDevices {
         let mut content = div().flex().flex_col().gap_4().p_5().w_full().child(
             div()
                 .flex()
-                .justify_between()
+                .justify_end()
+                .gap_2()
                 .items_center()
-                .child(Label::new(player_sync::DESCRIPTION))
                 .when(selected, |header| {
                     header.child(
                         Button::new("inventory-player")
@@ -754,10 +754,9 @@ impl Render for PlayerDevices {
                         })),
                 ),
         );
-        if self.model.volumes.is_empty() {
+        if !self.model.connection.is_empty() {
             content = content.child(
-                Label::new("Connect your player and enable USB storage.")
-                    .text_color(cx.theme().muted_foreground),
+                Label::new(self.model.connection.clone()).text_color(cx.theme().muted_foreground),
             );
         }
         if self.model.volumes.len() > 1 && !selected {
@@ -968,14 +967,7 @@ impl Render for PlayerDevices {
                                     })
                                 })),
                         )
-                    })
-                    .child(
-                        Button::new("eject-player")
-                            .debug_selector(|| "eject-player".into())
-                            .label("Eject")
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, _| this.send(PlayerCommand::Eject))),
-                    ),
+                    }),
             );
         }
         content = content.child(match &self.model.phase {
@@ -992,7 +984,6 @@ impl Render for PlayerDevices {
                         .loading(true)
                         .accessibility_label("Preparing player sync"),
                 ),
-            Phase::Ejecting => div().child(Label::new("Ejecting player…")),
             Phase::Copying(progress) => {
                 let current = progress
                     .expected
@@ -1040,11 +1031,11 @@ impl Render for PlayerDevices {
                 .flex_col()
                 .gap_2()
                 .child(Label::new(format!(
-                    "Sync complete · {} copied · {} unchanged · {} removed",
-                    summary.copied, summary.reused, summary.removed
+                    "Sync complete · {} copied · {} unchanged · {} removed · {} listens imported",
+                    summary.copied, summary.reused, summary.removed, summary.listens
                 )))
                 .child(
-                    Label::new("Eject the player before disconnecting it.")
+                    Label::new("You can disconnect the player.")
                         .text_color(cx.theme().muted_foreground),
                 ),
             Phase::Cancelled => div().child(Label::new(
@@ -1055,6 +1046,27 @@ impl Render for PlayerDevices {
             ),
             Phase::Idle => div(),
         });
+        if !self.model.history.is_empty() {
+            let mut section = div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Label::new("Last successful sync").font_weight(FontWeight::SEMIBOLD));
+            for row in &self.model.history {
+                section = section.child(Label::new(row.clone()));
+            }
+            content = content.child(
+                section.child(
+                    Button::new("clear-player-history")
+                        .debug_selector(|| "clear-player-history".to_string())
+                        .small()
+                        .label("Clear Sync History")
+                        .on_click(
+                            cx.listener(|this, _, _, _| this.send(PlayerCommand::ClearSyncHistory)),
+                        ),
+                ),
+            );
+        }
         if self.model.can_cancel {
             content = content.child(
                 Button::new("cancel-player-sync")
@@ -1170,7 +1182,37 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sync_controls_dispatch_and_disable_ejection_during_transfer(cx: &mut TestAppContext) {
+    fn clear_history_is_available_with_player_disconnected(cx: &mut TestAppContext) {
+        cx.update(super::super::init);
+        let (engine, _updates, mut commands) = Engine::fixture(Snapshot {
+            player_sync: crate::app::player_sync::View {
+                history: vec!["Y2 · 2026-11-25 14:00".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let engine = std::sync::Arc::new(engine);
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let view = cx.new(|cx| PlayerDevices::new(engine, window, cx));
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let clear = cx
+            .debug_bounds("clear-player-history")
+            .expect("clear sync history");
+        cx.simulate_click(clear.center(), Default::default());
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok()).any(|command| matches!(
+                command,
+                Command::Action(crate::app::Action::PlayerSync(
+                    PlayerCommand::ClearSyncHistory
+                ))
+            ))
+        );
+    }
+
+    #[gpui::test]
+    fn sync_controls_dispatch_and_show_transfer_progress(cx: &mut TestAppContext) {
         cx.update(super::super::init);
         let mut state = crate::app::AppState::new();
         state.desktop_frontend = true;
@@ -1269,14 +1311,5 @@ mod tests {
             .debug_bounds("player-sync-progress")
             .expect("transfer progress");
         assert!(progress.size.height > px(20.));
-        while commands.try_recv().is_ok() {}
-        let eject = cx.debug_bounds("eject-player").expect("Eject");
-        cx.simulate_click(eject.center(), Default::default());
-        assert!(
-            !std::iter::from_fn(|| commands.try_recv().ok()).any(|command| matches!(
-                command,
-                Command::Action(crate::app::Action::PlayerSync(PlayerCommand::Eject))
-            ))
-        );
     }
 }

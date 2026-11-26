@@ -25,17 +25,37 @@ fn station(kind: &str, title: &str, category: bool) -> Station {
         description: None,
     }
 }
-pub fn stations() -> Vec<Station> {
+fn stations() -> Vec<Station> {
     crate::library::station::standard_stations("nav-radio", crate::library::capabilities::NAVIDROME)
 }
 pub fn load(state: &mut AppState) {
-    let mut stations = stations();
-    helpers::append_station_action_items(&mut stations, state.queue.shuffle_undo_queue.is_some());
-    state.station_nav.columns = vec![StationColumn::new(
-        None,
-        "stations".into(),
-        stations.clone(),
-    )];
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    let sonic = super::recommendations::available(state);
+    let mut options = stations();
+    let audio = crate::app::sources::audiomuse::connection(state);
+    let audio_moods = sonic
+        && audio.is_some()
+        && state
+            .library
+            .audio_mood_cache
+            .as_ref()
+            .filter(|(connection, _)| Some(connection) == audio)
+            .and_then(|(_, cache)| cache.get())
+            .is_none_or(|pools| !pools.is_empty());
+    options.retain(|s| {
+        state.library.radio_availability.offers(
+            s.identifier.as_deref().unwrap_or(""),
+            today,
+            sonic,
+            audio_moods,
+        )
+    });
+    state.station_navigation_generation = state.station_navigation_generation.wrapping_add(1);
+    state.sources.nav_tasks.remove("station-children");
+    state.station_children_cache.clear();
+    state.station_nav.columns = vec![StationColumn::new(None, "stations".into(), options)];
     state.station_nav.focused_column = 0;
     state.station_nav.loading = false;
 }
@@ -45,27 +65,14 @@ pub fn children(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, tit
     state.station_nav.loading = false;
     let kind = key.strip_prefix("nav-radio/").unwrap_or("");
     let values: BTreeSet<String> = match kind {
-        "mood" => state
-            .library
-            .albums
-            .iter()
-            .flat_map(|a| a.mood.iter().map(|g| g.tag.clone()))
-            .collect(),
-        "style" => state
-            .library
-            .albums
-            .iter()
-            .flat_map(|a| a.genre.iter().map(|g| g.tag.clone()))
-            .collect(),
+        "mood" => state.library.radio_availability.moods.clone(),
+        "style" => state.library.radio_availability.genres.clone(),
         "decade" => state
             .library
-            .albums
+            .radio_availability
+            .decades
             .iter()
-            .filter_map(|a| {
-                a.year
-                    .filter(|y| *y > 0)
-                    .map(|y| ((y / 10) * 10).to_string())
-            })
+            .map(u16::to_string)
             .collect(),
         _ => BTreeSet::new(),
     };
@@ -86,20 +93,48 @@ pub fn children(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, tit
         .collect();
     if audio_moods {
         state.station_nav.loading = true;
-        state.station_nav.loading = true;
         let connection = crate::app::sources::audiomuse::connection(state)
             .unwrap()
             .clone();
-        let binding =
-            crate::app::sources::audiomuse::key(state.sources.active.navidrome().unwrap());
+        let api = Recommendations::new(state, state.sources.active.navidrome().unwrap());
+        let cache = &mut state.library.audio_mood_cache;
+        if cache.as_ref().is_none_or(|(bound, _)| bound != &connection) {
+            *cache = Some((connection, Default::default()));
+        }
+        let pools = cache.as_ref().unwrap().1.clone();
+        let availability = state.library.radio_availability.clone();
         let navigation_generation = state.station_navigation_generation;
         super::effects::spawn(state, tx, "station-children", async move {
-            let result = async {
-                let api = crate::app::sources::audiomuse::client(&connection, &binding).await?;
-                api.verify().await?;
-                api.moods().await
-            }
-            .await;
+            let result = pools
+                .get_or_try_init(|| async {
+                    use futures::{StreamExt, TryStreamExt, stream};
+                    let client = api.direct().await?;
+                    let names = client.moods().await?;
+                    let api = &api;
+                    let pools = stream::iter(names)
+                        .map(|name| async move {
+                            let ids = client.mood(&name).await?;
+                            let mut seen = HashSet::new();
+                            let tracks: Vec<_> = ids
+                                .iter()
+                                .filter(|id| seen.insert(id.as_str()))
+                                .filter_map(|id| api.ranked_candidate(id))
+                                .cloned()
+                                .collect();
+                            Ok::<_, anyhow::Error>((name, tracks))
+                        })
+                        .buffer_unordered(3)
+                        .try_collect::<Vec<_>>()
+                        .await?;
+                    Ok::<_, anyhow::Error>(
+                        pools
+                            .into_iter()
+                            .filter(|(_, tracks)| availability.supports(tracks))
+                            .collect(),
+                    )
+                })
+                .await
+                .map(|pools| pools.keys().cloned().collect());
             let event = match merge_moods(children, result) {
                 Ok(children) => crate::app::event::RadioEvent::StationChildrenLoaded {
                     station_key: key,
@@ -124,6 +159,11 @@ pub fn children(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, tit
     }
 }
 
+type MoodPools = std::collections::BTreeMap<String, Vec<Track>>;
+pub(crate) type MoodCache = Option<(
+    crate::audiomuse::Connection,
+    std::sync::Arc<tokio::sync::OnceCell<MoodPools>>,
+)>;
 /// Optional analysis enriches real tag choices; its failure must not erase them.
 fn merge_moods(
     mut tags: Vec<Station>,
@@ -156,16 +196,11 @@ enum Recommendation {
 }
 fn choose(state: &AppState, source: &RadioSource, refill: bool) -> anyhow::Result<Selection> {
     use crate::services::radio::{self, AlbumFilter, Recipe};
-    let played: HashSet<&str> = if refill {
-        state
-            .radio
-            .tracks
-            .iter()
-            .skip(state.radio.track_index.unwrap_or(0))
-            .map(|t| t.rating_key.as_str())
-            .collect()
+    let empty = HashSet::new();
+    let excluded = if refill {
+        &state.radio.introduced_albums
     } else {
-        HashSet::new()
+        &empty
     };
     if let RadioSource::Sonic(key) | RadioSource::SonicFixed(key) | RadioSource::Related(key) =
         source
@@ -182,13 +217,10 @@ fn choose(state: &AppState, source: &RadioSource, refill: bool) -> anyhow::Resul
     }
     if let RadioSource::Artist(key) = source {
         let mut tracks = browse::artist_tracks(state, key);
-        tracks.retain(|t| !played.contains(t.rating_key.as_str()));
         tracks.shuffle(&mut rand::rng());
-        tracks.truncate(100);
         return Ok(Selection {
             tracks,
-            // A performer derived only from compilation tags may have no
-            // server artist ID. Its cached tracks still support Artist Mix.
+            // Only server artist IDs can seed the recommendation endpoint.
             related: state
                 .sources
                 .active
@@ -207,7 +239,27 @@ fn choose(state: &AppState, source: &RadioSource, refill: bool) -> anyhow::Resul
     let (kind, value) = key.split_once("?id=").unwrap_or((key, ""));
     let value = urlencoding::decode(value)?;
     if kind == "audioMood" {
+        anyhow::ensure!(
+            crate::app::sources::sonic::enabled(state),
+            "Sonic features are disabled for this library"
+        );
         anyhow::ensure!(!value.is_empty(), "Choose an AudioMuse mood");
+        let cached = state
+            .library
+            .audio_mood_cache
+            .as_ref()
+            .filter(|(c, _)| Some(c) == crate::app::sources::audiomuse::connection(state))
+            .and_then(|(_, cache)| cache.get())
+            .and_then(|pools| pools.get(value.as_ref()))
+            .cloned();
+        if let Some(mut tracks) = cached {
+            tracks.shuffle(&mut rand::rng());
+            return Ok(Selection {
+                tracks,
+                related: None,
+                next_decade: None,
+            });
+        }
         return Ok(Selection {
             tracks: vec![],
             related: Some(Recommendation::Mood(value.into_owned())),
@@ -247,11 +299,12 @@ fn choose(state: &AppState, source: &RadioSource, refill: bool) -> anyhow::Resul
         &state.library.all_tracks,
         &state.library.albums,
         recipe,
-        &played,
+        &state.library.radio_availability,
+        excluded,
     )?;
     let related = selected.tracks.first().and_then(|seed| match kind {
         "albumMix" => Some(Recommendation::SonicTrack(seed.rating_key.clone())),
-        "artists" | "artistMix" | "randomArtist" => seed
+        "artists" | "artistMix" => seed
             .grandparent_rating_key
             .clone()
             .map(Recommendation::Artist),
@@ -267,12 +320,13 @@ fn choose(state: &AppState, source: &RadioSource, refill: bool) -> anyhow::Resul
 /// A provider-owned snapshot; shared radio orchestration owns cancellation and
 /// completion delivery. Only recommendation requests need a catalog ID filter.
 pub struct Request {
+    availability: std::sync::Arc<crate::services::radio::Availability>,
+    excluded: HashSet<String>,
     work: Work,
     next_decade: Option<usize>,
 }
 
 enum Work {
-    Album(Box<Session>, String),
     Cached(Vec<Track>),
     Discover {
         api: Box<Recommendations>,
@@ -287,56 +341,43 @@ impl Request {
         source: &RadioSource,
         refill: bool,
     ) -> Result<Self, AsyncError> {
-        let album = if matches!(source, RadioSource::Station(key) if key == "nav-radio/randomAlbum")
-        {
-            use rand::prelude::IteratorRandom;
-            let queued: HashSet<_> = if refill {
-                state
-                    .radio
-                    .tracks
-                    .iter()
-                    .skip(state.radio.track_index.unwrap_or(0))
-                    .filter_map(|t| t.parent_rating_key.as_deref())
-                    .collect()
-            } else {
-                HashSet::new()
-            };
-            state
-                .library
-                .albums
-                .iter()
-                .filter(|a| !queued.contains(a.rating_key.as_str()))
-                .choose(&mut rand::rng())
-                .or_else(|| state.library.albums.iter().choose(&mut rand::rng()))
-                .map(|a| (session.clone(), a.rating_key.clone()))
-        } else {
-            None
-        };
-        if let Some((session, key)) = album {
-            return Ok(Self {
-                work: Work::Album(Box::new(session), key),
-                next_decade: None,
-            });
-        }
         let Selection {
             tracks,
             related,
             next_decade,
         } = choose(state, source, refill).map_err(failure)?;
         let work = match related {
-            None => Work::Cached(tracks),
+            None => {
+                if (matches!(source, RadioSource::Artist(_))
+                    || matches!(source, RadioSource::Station(k) if k.starts_with("nav-radio/artists?")))
+                    && !state.library.radio_availability.supports(&tracks)
+                {
+                    return Err(failure(anyhow::anyhow!(
+                        crate::services::radio::SPARSE_STATION
+                    )));
+                }
+                Work::Cached(tracks)
+            }
             Some(seed) => Work::Discover {
                 api: Box::new(Recommendations::new(state, session)),
                 seed,
                 tracks,
             },
         };
-        Ok(Self { work, next_decade })
+        Ok(Self {
+            work,
+            next_decade,
+            availability: state.library.radio_availability.clone(),
+            excluded: if refill {
+                state.radio.introduced_albums.clone()
+            } else {
+                Default::default()
+            },
+        })
     }
     pub async fn fetch(self) -> Result<crate::app::sources::radio::Batch, AsyncError> {
         let operation = async {
             let tracks = match self.work {
-                Work::Album(session, key) => session.album_tracks(&key).await?,
                 Work::Cached(tracks) => tracks,
                 Work::Discover {
                     api,
@@ -349,11 +390,8 @@ impl Request {
                             api.similar(&api.session.id(&seed)?, true).await?
                         }
                         Recommendation::Artist(artist) => {
-                            let seed = tracks
-                                .first()
-                                .map(|t| api.session.id(&t.rating_key))
-                                .transpose()?;
-                            match api.artist(&api.session.id(&artist)?, seed.as_deref()).await {
+                            let seed = tracks.first().map(|t| t.rating_key.as_str());
+                            match api.artist_mix(&artist, seed).await {
                                 Ok(matches) => matches,
                                 Err(error) if !tracks.is_empty() => {
                                     tracing::warn!(
@@ -377,12 +415,15 @@ impl Request {
                         let mut seen = HashSet::new();
                         tracks.retain(|t| seen.insert(t.rating_key.clone()));
                         tracks.shuffle(&mut rand::rng());
-                        tracks.truncate(100);
                     }
+                    anyhow::ensure!(
+                        self.availability.supports(&tracks),
+                        crate::services::radio::SPARSE_STATION
+                    );
                     tracks
                 }
             };
-            anyhow::ensure!(!tracks.is_empty(), "No matching tracks");
+            let tracks = self.availability.batch(&tracks, &self.excluded);
             Ok(crate::app::sources::radio::Batch {
                 tracks,
                 decades: vec![],
@@ -428,11 +469,33 @@ mod tests {
         assert_eq!(result[1].key, "nav-radio/audioMood?id=relaxed");
         assert_eq!(result[1].title, "relaxed · AudioMuse");
     }
+    #[test]
+    fn mood_needs_twenty_distinct_album_artists() {
+        let mut state = fixture();
+        let albums = std::sync::Arc::make_mut(&mut state.library.albums);
+        albums.truncate(20);
+        albums[19].parent_rating_key = albums[0].parent_rating_key.clone();
+        let check = |albums: &[Album]| {
+            crate::services::radio::Availability::build(&state.library.all_tracks, albums)
+                .moods
+                .contains("Calm")
+        };
+        assert!(!check(albums));
+        albums[19].parent_rating_key = Some("twentieth".into());
+        assert!(check(albums));
+    }
     fn fixture() -> AppState {
         let mut state = AppState::new();
-        for (album, year, genre) in [("a", 1971, "Rock"), ("b", 1992, "Jazz")] {
+        for i in 0..240 {
+            let album = format!("album-{i}");
+            let (year, genre) = if i < 120 {
+                (1971, "Rock")
+            } else {
+                (1992, "Jazz")
+            };
             std::sync::Arc::make_mut(&mut state.library.albums).push(Album {
-                rating_key: album.into(),
+                rating_key: album.clone(),
+                parent_rating_key: Some(format!("artist-{i}")),
                 year: Some(year),
                 genre: vec![GenreTag {
                     tag: genre.into(),
@@ -447,16 +510,21 @@ mod tests {
             for (disc, track) in [(2, 1), (1, 2), (1, 1)] {
                 std::sync::Arc::make_mut(&mut state.library.all_tracks).push(Track {
                     rating_key: format!("{album}-{disc}-{track}"),
-                    parent_rating_key: Some(album.into()),
+                    parent_rating_key: Some(album.clone()),
                     grandparent_rating_key: Some(format!("artist-{album}")),
                     parent_index: Some(disc),
                     index: Some(track),
                     year: Some(year),
-                    view_count: Some(if album == "a" { 0 } else { 20 }),
+                    view_count: Some(if year == 1971 { 0 } else { 20 }),
                     ..Default::default()
                 });
             }
         }
+        state.library.radio_availability = crate::services::radio::Availability::build(
+            &state.library.all_tracks,
+            &state.library.albums,
+        )
+        .into();
         state
     }
     fn select(state: &AppState, key: &str, refill: bool) -> Selection {
@@ -468,23 +536,23 @@ mod tests {
         .unwrap()
     }
     #[test]
-    fn random_album_is_complete_ordered_and_refill_chooses_another_album() {
+    fn random_album_refill_skips_every_previously_introduced_album() {
         let mut state = fixture();
         let first = select(&state, "randomAlbum", false);
-        assert!(first.related.is_none());
-        assert_eq!(
-            first
-                .tracks
-                .iter()
-                .map(|t| (t.parent_index.unwrap(), t.index.unwrap()))
-                .collect::<Vec<_>>(),
-            [(1, 1), (1, 2), (2, 1)]
-        );
-        let album = first.tracks[0].parent_rating_key.clone();
-        assert!(first.tracks.iter().all(|t| t.parent_rating_key == album));
-        state.radio.tracks = first.tracks;
+        state.radio.introduced_albums = first
+            .tracks
+            .iter()
+            .filter_map(|t| t.parent_rating_key.clone())
+            .collect();
+        assert_eq!(state.radio.introduced_albums.len(), 100);
         let second = select(&state, "randomAlbum", true);
-        assert!(second.tracks.iter().all(|t| t.parent_rating_key != album));
+        assert_eq!(second.tracks.len(), 100);
+        assert!(second.tracks.iter().all(|t| {
+            !state
+                .radio
+                .introduced_albums
+                .contains(t.parent_rating_key.as_ref().unwrap())
+        }));
     }
     #[test]
     fn metadata_stations_need_neither_network_nor_analysis() {
@@ -517,7 +585,7 @@ mod tests {
             select(&state, "style?id=Rock", false)
                 .tracks
                 .iter()
-                .all(|t| t.parent_rating_key.as_deref() == Some("a"))
+                .all(|t| t.year == Some(1971))
         );
     }
     #[test]

@@ -1,107 +1,112 @@
 //! Sidebar hierarchy and keyboard navigation share one visible-row ordering.
 use super::*;
 
-pub use crate::app::sidebar::{allows_disclosure, visible_indices as visible_rows};
+pub use crate::app::sidebar::{allows_disclosure, rail_indices as visible_rows};
+
+pub(super) fn icon(row: &crate::app::sidebar::SidebarRow) -> gpui_kit::component::Icon {
+    glyph(row)
+        .map(gpui_kit::component::Icon::new)
+        .unwrap_or_else(super::player_devices::sidebar_icon)
+}
+
+pub(super) fn glyph(row: &crate::app::sidebar::SidebarRow) -> Option<gpui_kit::assets::IconName> {
+    use crate::app::{sidebar::SidebarGroup, state::LibraryRoot};
+    use gpui_kit::assets::IconName as Glyph;
+
+    let glyph = if row.playlist_key.is_some() {
+        Glyph::ListMusic
+    } else if row.parent == Some(SidebarGroup::Radio) {
+        match row.label.as_str() {
+            "Play Random Albums" => Glyph::Shuffle,
+            "Random Artist Mix" => Glyph::Dices,
+            "Artist Mix" => Glyph::UsersRound,
+            "Library Mix" => Glyph::Library,
+            "Deep Cuts Mix" => Glyph::Pickaxe,
+            "Time Travel Mix" => Glyph::ClockArrowLeft,
+            "On This Day" => Glyph::CalendarDays,
+            "Mood Mix" => Glyph::Drama,
+            "Style / Genre Mix" => Glyph::Blend,
+            "Decade Mix" => Glyph::Hourglass,
+            "Sonic Mix" => Glyph::AudioWaveform,
+            "Stay Close Mix" => Glyph::Magnet,
+            _ => Glyph::Antenna,
+        }
+    } else if let Some(root) = row.library_root {
+        match root {
+            LibraryRoot::Artists => Glyph::MicVocal,
+            LibraryRoot::Albums => Glyph::Disc3,
+            LibraryRoot::Compilations => Glyph::Layers,
+            LibraryRoot::Singles => Glyph::Disc2,
+            LibraryRoot::Tracks => Glyph::Music2,
+            LibraryRoot::Radio => Glyph::Radio,
+            LibraryRoot::Downloads => Glyph::Download,
+            LibraryRoot::Journey => Glyph::Route,
+            LibraryRoot::DescribeMusic => Glyph::MessageSquareText,
+            LibraryRoot::Mp3Players => return None,
+        }
+    } else {
+        match row.label.as_str() {
+            "Albums" => Glyph::Album,
+            "Playlists" => Glyph::ListMusic,
+            "AI" => Glyph::Sparkles,
+            "Folders" => Glyph::Folder,
+            "Genres" => Glyph::Guitar,
+            "Artist Genres" => Glyph::Mic,
+            "Moods" => Glyph::Drama,
+            "Styles" => Glyph::Blend,
+            "Decades" => Glyph::Hourglass,
+            "Years" => Glyph::CalendarDays,
+            "Collections" => Glyph::Library,
+            "Countries" => Glyph::Globe,
+            "Labels" => Glyph::Tag,
+            "Formats" => Glyph::FileMusic,
+            "Studios" => Glyph::SlidersVertical,
+            "Random" => Glyph::Shuffle,
+            "Favourites" | "Favorite tracks" => Glyph::Heart,
+            "Favorite artists" => Glyph::ContactRound,
+            "Top Rated" => Glyph::Star,
+            "Recently Added" => Glyph::ListPlus,
+            "Recently Played" => Glyph::ClockArrowLeft,
+            "Most Played" => Glyph::ChartNoAxesColumnIncreasing,
+            "AI labels" => Glyph::Tags,
+            "Tempo" => Glyph::Timer,
+            "Energy" => Glyph::Zap,
+            "Musical key" => Glyph::Piano,
+            "Analyzed tracks" => Glyph::AudioLines,
+            "Search lyrics…" => Glyph::TextSearch,
+            _ => Glyph::Library,
+        }
+    };
+    Some(glyph)
+}
 
 pub fn open_command(state: &crate::app::AppState, index: usize) -> Option<Command> {
     let rows = super::catalog::sidebar(state);
     let row = rows.get(index)?.clone();
     let generation = state.library_generation;
-    Some(if row.header && !allows_disclosure(&rows, &row.label) {
-        Command::SidebarGroup {
-            generation,
-            title: row.label,
-        }
-    } else if row.header {
-        Command::ToggleSidebarSection {
-            generation,
-            title: row.label,
-        }
-    } else if let Some(root) = row.library_root {
-        Command::OpenLibraryRoot { generation, root }
-    } else if let Some(key) = row.playlist_key {
-        Command::OpenPlaylist {
-            generation,
-            key,
-            focus: PlaylistFocus::Content,
-        }
-    } else {
-        Command::GuardedActions {
-            generation,
-            target: None,
-            actions: row.actions,
-        }
-    })
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum PlaylistFocus {
-    Sidebar,
-    Content,
-}
-
-#[derive(Default)]
-pub struct PlaylistInspection(Option<PendingPlaylist>);
-struct PendingPlaylist {
-    generation: u64,
-    index: usize,
-    key: String,
-    until: std::time::Instant,
-}
-fn playlist_at_cursor(state: &crate::app::AppState, cursor: Option<usize>) -> Option<String> {
-    let index = cursor?;
-    if state.view != crate::app::View::Browse {
-        return None;
-    }
-    let rows = super::catalog::sidebar(state);
-    if !visible_rows(&rows, &state.desktop_collapsed_sections).contains(&index) {
-        return None;
-    }
-    rows.get(index)?.playlist_key.clone()
-}
-impl PlaylistInspection {
-    pub fn schedule(
-        &mut self,
-        state: &crate::app::AppState,
-        cursor: Option<usize>,
-        now: std::time::Instant,
-    ) {
-        self.0 = cursor.and_then(|index| {
-            playlist_at_cursor(state, Some(index)).map(|key| PendingPlaylist {
-                generation: state.library_generation,
-                index,
-                key,
-                until: now + super::navigation::PAUSE,
-            })
-        });
-    }
-    pub fn take(
-        &mut self,
-        state: &crate::app::AppState,
-        cursor: Option<usize>,
-        now: std::time::Instant,
-    ) -> Option<Command> {
-        let pending = self.0.as_ref()?;
-        if pending.generation != state.library_generation
-            || cursor != Some(pending.index)
-            || playlist_at_cursor(state, cursor).as_deref() != Some(pending.key.as_str())
-        {
-            self.0 = None;
-            return None;
-        }
-        if now < pending.until {
-            return None;
-        }
-        let pending = self.0.take()?;
-        Some(Command::OpenPlaylist {
-            generation: pending.generation,
-            key: pending.key,
-            focus: PlaylistFocus::Sidebar,
-        })
-    }
-}
-pub fn playlist_has_focus(state: &crate::app::AppState, cursor: Option<usize>, key: &str) -> bool {
-    playlist_at_cursor(state, cursor).as_deref() == Some(key)
+    Some(
+        if row.header && (!state.tui_sidebar_visible || !allows_disclosure(&rows, &row.label)) {
+            Command::SidebarGroup {
+                generation,
+                title: row.label,
+            }
+        } else if row.header {
+            Command::ToggleSidebarSection {
+                generation,
+                title: row.label,
+            }
+        } else if let Some(root) = row.library_root {
+            Command::OpenLibraryRoot { generation, root }
+        } else if let Some(key) = row.playlist_key {
+            Command::OpenPlaylist { generation, key }
+        } else {
+            Command::GuardedActions {
+                generation,
+                target: None,
+                actions: row.actions,
+            }
+        },
+    )
 }
 
 /// Retained rows from a different playlist do not count as an open destination.
@@ -113,7 +118,7 @@ pub fn playlist_is_open(state: &crate::app::AppState, key: &str) -> bool {
             .is_some_and(|row|matches!(row,crate::app::state::PlayAllRow::Playlist{rating_key,..} if rating_key==key)))
 }
 
-/// Arrow movement changes keyboard focus; playlist inspection is deferred.
+/// Arrow movement changes keyboard focus within visible destinations.
 pub fn navigate(
     state: &crate::app::AppState,
     cursor: &mut Option<usize>,
@@ -122,7 +127,11 @@ pub fn navigate(
 ) -> Option<Command> {
     let index = (*cursor)?;
     let rows = super::catalog::sidebar(state);
-    let visible = visible_rows(&rows, &state.desktop_collapsed_sections);
+    let visible = visible_rows(
+        &rows,
+        &state.desktop_collapsed_sections,
+        !state.tui_sidebar_visible,
+    );
     if row_delta != 0 {
         let position = visible.iter().position(|i| *i == index).unwrap_or(0);
         *cursor = visible
@@ -135,6 +144,7 @@ pub fn navigate(
     } else if column_delta > 0 {
         if rows.get(index).is_some_and(|r| {
             r.header
+                && state.tui_sidebar_visible
                 && allows_disclosure(&rows, &r.label)
                 && !state.desktop_collapsed_sections.contains(&r.label)
         }) {
@@ -144,17 +154,15 @@ pub fn navigate(
                 .and_then(|i| visible.get(i + 1))
                 .copied();
         } else {
-            return Some(Command::SidebarOpen {
-                generation: state.library_generation,
-                index,
-            });
+            *cursor = None;
         }
-    } else if let Some((header, row)) = rows
-        .iter()
-        .enumerate()
-        .take(index + 1)
-        .rev()
-        .find(|(_, r)| r.header && !matches!(r.label.as_str(), "Library" | "Browse"))
+    } else if state.tui_sidebar_visible
+        && let Some((header, row)) = rows
+            .iter()
+            .enumerate()
+            .take(index + 1)
+            .rev()
+            .find(|(_, r)| r.header && !matches!(r.label.as_str(), "Library" | "Browse"))
     {
         *cursor = Some(header);
         if !state.desktop_collapsed_sections.contains(&row.label) {
@@ -261,64 +269,6 @@ mod tests {
         assert!(!playlist_is_open(&state, "A"));
     }
     #[::core::prelude::v1::test]
-    fn sidebar_playlist_inspection_waits_for_the_latest_row_and_keeps_sidebar_focus() {
-        let (state, rows) = playlists();
-        assert_eq!(rows.len(), 2);
-        let now = std::time::Instant::now();
-        let mut inspection = PlaylistInspection::default();
-        let mut cursor = Some(rows[0]);
-        inspection.schedule(&state, cursor, now);
-        assert!(
-            inspection
-                .take(&state, cursor, now + super::super::navigation::PAUSE / 2)
-                .is_none()
-        );
-        assert!(navigate(&state, &mut cursor, 0, 1).is_none());
-        assert_eq!(cursor, Some(rows[1]));
-        inspection.schedule(&state, cursor, now + std::time::Duration::from_millis(100));
-        assert!(
-            inspection
-                .take(&state, cursor, now + super::super::navigation::PAUSE)
-                .is_none()
-        );
-        assert!(
-            matches!(inspection.take(&state, cursor, now + super::super::navigation::PAUSE + std::time::Duration::from_millis(100)), Some(Command::OpenPlaylist{key,focus:PlaylistFocus::Sidebar,..}) if key=="B")
-        );
-        assert_eq!(cursor, Some(rows[1]));
-        assert!(state.queue.tracks.is_empty());
-        assert!(
-            inspection
-                .take(&state, cursor, now + std::time::Duration::from_secs(1))
-                .is_none()
-        );
-        assert!(matches!(
-            open_command(&state, rows[1]),
-            Some(Command::OpenPlaylist {
-                focus: PlaylistFocus::Content,
-                ..
-            })
-        ));
-    }
-    #[::core::prelude::v1::test]
-    fn leaving_sidebar_changing_source_or_hiding_playlist_cancels_inspection() {
-        let (mut state, rows) = playlists();
-        let now = std::time::Instant::now();
-        let due = now + super::super::navigation::PAUSE;
-        let mut inspection = PlaylistInspection::default();
-        inspection.schedule(&state, Some(rows[0]), now);
-        assert!(inspection.take(&state, None, due).is_none());
-        inspection.schedule(&state, Some(rows[0]), now);
-        state.library_generation += 1;
-        assert!(inspection.take(&state, Some(rows[0]), due).is_none());
-        inspection.schedule(&state, Some(rows[0]), now);
-        state.desktop_collapsed_sections.push("Playlists".into());
-        assert!(inspection.take(&state, Some(rows[0]), due).is_none());
-        state.desktop_collapsed_sections.clear();
-        inspection.schedule(&state, Some(rows[0]), now);
-        std::sync::Arc::make_mut(&mut state.library.playlists).swap(0, 1);
-        assert!(inspection.take(&state, Some(rows[0]), due).is_none());
-    }
-    #[::core::prelude::v1::test]
     fn keyboard_sidebar_skips_collapsed_contents_and_opens_the_chosen_destination() {
         let mut state = AppState::new();
         let rows = super::super::catalog::sidebar(&state);
@@ -338,9 +288,8 @@ mod tests {
         assert!(navigate(&state, &mut cursor, 0, 1).is_none());
         assert_ne!(cursor, Some(artists));
         cursor = Some(artists);
-        assert!(
-            matches!(navigate(&state,&mut cursor,1,0),Some(Command::SidebarOpen{index,..}) if index==artists)
-        );
+        assert!(navigate(&state, &mut cursor, 1, 0).is_none());
+        assert_eq!(cursor, None);
         assert!(matches!(
             open_command(&state, artists),
             Some(Command::OpenLibraryRoot {
@@ -353,14 +302,14 @@ mod tests {
         let visible = visible_rows(
             &super::super::catalog::sidebar(&state),
             &state.desktop_collapsed_sections,
+            false,
         );
         assert!(visible.contains(&albums));
         assert!(!visible.contains(&all_albums));
         assert!(visible.contains(&artists));
         cursor = Some(albums);
-        assert!(
-            matches!(navigate(&state,&mut cursor,1,0),Some(Command::SidebarOpen{index,..}) if index==albums)
-        );
+        assert!(navigate(&state, &mut cursor, 1, 0).is_none());
+        assert_eq!(cursor, None);
         assert!(
             matches!(open_command(&state,albums),Some(Command::ToggleSidebarSection{title,..}) if title=="Albums")
         );

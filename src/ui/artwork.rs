@@ -14,6 +14,37 @@ use ratatui_image::{Resize, StatefulImage, picker::Picker, protocol::StatefulPro
 
 use crate::app::state::ArtworkMode;
 
+// Kitty uploads are emitted once per protocol. Compositing can discard the cell
+// carrying an upload even when later frames still reference its image ID.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+thread_local! {
+    static KITTY_UPLOADS: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
+
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+pub(crate) fn with_kitty_uploads<T>(draw: impl FnOnce() -> T) -> (T, Vec<u8>) {
+    KITTY_UPLOADS.with(|slot| {
+        slot.replace(Some(Vec::new()));
+        let result = draw();
+        (result, slot.take().unwrap_or_default())
+    })
+}
+
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+fn collect_kitty_upload(frame: &mut Frame, area: Rect) {
+    KITTY_UPLOADS.with(|slot| {
+        if let Some(uploads) = slot.borrow_mut().as_mut()
+            && let Some(cell) = frame.buffer_mut().cell_mut((area.x, area.y))
+            && cell.symbol().starts_with("\x1b_G")
+            && let Some(end) = cell.symbol().find("\x1b[s")
+        {
+            uploads.extend_from_slice(&cell.symbol().as_bytes()[..end]);
+            let placement = cell.symbol()[end..].to_owned();
+            cell.set_symbol(&placement);
+        }
+    });
+}
+
 /// Placeholder identity matching the graphical frontend's artwork icons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Placeholder {
@@ -54,7 +85,28 @@ pub fn render_placeholder(frame: &mut Frame, area: Rect, kind: Placeholder) -> b
         cache.insert(key.clone(), data.clone());
         Some(data)
     });
-    data.is_some_and(|data| render_grid_image(frame, area, &key, &data))
+    if data.is_some_and(|data| match kind {
+        Placeholder::Artist => render_grid_portrait(frame, area, &key, &data),
+        _ => render_grid_image(frame, area, &key, &data),
+    }) {
+        return true;
+    }
+    if area.is_empty() {
+        return false;
+    }
+    let symbol = match kind {
+        Placeholder::Track => "♪",
+        Placeholder::Artist => "♙",
+        Placeholder::Album => "◉",
+    };
+    let line = Rect::new(area.x, area.y + area.height / 2, area.width, 1);
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new(symbol)
+            .centered()
+            .style(Style::default().fg(colors.fg_muted)),
+        line,
+    );
+    true
 }
 
 fn placeholder_png(
@@ -254,6 +306,8 @@ impl ArtworkRenderer {
         if let Some(ref mut protocol) = self.protocol {
             let image = StatefulImage::new().resize(Resize::Scale(None));
             frame.render_stateful_widget(image, area, protocol);
+            #[cfg(all(feature = "desktop", target_os = "macos"))]
+            collect_kitty_upload(frame, area);
         }
     }
 
@@ -309,7 +363,7 @@ impl ArtworkRenderer {
 struct BrailleCell {
     symbol: char,
     foreground: Color,
-    background: Color,
+    background: Option<Color>,
 }
 
 struct BrailleRender {
@@ -367,10 +421,14 @@ fn build_braille_render(
 
     // Build luminance histogram for adaptive thresholding
     let mut histogram = [0u32; 256];
-    let total_pixels = pixel_w * pixel_h;
+    let mut total_pixels = 0;
     for y in 0..pixel_h {
         for x in 0..pixel_w {
             let pixel = resized.get_pixel(x, y);
+            if pixel[3] < 128 {
+                continue;
+            }
+            total_pixels += 1;
             let lum =
                 (pixel[0] as u32 * 299 + pixel[1] as u32 * 587 + pixel[2] as u32 * 114) / 1000;
             histogram[lum.min(255) as usize] += 1;
@@ -418,17 +476,27 @@ fn build_braille_render(
             let mut bg_b: u32 = 0;
             let mut dark_count: u32 = 0;
 
+            let has_transparency = (0..2).any(|dx| {
+                (0..4).any(|dy| {
+                    px + dx >= pixel_w
+                        || py + dy >= pixel_h
+                        || resized.get_pixel(px + dx, py + dy)[3] < 128
+                })
+            });
             for dx in 0..2u32 {
                 for dy in 0..4u32 {
                     let x = px + dx;
                     let y = py + dy;
                     if x < pixel_w && y < pixel_h {
                         let pixel = resized.get_pixel(x, y);
+                        if pixel[3] < 128 {
+                            continue;
+                        }
                         let r = pixel[0] as u32;
                         let g = pixel[1] as u32;
                         let b = pixel[2] as u32;
                         let lum = (r * 299 + g * 587 + b * 114) / 1000;
-                        if lum >= threshold {
+                        if has_transparency || lum >= threshold {
                             pattern |= 1 << bit_map[dx as usize][dy as usize];
                             fg_r += r;
                             fg_g += g;
@@ -467,7 +535,7 @@ fn build_braille_render(
             cells.push(BrailleCell {
                 symbol: ch,
                 foreground: fg_color,
-                background: bg_color,
+                background: (!has_transparency).then_some(bg_color),
             });
         }
     }
@@ -491,10 +559,14 @@ fn paint_braille_render(frame: &mut Frame, area: Rect, rendered: &BrailleRender)
         for column in 0..rendered.width {
             let index = usize::from(row) * usize::from(rendered.width) + usize::from(column);
             let cell = rendered.cells[index];
-            buffer[(origin_x + column, origin_y + row)]
-                .set_char(cell.symbol)
-                .set_fg(cell.foreground)
-                .set_bg(cell.background);
+            if cell.background.is_none() && cell.symbol == '⠀' {
+                continue;
+            }
+            let target = &mut buffer[(origin_x + column, origin_y + row)];
+            target.set_char(cell.symbol).set_fg(cell.foreground);
+            if let Some(background) = cell.background {
+                target.set_bg(background);
+            }
         }
     }
 }
@@ -596,7 +668,7 @@ impl<K: Clone + Eq + Hash, V> BoundedCache<K, V> {
 thread_local! {
     static PLACEHOLDERS: RefCell<BoundedCache<String, Arc<Vec<u8>>>> = RefCell::new(BoundedCache::new(12));
     static GRID_PICKER: RefCell<Option<Picker>> = const { RefCell::new(None) };
-    static GRID_PROTOCOLS: RefCell<BoundedCache<(u64, Rect), StatefulProtocol>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
+    static GRID_PROTOCOLS: RefCell<BoundedCache<(u64, Rect, Option<[u8; 3]>), StatefulProtocol>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
     static DECODED_IMAGES: RefCell<BoundedCache<u64, Arc<DynamicImage>>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
     static BRAILLE_RENDERS: RefCell<BoundedCache<BrailleRenderKey, BrailleRender>> = RefCell::new(BoundedCache::new(MAX_RENDERED_ARTWORK_ENTRIES));
     static GRID_ARTWORK_MODE: RefCell<ArtworkMode> = const { RefCell::new(ArtworkMode::Auto) };
@@ -615,15 +687,69 @@ pub fn init_grid_renderer(picker: Picker) {
 /// Decoded pixels are shared; each on-screen placement owns its resize protocol.
 /// Returns true if an image was rendered.
 pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) -> bool {
-    let mode = GRID_ARTWORK_MODE.with(|m| *m.borrow());
+    let id = artwork_id(key, data);
+    render_grid_pixels(frame, area, id, None, || decoded_image(id, data))
+}
 
-    if mode == ArtworkMode::Braille {
-        return render_grid_braille(frame, area, key, data);
+pub fn render_grid_portrait(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) -> bool {
+    let id = artwork_id(key, data) ^ 0xc4fe_99d7_450c_1e11;
+    let background = GRID_PICKER.with(|picker| {
+        (picker.borrow().as_ref()?.protocol_type()
+            == ratatui_image::picker::ProtocolType::Halfblocks)
+            .then(|| {
+                frame
+                    .buffer_mut()
+                    .cell((area.x, area.y))
+                    .map(|cell| cell.bg)
+            })
+            .flatten()
+    });
+    let background = match background {
+        Some(Color::Rgb(r, g, b)) => Some([r, g, b]),
+        Some(_) => match crate::ui::theme::theme().colors.bg_primary {
+            Color::Rgb(r, g, b) => Some([r, g, b]),
+            _ => None,
+        },
+        None => None,
+    };
+    render_grid_pixels(frame, area, id, background, || {
+        if let Some(img) = DECODED_IMAGES.with(|cache| cache.borrow_mut().get(&id).cloned()) {
+            return Some(img);
+        }
+        let image = image::load_from_memory(data).ok()?;
+        let size = image.width().min(image.height()).min(256);
+        let mut pixels = image
+            .resize_to_fill(size, size, image::imageops::FilterType::Triangle)
+            .to_rgba8();
+        let radius = f64::from(size) / 2.;
+        for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+            if (f64::from(x) + 0.5 - radius).powi(2) + (f64::from(y) + 0.5 - radius).powi(2)
+                > radius * radius
+            {
+                *pixel = image::Rgba([0, 0, 0, 0]);
+            }
+        }
+        let img = Arc::new(DynamicImage::ImageRgba8(pixels));
+        DECODED_IMAGES.with(|cache| cache.borrow_mut().insert(id, img.clone()));
+        Some(img)
+    })
+}
+
+fn render_grid_pixels(
+    frame: &mut Frame,
+    area: Rect,
+    image_id: u64,
+    background: Option<[u8; 3]>,
+    pixels: impl FnOnce() -> Option<Arc<DynamicImage>>,
+) -> bool {
+    if GRID_ARTWORK_MODE.with(|m| *m.borrow()) == ArtworkMode::Braille {
+        let Some(image) = pixels() else {
+            return false;
+        };
+        render_braille_image(frame, &image, area, image_id);
+        return true;
     }
-
-    // Protocol-based rendering (Auto/Halfblocks)
-    let image_id = artwork_id(key, data);
-    let placement = (image_id, area);
+    let placement = (image_id, area, background);
     let has_protocol = GRID_PROTOCOLS.with(|protos| protos.borrow().contains_key(&placement));
 
     if !has_protocol {
@@ -632,10 +758,16 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
             let Some(picker) = picker_ref.as_mut() else {
                 return false;
             };
-            let Some(img) = decoded_image(image_id, data) else {
+            let Some(img) = pixels() else {
                 return false;
             };
-            let protocol = picker.new_resize_protocol((*img).clone());
+            let protocol = if let Some([r, g, b]) = background {
+                let mut picker = picker.clone();
+                picker.set_background_color([r, g, b, 255]);
+                picker.new_resize_protocol((*img).clone())
+            } else {
+                picker.new_resize_protocol((*img).clone())
+            };
             GRID_PROTOCOLS.with(|protos| {
                 protos.borrow_mut().insert(placement, protocol);
             });
@@ -652,6 +784,8 @@ pub fn render_grid_image(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) 
             // Scale thumbnails to fit the render area.
             let image = StatefulImage::new().resize(Resize::Scale(None));
             frame.render_stateful_widget(image, area, protocol);
+            #[cfg(all(feature = "desktop", target_os = "macos"))]
+            collect_kitty_upload(frame, area);
             true
         } else {
             false
@@ -666,16 +800,6 @@ fn decoded_image(image_id: u64, data: &[u8]) -> Option<Arc<DynamicImage>> {
     let image = Arc::new(image::load_from_memory(data).ok()?);
     DECODED_IMAGES.with(|images| images.borrow_mut().insert(image_id, image.clone()));
     Some(image)
-}
-
-/// Render a grid album cover using braille characters.
-fn render_grid_braille(frame: &mut Frame, area: Rect, key: &str, data: &[u8]) -> bool {
-    let image_id = artwork_id(key, data);
-    let Some(image) = decoded_image(image_id, data) else {
-        return false;
-    };
-    render_braille_image(frame, &image, area, image_id);
-    true
 }
 
 /// Recreate terminal placements while retaining decoded images and character artwork.
@@ -740,7 +864,7 @@ fn character_render(data: &[u8], mode: ArtworkMode) -> Option<(u16, u16, Vec<Bra
                     BrailleCell {
                         symbol: '▀',
                         foreground: Color::Rgb(top[0], top[1], top[2]),
-                        background: Color::Rgb(bottom[0], bottom[1], bottom[2]),
+                        background: Some(Color::Rgb(bottom[0], bottom[1], bottom[2])),
                     }
                 })
                 .collect();
@@ -768,7 +892,7 @@ pub(crate) fn character_cells(
             let Color::Rgb(r, g, b) = cell.foreground else {
                 return None;
             };
-            let Color::Rgb(br, bg, bb) = cell.background else {
+            let Color::Rgb(br, bg, bb) = cell.background.unwrap_or(Color::Rgb(0, 0, 0)) else {
                 return None;
             };
             Some((cell.symbol, [r, g, b], [br, bg, bb]))
@@ -793,7 +917,7 @@ pub(crate) fn character_svg(data: &[u8], mode: ArtworkMode) -> Option<Vec<u8>> {
     for (index, cell) in cells.iter().enumerate() {
         let x = index % usize::from(width) * 10;
         let y = index / usize::from(width) * 20;
-        let Color::Rgb(br, bg, bb) = cell.background else {
+        let Color::Rgb(br, bg, bb) = cell.background.unwrap_or(Color::Rgb(0, 0, 0)) else {
             return None;
         };
         let Color::Rgb(fr, fg, fb) = cell.foreground else {
@@ -870,6 +994,36 @@ mod cache_tests {
             }
         }
     }
+    #[test]
+    #[allow(deprecated)]
+    fn terminal_character_portraits_keep_corners_in_the_tile_background() {
+        let picker = Picker::from_fontsize((8, 16));
+        init_grid_renderer(picker);
+        let image =
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(64, 64, image::Rgb([230; 3])));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let background = Color::Rgb(23, 56, 89);
+        for mode in [ArtworkMode::Halfblocks, ArtworkMode::Braille] {
+            set_grid_artwork_mode(mode);
+            let area = Rect::new(0, 0, 16, 8);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(16, 8)).unwrap();
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        ratatui::widgets::Block::default().style(Style::default().bg(background)),
+                        area,
+                    );
+                    assert!(render_grid_portrait(frame, area, "artist", png.get_ref()));
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(0, 0)].bg, background, "{mode:?}");
+            assert_ne!(buffer[(8, 4)].fg, background, "{mode:?}");
+        }
+    }
+
     #[test]
     fn artwork_presentation_changes_reuse_decoded_pixels_and_character_renders() {
         let image = DynamicImage::new_rgb8(128, 128);

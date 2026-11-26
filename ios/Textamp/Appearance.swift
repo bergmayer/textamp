@@ -1,6 +1,37 @@
 import SwiftUI
 import UIKit
 
+extension AppTheme {
+  var isBrushedAluminum: Bool { name == "brushed-aluminum" }
+
+  // The mobile canvas uses a lighter finish so small labels remain legible.
+  private static let aluminumTile: UIImage? = {
+    guard let stock = UIImage(named: "BrushedAluminum") else { return nil }
+    let size = CGSize(width: stock.size.width / 2, height: stock.size.height / 2)
+    let bounds = CGRect(origin: .zero, size: size)
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 2
+    format.opaque = true
+    return UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+      UIColor(white: 0.94, alpha: 1).setFill()
+      ctx.fill(bounds)
+      stock.draw(in: bounds, blendMode: .normal, alpha: 0.62)
+    }
+  }()
+
+  var baseFill: AnyShapeStyle {
+    if isBrushedAluminum, let tile = Self.aluminumTile {
+      return AnyShapeStyle(ImagePaint(image: Image(uiImage: tile)))
+    }
+    return AnyShapeStyle(bg)
+  }
+
+  var tableBackground: UIColor {
+    if isBrushedAluminum, let tile = Self.aluminumTile { return UIColor(patternImage: tile) }
+    return UIColor(bg)
+  }
+}
+
 /// Keep UIKit-owned navigation chrome in the same palette as the SwiftUI content.
 struct WindowAppearance: UIViewRepresentable {
   let theme: AppTheme

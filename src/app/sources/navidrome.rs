@@ -1,4 +1,5 @@
 //! Navidrome source lifecycle. Catalog data has one owner: AppState.library.
+pub(crate) mod album_artists;
 pub mod album_notes;
 use super::*;
 use crate::navidrome::{Client, Source};
@@ -95,13 +96,9 @@ impl Session {
                 "Album reports tracks but the server returned none"
             );
         }
-        album.song.sort_by_key(|song| {
-            (
-                song.disc_number.unwrap_or(1),
-                song.track.unwrap_or(0),
-                song.title.clone(),
-            )
-        });
+        album
+            .song
+            .sort_by(|a, b| a.album_order().cmp(&b.album_order()));
         let tracks: Vec<_> = album
             .song
             .into_iter()
@@ -130,6 +127,10 @@ impl Session {
 
 #[derive(Debug, Clone)]
 pub enum NavAction {
+    AlbumArtists {
+        artist: String,
+        document: crate::services::biography::Biography,
+    },
     AlbumNotes {
         key: String,
         info: album_notes::AlbumInfo,
@@ -575,48 +576,31 @@ pub async fn dispatch(
                 .map(|s| s.id.clone());
             let task = crate::app::tasks::spawn(async move {
                 let result: anyhow::Result<_> = async {
-                    let password = if password.is_empty() {
-                        if let Some(id) = saved_id {
-                            crate::app::tasks::spawn_blocking(move || {
-                                crate::library::credentials::load_source("navidrome", &id)
-                            })
-                            .await??
-                            .map(|value| SecretString::from(value.as_str()))
-                            .unwrap_or_default()
+                    let music = async {
+                        let password = if password.is_empty() {
+                            if let Some(id) = saved_id {
+                                crate::app::tasks::spawn_blocking(move || {
+                                    crate::library::credentials::load_source("navidrome", &id)
+                                })
+                                .await??
+                                .map(|value| SecretString::from(value.as_str()))
+                                .unwrap_or_default()
+                            } else {
+                                password
+                            }
                         } else {
                             password
-                        }
-                    } else {
-                        password
-                    };
-                    let music = connect(source, password.clone(), None);
-                    let analysis = async {
-                        let Some(mut setup) = analysis else {
-                            return Ok::<_, anyhow::Error>(None);
                         };
-                        setup.connection.url =
-                            crate::util::server_url::resolve(&setup.connection.url, "api/servers")
-                                .await?;
-                        if setup.password.is_empty() {
-                            let key = setup
-                                .library_key
-                                .clone()
-                                .ok_or_else(|| anyhow::anyhow!("Enter an AudioMuse password"))?;
-                            setup.password = crate::app::tasks::spawn_blocking(move || {
-                                crate::library::credentials::load_source("audiomuse", &key)
-                            })
-                            .await??
-                            .ok_or_else(|| anyhow::anyhow!("Enter an AudioMuse password"))?
-                            .as_str()
-                            .into();
-                        }
-                        crate::audiomuse::Client::connect(&setup.connection, &setup.password)
-                            .await?
-                            .verify()
-                            .await?;
-                        Ok(Some(setup))
+                        let session = connect(source, password.clone(), None).await?;
+                        Ok::<_, anyhow::Error>((session, password))
                     };
-                    let (session, analysis) = tokio::try_join!(music, analysis)?;
+                    let analysis = async {
+                        match analysis {
+                            Some(setup) => super::audiomuse::verify_setup(setup).await.map(Some),
+                            None => Ok(None),
+                        }
+                    };
+                    let ((session, password), analysis) = tokio::try_join!(music, analysis)?;
                     Ok((session, password, analysis))
                 }
                 .await;
@@ -1092,6 +1076,32 @@ pub async fn dispatch(
         } => {
             if state.search.query == query && state.sources.list_id == catalog_id {
                 state.search.results = Some(results);
+            }
+        }
+        NavAction::AlbumArtists {
+            artist,
+            mut document,
+        } => {
+            album_artists::filter_recommendations(&state.library, &mut document);
+            for item in document
+                .related_artists
+                .iter_mut()
+                .filter(|a| a.thumb.is_none())
+            {
+                item.thumb = state
+                    .library
+                    .artists
+                    .iter()
+                    .chain(&state.library.track_artists)
+                    .find(|a| a.rating_key == item.rating_key)
+                    .and_then(|a| a.thumb.clone());
+            }
+            if let Some(related) = state.sources.album_artists.as_mut()
+                && related.generation == state.library_generation
+                && related.artist == artist
+            {
+                state.artist_bios.insert(&artist, &document);
+                related.document = Some(document);
             }
         }
         NavAction::AlbumNotes { key, info } => {

@@ -179,7 +179,7 @@ fn actions(
             &control.label,
             Binding::Actions(control.actions.as_ref().clone()),
         );
-        primary_button["mark"] = json!(control.mark);
+        primary_button["mark"] = json!(control.search_provider.map(|provider| provider.mark()));
         primary_button["symbol"] = json!(control.actions.iter().find_map(|action| match action {
             Action::Queue(
                 QueueAction::PlayTrack(_)
@@ -255,31 +255,81 @@ fn jump(
 }
 fn details(state: &AppState, adapter: &mut Adapter, assets: &mut Assets) -> Option<Value> {
     let doc = app::details::project(state)?;
-    let kind = match doc.kind {
-        app::details::Kind::Artist => "artist",
-        app::details::Kind::Album => "album",
-        app::details::Kind::Track => "track",
-    };
     let key = state
         .browse_nav()
         .and_then(|nav| nav.focused())
         .and_then(BrowseColumn::detail_art_key)
         .or_else(|| {
-            doc.track.as_ref().map(|track| {
-                track
-                    .parent_rating_key
-                    .as_deref()
-                    .unwrap_or(&track.rating_key)
-            })
+            doc.track
+                .as_ref()
+                .map(|t| t.parent_rating_key.as_deref().unwrap_or(&t.rating_key))
         })
-        .unwrap_or("");
-    let identity = format!(
-        "details:{kind}:{}",
-        doc.track
-            .as_ref()
-            .map(|track| track.rating_key.as_str())
-            .unwrap_or(key)
-    );
+        .unwrap_or("")
+        .to_owned();
+    Some(detail_json(state, adapter, assets, doc, &key))
+}
+
+fn related_artist_buttons(
+    state: &AppState,
+    adapter: &mut Adapter,
+    assets: &mut Assets,
+    artists: &[crate::library::models::Artist],
+) -> Vec<Value> {
+    artists
+        .iter()
+        .map(|artist| {
+            let track = crate::library::models::Track {
+                grandparent_rating_key: Some(artist.rating_key.clone()),
+                grandparent_title: Some(artist.title.clone()),
+                ..Default::default()
+            };
+            let mut item = button(
+                state,
+                adapter,
+                &format!("related:{}", artist.rating_key),
+                &artist.title,
+                jump(track, app::library_details::Destination::Artist),
+            );
+            item["artwork"] = json!(assets.artwork(state, &artist.rating_key, "artist"));
+            item
+        })
+        .collect()
+}
+
+fn detail_json(
+    state: &AppState,
+    adapter: &mut Adapter,
+    assets: &mut Assets,
+    doc: app::details::Document,
+    key: &str,
+) -> Value {
+    let kind = match doc.kind {
+        app::details::Kind::Artist => "artist",
+        app::details::Kind::Album => "album",
+        app::details::Kind::Track => "track",
+    };
+    let identity = if kind == "album" {
+        format!("details:album:{key}")
+    } else {
+        format!(
+            "details:{kind}:{}",
+            doc.track
+                .as_ref()
+                .map(|track| track.rating_key.as_str())
+                .unwrap_or(key)
+        )
+    };
+    let bio = doc.artist_bio.map(|control| {
+        let mut command = button(
+            state,
+            adapter,
+            &format!("{identity}:artist-bio"),
+            &control.label,
+            Binding::Actions(control.actions.as_ref().clone()),
+        );
+        command["mark"] = json!(control.search_provider.map(|provider| provider.name()));
+        command
+    });
     let mut links = vec![];
     let mut album_artist = None;
     if let Some(track) = doc.track.as_ref() {
@@ -313,25 +363,12 @@ fn details(state: &AppState, adapter: &mut Adapter, assets: &mut Assets) -> Opti
             }
         }
     }
-    let related = doc
-        .related_artists
-        .unwrap_or_default()
-        .into_iter()
-        .map(|artist| {
-            let track = crate::library::models::Track {
-                grandparent_rating_key: Some(artist.rating_key.clone()),
-                grandparent_title: Some(artist.title.clone()),
-                ..Default::default()
-            };
-            button(
-                state,
-                adapter,
-                &format!("related:{}", artist.rating_key),
-                &artist.title,
-                jump(track, app::library_details::Destination::Artist),
-            )
-        })
-        .collect::<Vec<_>>();
+    let related = related_artist_buttons(
+        state,
+        adapter,
+        assets,
+        doc.related_artists.as_deref().unwrap_or_default(),
+    );
     let similar = doc
         .similar
         .as_ref()
@@ -340,13 +377,20 @@ fn details(state: &AppState, adapter: &mut Adapter, assets: &mut Assets) -> Opti
                 .tracks
                 .iter()
                 .map(|track| {
-                    button(
+                    let mut item = button(
                         state,
                         adapter,
-                        &format!("similar:{}", track.rating_key),
+                        &format!("{identity}:similar:{}", track.rating_key),
                         &format!(
                             "{} — {}",
-                            track.artist_name(),
+                            if similar.albums {
+                                track
+                                    .grandparent_title
+                                    .as_deref()
+                                    .unwrap_or_else(|| track.artist_name())
+                            } else {
+                                track.artist_name()
+                            },
                             if similar.albums {
                                 track.album_name()
                             } else {
@@ -361,18 +405,24 @@ fn details(state: &AppState, adapter: &mut Adapter, assets: &mut Assets) -> Opti
                                 app::library_details::Destination::Track
                             },
                         ),
-                    )
+                    );
+                    if similar.albums
+                        && let Some(key) = &track.parent_rating_key
+                    {
+                        item["artwork"] = json!(assets.artwork(state, key, "album"));
+                        item["subtitle"] = json!(track.album_name());
+                        item["description"] = json!(track.artist_name());
+                    }
+                    item
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    Some(
-        json!({"id":identity,"title":doc.title,"kind":kind,"subtitle":doc.subtitle,"rows":doc.rows,"text":doc.text,
+    json!({"id":identity,"title":doc.title,"kind":kind,"subtitle":doc.subtitle,"rows":doc.rows,"text":doc.text,
         "review":doc.album_info.as_ref().map(|info| &info.review),"albumURL":doc.album_info.as_ref().and_then(|info|info.display_link().map(|url|url.as_str())),
-        "loading":doc.loading,"artwork":assets.artwork(state,key,kind),"actions":actions(state,adapter,&identity,doc.controls),
+        "artistBio":bio,"lyrics":doc.lyrics,"loading":doc.loading,"artwork":if kind == "track" { doc.track.as_ref().filter(|_|doc.track_artwork).map(|t|assets.artwork(state,&t.rating_key,kind)) } else {Some(assets.artwork(state,key,kind))},"actions":actions(state,adapter,&identity,doc.controls),
         "albumArtist":album_artist,"links":links,"related":related,"similar":similar,"relatedTitle":doc.kind.related_label(),
-        "message":doc.similar.map(|value|value.message).unwrap_or_default()}),
-    )
+        "message":doc.similar.map(|value|value.message).unwrap_or_default()})
 }
 
 fn view_options(state: &AppState, adapter: &mut Adapter, popup: &SortPopupState) -> Vec<Value> {
@@ -382,40 +432,78 @@ fn view_options(state: &AppState, adapter: &mut Adapter, popup: &SortPopupState)
     }).collect()
 }
 
+fn artist_web_search(state: &AppState, adapter: &mut Adapter, owner: &str, name: &str) -> Value {
+    let provider = state.web_search_provider;
+    let mut action = button(
+        state,
+        adapter,
+        owner,
+        provider.search_label(),
+        Binding::Actions(vec![
+            SystemAction::OpenBrowser(provider.artist_url(name)).into(),
+        ]),
+    );
+    action["mark"] = json!(provider.name());
+    action
+}
+
 fn dialog(state: &AppState, adapter: &mut Adapter) -> Option<Value> {
     let mut choices = vec![];
     let mut actions = vec![];
+    let mut search = None;
     let mut query = None;
+    let mut selected = None;
     let (title, text, loading) = if let Some(popup) = state.popups.sort() {
         choices = view_options(state, adapter, popup);
         ("View Options".into(), popup.column_title.clone(), false)
     } else if let Some(picker) = state.popups.artist_radio_picker() {
         query = Some(picker.query.clone());
-        choices = picker
-            .filtered_artists
-            .iter()
-            .map(|artist| {
-                let mut choice = button(
+        let artist_button =
+            |adapter: &mut Adapter, artist: &crate::library::models::Artist, select| {
+                button(
                     state,
                     adapter,
-                    &format!("artist-radio:{}", artist.rating_key),
+                    &format!("artist-radio:{select}:{}", artist.rating_key),
                     &artist.title,
-                    Binding::ArtistRadio(artist.rating_key.clone()),
-                );
-                choice["checked"] = json!(
-                    picker
+                    Binding::ArtistRadio {
+                        key: artist.rating_key.clone(),
+                        select,
+                    },
+                )
+            };
+        selected = Some(
+            picker
+                .selected_artists
+                .iter()
+                .map(|artist| artist_button(adapter, artist, false))
+                .collect::<Vec<_>>(),
+        );
+        if !picker.query.trim().is_empty() {
+            choices = picker
+                .filtered_artists
+                .iter()
+                .filter(|artist| {
+                    !picker
                         .selected_artists
                         .iter()
-                        .any(|selected| selected.rating_key == artist.rating_key)
-                );
-                choice
-            })
-            .collect();
+                        .any(|chosen| chosen.rating_key == artist.rating_key)
+                })
+                .map(|artist| {
+                    let mut choice = artist_button(adapter, artist, true);
+                    if picker.selected_artists.len()
+                        >= app::state::ArtistRadioPickerState::MAX_SELECTED
+                    {
+                        choice["disabled"] = json!("Choose up to 12 artists");
+                    }
+                    choice
+                })
+                .collect();
+        }
         let mut play = button(
             state,
             adapter,
             "artist-radio:play",
-            "Play Station",
+            "Play Mix",
             Binding::Actions(vec![SearchAction::ArtistRadioPickerLaunch.into()]),
         );
         play["disabled"] = json!(
@@ -427,6 +515,21 @@ fn dialog(state: &AppState, adapter: &mut Adapter) -> Option<Value> {
         actions.push(play);
         ("Artist Mix".into(), String::new(), false)
     } else if let Some(bio) = state.popups.artist_bio() {
+        search = Some(artist_web_search(
+            state,
+            adapter,
+            "bio-search",
+            &bio.artist_name,
+        ));
+        if bio.document.source_url.is_some() {
+            actions.push(button(
+                state,
+                adapter,
+                "bio-source",
+                "Open Source",
+                Binding::Actions(vec![app::action::SearchAction::OpenBiographySource.into()]),
+            ));
+        }
         (
             bio.artist_name.clone(),
             bio.document.text.clone(),
@@ -438,7 +541,7 @@ fn dialog(state: &AppState, adapter: &mut Adapter) -> Option<Value> {
         return None;
     };
     Some(
-        json!({"title":title,"text":text,"loading":loading,"choices":choices,"actions":actions,"query":query}),
+        json!({"selected":selected,"search":search,"title":title,"text":text,"loading":loading,"choices":choices,"actions":actions,"query":query}),
     )
 }
 
@@ -462,6 +565,26 @@ pub(super) fn library_loading(state: &AppState) -> bool {
 pub(super) fn model(state: &AppState, adapter: &mut Adapter, assets: &mut Assets) -> Value {
     adapter.begin_projection();
     let opening = library_loading(state);
+    let library_stations = state
+        .station_nav
+        .columns
+        .first()
+        .filter(|_| !opening)
+        .into_iter()
+        .flat_map(|root| root.stations())
+        .map(|station| {
+            let command = crate::app::radio_navigation::shortcut_command(station);
+            let mut item = button(
+                state,
+                adapter,
+                &format!("library-radio:{}", station.key),
+                &station.title,
+                Binding::Palette(command),
+            );
+            item["value"] = json!(station.identifier.as_deref().unwrap_or(&station.key));
+            item
+        })
+        .collect::<Vec<_>>();
     let sidebar = if opening {
         Vec::new()
     } else {
@@ -507,7 +630,8 @@ pub(super) fn model(state: &AppState, adapter: &mut Adapter, assets: &mut Assets
         let album_key = match &column.play_all_row { Some(PlayAllRow::Album { rating_key, .. }) => Some(rating_key.as_str()), _ => None };
         let more = column.lazy.as_ref().is_some_and(|lazy|lazy.total.is_none_or(|total|column.tracks.len() < total as usize));
         let sections = if count > ALPHABET_INDEX_THRESHOLD { alphabet_sections((0..count).map(|p| &column.items[row_index(p)])) } else { vec![] };
-        let artwork_start = column.artwork_visible.then(||(0..count).position(|p| matches!(column.items[row_index(p)],BrowseItem::Album{..}))).flatten();
+        let grid = app::view_options::album_grid(state,index);
+        let grid_start = grid.then(||(0..count).position(|p| matches!(column.items.get(row_index(p)),Some(BrowseItem::Album{..})))).flatten();
         let rows=range.clone().enumerate().filter_map(|(offset,p)| {
             let i = row_index(p);
             let item=column.items.get(i)?;
@@ -522,8 +646,12 @@ pub(super) fn model(state: &AppState, adapter: &mut Adapter, assets: &mut Assets
             let cancel = if pending.is_some() {download.clone()} else {None};
             let mut context = if cancel.is_some() {vec![]} else {row_context(state,adapter,&owner,column,i,item)};
             if let Some(download) = download {context.retain(|entry|entry["menuGroup"] != "Downloads");context.insert(0,download);}
-            Some(json!({"pending":pending,"cancel":cancel,"id":format!("{i}:{}",item.key()),"key":item.key(),"index":i,"position":range.start+offset,"title":item.title(),"subtitle":subtitle,"kind":kind,"year":year,"context":context,
-                "artwork": if column.artwork_visible && (kind=="album" || kind=="artist") {Some(assets.artwork(state,item.key(),kind))} else if column.artwork_visible && kind == "track" && album_key.is_none() {
+            let balanced_caption = if kind == "album" {
+                let caption = app::view_options::album_caption(item.title(), year);
+                app::view_options::caption_lines(&caption).map(|(a,b)| format!("{a}\n{b}"))
+            } else { None };
+            Some(json!({"balancedCaption":balanced_caption,"pending":pending,"cancel":cancel,"id":format!("{i}:{}",item.key()),"key":item.key(),"index":i,"position":range.start+offset,"title":item.title(),"subtitle":subtitle,"kind":kind,"year":year,"context":context,
+                "artwork": if (grid || column.artwork_visible) && (kind=="album" || kind=="artist") {Some(assets.artwork(state,item.key(),kind))} else if column.artwork_visible && kind == "track" && album_key.is_none() {
                     column.tracks.get(i).and_then(|track| track.parent_rating_key.as_deref()).map(|key| assets.artwork(state,key,"album"))
                 } else {None},"batchSelected":column.selected_set.contains(&i),"selected":if column.selected_set.is_empty(){i==column.selected_index}else{column.selected_set.contains(&i)}}))
         }).collect::<Vec<_>>();
@@ -538,14 +666,30 @@ pub(super) fn model(state: &AppState, adapter: &mut Adapter, assets: &mut Assets
             save["symbol"] = json!("square.and.arrow.down");
             playback.push(save);
         }
-        let title = match &column.play_all_row {
-            Some(PlayAllRow::Album { title, .. } | PlayAllRow::Playlist { title, .. }) => title.as_str(),
-            _ => index.checked_sub(1).and_then(|parent| nav.columns[parent].selected_item()).filter(|item|matches!(item,BrowseItem::Artist{..})).map(BrowseItem::title).unwrap_or(&column.title),
+        let parent_item = index.checked_sub(1).and_then(|parent| nav.columns[parent].selected_item());
+        let (title, named_destination) = match &column.play_all_row {
+            Some(PlayAllRow::Album { title, .. } | PlayAllRow::Playlist { title, .. }) => (title.as_str(), true),
+            _ => match parent_item {
+                Some(item @ BrowseItem::Artist { .. }) => (item.title(), true),
+                _ => (column.title.as_str(), matches!(parent_item, Some(BrowseItem::Genre { .. } | BrowseItem::Description { .. } | BrowseItem::Album { .. } | BrowseItem::Playlist { .. }))),
+            },
         };
-        json!({"id":owner,"playlistEditControls":edit_buttons,"playlistEditing":editing,"title":title,"compactTitle":if title == column.title && column.play_all_row.is_none() {crate::util::column_heading::destination(title)} else {title},"rows":rows,"more":more,"count":count,"summary":if state.desktop_library_root == LibraryRoot::Downloads && index == 0 {Some(app::downloads::summary(state,count))}else{None},"sections":sections,"selectedPosition":selected,"artworkStart":artwork_start,"detail":column.details.is_some(),
-            "filter":if filtering {state.list_filter.query.as_str()}else{""},"filterActive":filtering,"options":options,"playback":playback,"largeArtwork":state.large_artwork,
-            "albumDetailsArtwork":album_key.filter(|_| column.artwork_visible).map(|key| assets.artwork(state,key,"album")),"albumArtworkKey":album_key,
-            "descriptionPrompt":index == 0 && state.desktop_library_root == LibraryRoot::DescribeMusic,"albumDetails":if column.has_album_details(){Some(button(state,adapter,&format!("{owner}:details"),"Album Details",Binding::Details(index)))}else{None}})
+        let title = column.artist_header.as_ref().map_or(title, |info|info.artist_name.as_str());
+        let album_page = album_key.and_then(|key| app::details::album_page(state, column)
+            .map(|doc| detail_json(state, adapter, assets, doc, key)));
+        let artist_header = column.artist_header.as_ref().map(|info| {
+            let action = SearchAction::ShowArtistBio { artist_key: info.artist_key.clone(), artist_name: info.artist_name.clone() };
+            let reader = button(state,adapter,&format!("{owner}:artist-bio"),"Artist Biography",Binding::Actions(vec![action.into()]));
+            let mix = app::column_controls::artist_mix(state, column).map(|control| {
+                button(state, adapter, &format!("{owner}:artist-mix"), &control.label, Binding::Actions(control.actions.as_ref().clone()))
+            });
+            json!({"mix":mix,"artwork":assets.artwork(state,&info.artist_key,"artist"),"text":info.excerpt(),"reader":reader,"loading":info.task.is_some(),"search":info.needs_web_search().then(||artist_web_search(state,adapter,&format!("{owner}:artist-search"),&info.artist_name))})
+        });
+        json!({"id":owner,"gridEnd":grid.then(||(0..count).rfind(|p|matches!(column.items.get(row_index(*p)),Some(BrowseItem::Album{..}))).map(|p|p+1)).flatten(),"gridStart":grid_start,"artistRelated":column.artist_header.as_ref().map(|info| related_artist_buttons(state,adapter,assets,&info.document.related_artists)), "artistHeader":artist_header,"albumPage":album_page,"namedDestination":named_destination,"playlistEditControls":edit_buttons,"playlistEditing":editing,"title":title,"compactTitle":if title == column.title && column.play_all_row.is_none() {crate::util::column_heading::destination(title)} else {title},"rows":rows,"more":more,"count":count,"summary":if state.desktop_library_root == LibraryRoot::Downloads && index == 0 {Some(app::downloads::summary(state,count))}else{None},"sections":sections,"selectedPosition":selected,"detail":column.details.is_some(),
+            "filter":if filtering {state.list_filter.query.as_str()}else{""},"filterActive":filtering,"options":options,"playback":playback,
+             "albumDetailsArtwork":album_key.map(|key| assets.artwork(state,key,"album")),"albumArtworkKey":album_key,
+            "descriptionPrompt":index == 0 && state.desktop_library_root == LibraryRoot::DescribeMusic})
+
     }).collect::<Vec<_>>()).unwrap_or_default();
     if state.library_navigation.has_columns() && state.browse_category == BrowseCategory::Folders {
         columns = state.folder_state.as_ref().map(|nav| nav.columns.iter().enumerate().map(|(index, column)| {
@@ -560,9 +704,9 @@ pub(super) fn model(state: &AppState, adapter: &mut Adapter, assets: &mut Assets
             let rows = range.clone().enumerate().map(|(offset,position)| {
                 let index = row_index(position);
                 let item = &column.items[index];
-                json!({"id":item.key,"key":item.key,"index":index,"position":range.start+offset,"title":item.title,"subtitle":"","kind":if item.is_track(){"track"}else{"folder"},"year":null,"artwork":null,"batchSelected":column.selected_set.contains(&index),"selected":index==column.selected_index})
+                json!({"id":item.key,"key":item.key,"index":index,"position":range.start+offset,"title":item.title,"subtitle":"","kind":if item.is_track(){"track"}else{"folder"},"year":null,"artwork":state.sources.active.folder().and_then(|source| {let dir=if item.is_track(){item.key.rsplit_once('/').map_or("",|(dir,_)|dir)}else{&item.key};let key=crate::library::track::Track::folder_cover_key(source,dir);state.artwork.grid_cache.contains_key(&key).then(||assets.artwork(state,&key,"album"))}),"batchSelected":column.selected_set.contains(&index),"selected":index==column.selected_index})
             }).collect::<Vec<_>>();
-            json!({"id":owner,"title":column.title,"rows":rows,"count":count,"sections":sections,"selectedPosition":selected,"detail":false,"filter":if filtering{state.list_filter.query.as_str()}else{""},"filterActive":filtering,"options":[],"largeArtwork":false,"albumDetails":null})
+            json!({"id":owner,"namedDestination":index > 0,"title":column.title,"rows":rows,"count":count,"sections":sections,"selectedPosition":selected,"detail":false,"filter":if filtering{state.list_filter.query.as_str()}else{""},"filterActive":filtering,"options":[]})
         }).collect()).unwrap_or_default();
     }
     if state.library_navigation.has_columns()
@@ -571,12 +715,12 @@ pub(super) fn model(state: &AppState, adapter: &mut Adapter, assets: &mut Assets
     {
         columns=state.station_nav.columns.iter().map(|column| {
             let owner=super::commands::station_owner(state.library_generation,column);
-            let rows=column.stations.iter().enumerate().filter(|(_,station)|station.is_browsable()).map(|(index,station)| {
+            let rows=column.stations().iter().enumerate().map(|(index,station)| {
                 let token=adapter.bind(state,&format!("{owner}:{}",station.key),Binding::Station{owner:owner.clone(),key:station.key.clone(),open:station.requires_input()});
                 let disclosure=adapter.bind(state,&format!("{owner}:{}:open",station.key),Binding::Station{owner:owner.clone(),key:station.key.clone(),open:true});
                 json!({"disclosure":disclosure,"id":station.key,"key":station.key,"index":index,"title":station.title,"subtitle":"","kind":"station","artwork":null,"selected":column.selected_index==index,"activation":token})
             }).collect::<Vec<_>>();
-            json!({"id":owner,"title":if column.key.is_none(){"Radio"}else{&column.title},"stationDescription":column.key.as_deref().and_then(|key|state.station_by_key(key)).map(|station|station.description_text()),"count":rows.len(),"rows":rows,"detail":false,"radio":true,"filter":"","options":[],"largeArtwork":false})
+            json!({"id":owner,"namedDestination":column.key.is_some(),"title":if column.key.is_none(){"Radio"}else{&column.title},"stationDescription":column.key.as_deref().and_then(|key|state.station_by_key(key)).map(|station|station.description_text()),"count":rows.len(),"rows":rows,"detail":false,"radio":true,"filter":"","options":[]})
         }).collect();
         if let Some(key) = state.station_detail.as_deref()
             && let Some(station) = state.station_by_key(key)
@@ -589,7 +733,7 @@ pub(super) fn model(state: &AppState, adapter: &mut Adapter, assets: &mut Assets
                 "Play Station",
                 Binding::Actions(vec![RadioAction::PlayStation(station.key.clone()).into()]),
             );
-            columns.push(json!({"id":identity,"title":station.title,"count":0,"rows":[],"detail":false,"radio":true,"filter":"","options":[],"largeArtwork":false,"stationDetails":{"title":station.title,"text":station.description_text(),"input":if station.requires_input() {if station.identifier.as_deref()==Some("artist-picker"){Some("artists")}else{Some("track")}}else{None},"actions":if station.requires_input(){vec![]}else{vec![play]}}}));
+            columns.push(json!({"id":identity,"namedDestination":true,"title":station.title,"count":0,"rows":[],"detail":false,"radio":true,"filter":"","options":[],"stationDetails":{"title":station.title,"text":station.description_text(),"input":if station.requires_input() {if station.identifier.as_deref()==Some("artist-picker"){Some("artists")}else{Some("track")}}else{None},"actions":if station.requires_input(){vec![]}else{vec![play]}}}));
         }
     }
     if let Some(group) = state.library_navigation.group() {
@@ -620,7 +764,7 @@ pub(super) fn model(state: &AppState, adapter: &mut Adapter, assets: &mut Assets
             let token = adapter.bind(state, &format!("sidebar:{}:{identity}", group.label()), Binding::Sidebar(row));
             json!({"id":format!("sidebar:{identity}"),"key":identity,"index":index,"title":label,"subtitle":"","kind":"category","selected":selected,"activation":token,"context":context})
         }).collect::<Vec<_>>();
-        columns.insert(0, json!({"id":owner,"title":group.label(),"count":rows.len(),"rows":rows,"sections":sections,"detail":false,"sidebar":true,"filter":query,"filterActive":!query.is_empty(),"options":[],"largeArtwork":false}));
+        columns.insert(0, json!({"id":owner,"title":group.label(),"count":rows.len(),"rows":rows,"sections":sections,"detail":false,"sidebar":true,"filter":query,"filterActive":!query.is_empty(),"options":[]}));
     }
     let owners = columns
         .iter()
@@ -873,28 +1017,48 @@ pub(super) fn model(state: &AppState, adapter: &mut Adapter, assets: &mut Assets
         let mut controls = vec![("Back",SearchAction::AdventureLauncherBack)];
         match &launcher.stage {
             JourneyStage::Ready(_) => controls.extend([("Play Journey",SearchAction::AdventureLauncherPlay),("Edit Journey",SearchAction::AdventureLauncherEdit)]),
-            JourneyStage::Generating => {},
+            JourneyStage::Generating { .. } => {},
             _ if launcher.purpose == TrackPickerPurpose::Journey => controls.extend([(app::journey::SWAP,SearchAction::AdventureLauncherReverse),(app::journey::PREVIEW,SearchAction::AdventureLauncherGenerate)]),
             _ => controls.push(("Play Station",SearchAction::StartPickedTrackRadio)),
         }
         let controls = controls.into_iter().map(|(label,action)|button(state,adapter,&format!("journey:{label}"),label,Binding::Actions(vec![action.into()]))).collect::<Vec<_>>();
         json!({"start":launcher.start_track.as_ref().map(|track|track.title.as_str()).unwrap_or(""),"end":launcher.end_track.as_ref().map(|track|track.title.as_str()).unwrap_or(""),"count":launcher.track_count_input,"query":launcher.query,
-            "drilled":!matches!(launcher.drill,AdventureDrillLevel::Search),"ready":matches!(launcher.stage,JourneyStage::Ready(_)),"radio":launcher.purpose != TrackPickerPurpose::Journey,"loading":launcher.loading || matches!(launcher.stage,JourneyStage::Generating),"choices":choices,"actions":controls,"error":if let JourneyStage::Failed(error)=&launcher.stage {Some(error)}else{None}})
+            "drilled":!matches!(launcher.drill,AdventureDrillLevel::Search),"ready":matches!(launcher.stage,JourneyStage::Ready(_)),"radio":launcher.purpose != TrackPickerPurpose::Journey,"loading":launcher.loading || matches!(launcher.stage,JourneyStage::Generating { .. }),"choices":choices,"actions":controls,"error":if let JourneyStage::Failed(error)=&launcher.stage {Some(error)}else{None}})
     });
-    let input = state
-        .popups
-        .input_dialog()
-        .map(|input| json!({"title":input.title,"text":input.input.to_string(),"submit":input.action_type.submit_label()}));
+    let file_asset = "playlist-document";
+    let mut exporting = false;
+    let input = state.popups.input_dialog().map(|input| {
+        let (file_mode, generation) = match &input.action_type {
+            InputDialogAction::ExportPlaylist {generation, contents, ..} => {
+                exporting = true;
+                if !assets.bytes.get(file_asset).is_some_and(|old| Arc::ptr_eq(old, contents)) {
+                    Arc::make_mut(&mut assets.bytes).insert(file_asset.into(), contents.clone());
+                }
+                (Some("export"), Some(*generation))
+            }
+            InputDialogAction::ImportPlaylist {generation} => (Some("import"), Some(*generation)),
+            _ => (None,None),
+        };
+        json!({"title":input.title,"text":input.input.to_string(),"submit":input.action_type.submit_label(),
+            "fileMode":file_mode,"generation":generation,"asset":exporting.then_some(file_asset)})
+    });
+    if !exporting && assets.bytes.contains_key(file_asset) {
+        Arc::make_mut(&mut assets.bytes).remove(file_asset);
+    }
     let confirmation = state
         .popups
         .confirm_dialog()
         .map(|dialog| json!({"title":dialog.title,"text":dialog.message}));
     let mut model = json!({"libraryNavigationId":format!("{}:{:?}:{:?}",state.library_generation,state.desktop_library_root,state.jump_history.head()),"tab":adapter.tab,"sheet":adapter.sheet,"settingsOpen":state.view == View::Settings,"libraryLoading":opening,"roots":roots,"sidebarGroups":sidebar_groups,"columns":columns,"detail":details(state,adapter,assets),"trackDetail":state.track_pane_open,"canReturn":state.jump_history.head().is_some(),
-        "queueMode":app::queue_modes::label(state),"queueModes":queue_modes,"externalSearches":external_searches,"queue":queue,"tools":tools,"settings":settings,"libraries":libraries,"caches":caches,"search":search,"searchQuery":state.search.query,"searchPending":app::handlers::dispatch_search::search_pending(state),"palette":palette,"palettePath":state.palette.path,"paletteBack":palette_back,"connection":connection,
+        "queueMode":app::queue_modes::label(state),"queueModes":queue_modes,"externalSearches":external_searches,"queue":queue,"history":state.listening_history.iter().map(|p|json!({"id":p.id,"artist":p.artist,"album":p.album,"title":p.title,"time":p.time})).collect::<Vec<_>>(),"tools":tools,"settings":settings,"libraries":libraries,"caches":caches,"search":search,"searchQuery":state.search.query,"searchPending":app::handlers::dispatch_search::search_pending(state),"palette":palette,"palettePath":state.palette.path,"paletteBack":palette_back,"connection":connection,
         "theme":theme(state.theme),"artworkMode":state.artwork.mode.name(),"loading":app::activity::message(state),
         "notice":notice,"activityAction":app::activity::target(state).map(|_|adapter.bind(state,"download-activity",Binding::Actions(vec![app::downloads::Command::Open.into()]))),"offline":state.downloads.is_offline(),
         "lyricsView":app::lyrics::view(state),"lyrics":state.popups.text().map(|popup|popup.text.clone()),"downloads":downloads,"singlesLimit":state.singles_track_limit,"journey":journey,"input":input,"confirmation":confirmation,"dialog":dialog(state,adapter)});
+    model["libraryStations"] = Value::Array(library_stations);
     model["discovery"] = Value::Array(discovery);
+    if let Some(doc) = app::details::now_playing_details(state) {
+        model["playingDetail"] = detail_json(state, adapter, assets, doc, "");
+    }
     adapter.finish_projection();
     model
 }
@@ -922,6 +1086,23 @@ fn row_context(
 ) -> Vec<Value> {
     let identity = format!("{owner}:context:{index}:{}", item.key());
     match item {
+        BrowseItem::Description { query } => {
+            let mut remove = button(
+                state,
+                adapter,
+                &format!("{identity}:remove"),
+                "Remove from History",
+                Binding::Actions(vec![
+                    app::sources::audiomuse::Command::RemoveDescription {
+                        query: query.clone(),
+                    }
+                    .into(),
+                ]),
+            );
+            remove["destructive"] = json!(true);
+            remove["kind"] = json!("removeDescription");
+            vec![remove]
+        }
         BrowseItem::Album {
             key, title, artist, ..
         } => {
@@ -1114,6 +1295,12 @@ fn title_sections<'a>(titles: impl Iterator<Item = (usize, &'a str)>) -> Vec<Val
 }
 
 fn search(state: &AppState, adapter: &mut Adapter) -> Vec<Value> {
+    if state.search.query.is_empty() {
+        return state.search.recent.iter().enumerate().map(|(index,result)| {
+            let id = format!("recent-result:{index}:{}", result.key);
+            json!({"token":adapter.bind(state,&id,Binding::RecentSearch(result.clone())),"label":result.label,"subtitle":result.kind_label(),"section":"Recently Chosen"})
+        }).collect();
+    }
     let Some(results) = &state.search.results else {
         return vec![];
     };
@@ -1121,13 +1308,15 @@ fn search(state: &AppState, adapter: &mut Adapter) -> Vec<Value> {
     (0..results.total_count()).map(|row| {
         let (tab, index) = app::handlers::dispatch_search::resolve_global_index(results, row);
         let (title, subtitle) = match tab {
-            SearchTab::Artists => (results.artists[index].title.as_str(), "Artist"),
+            SearchTab::Artists => (results.artists[index].title.as_str(), ""),
             SearchTab::Albums => (results.albums[index].title.as_str(), results.albums[index].artist_name()),
-            SearchTab::Playlists => (results.playlists[index].title.as_str(), "Playlist"),
-            SearchTab::Genres => (results.genres[index].title.as_str(), "Genre"),
-            SearchTab::Tracks => (results.tracks[index].title.as_str(), results.tracks[index].artist_name()),
+            SearchTab::Playlists => (results.playlists[index].title.as_str(), ""),
+            SearchTab::Genres => (results.genres[index].title.as_str(), ""),
+            SearchTab::Tracks => (results.tracks[index].title.as_str(), results.tracks[index].track_artist()),
             SearchTab::Global => unreachable!(),
         };
+        let kind = tab.result_kind();
+        let subtitle = if subtitle.is_empty() { kind.into() } else { format!("{kind} · {subtitle}") };
         json!({"token":adapter.bind(state,&format!("search:{query}:{}:{index}",tab.name()),Binding::Search(tab,index,query.clone())),"label":title,"subtitle":subtitle,"section":tab.name()})
     }).collect()
 }
@@ -1139,10 +1328,8 @@ fn palette_supported(command: &PaletteCommandKind) -> bool {
             | PaletteCommandKind::ToggleFullscreen
             | PaletteCommandKind::FullscreenArtwork
             | PaletteCommandKind::DesktopFullscreen(_)
-            | PaletteCommandKind::ToggleSplitView
             | PaletteCommandKind::Quit
             | PaletteCommandKind::OpenHelp
-            | PaletteCommandKind::ExportPlaylist { .. }
     )
 }
 fn color(color: app::theme_palette::Color) -> Option<String> {
@@ -1169,6 +1356,64 @@ pub(super) fn player(state: &AppState, assets: &mut Assets) -> Value {
 mod tests {
     use super::super::commands::Command;
     use super::*;
+
+    #[test]
+    fn history_removal_uses_the_swiped_entry_even_when_another_row_is_selected() {
+        let mut state = AppState::new();
+        let mut adapter = Adapter::default();
+        let first = BrowseItem::Description {
+            query: "Quiet piano".into(),
+        };
+        let second = BrowseItem::Description {
+            query: "Bright strings".into(),
+        };
+        let col = BrowseColumn::new_with_tracks("Description history", vec![first, second], vec![]);
+        let menu = row_context(&state, &mut adapter, "history", &col, 1, &col.items[1]);
+        let remove = menu
+            .iter()
+            .find(|c| c["kind"] == "removeDescription")
+            .unwrap();
+        let actions = adapter.handle(
+            Command::Invoke {
+                token: remove["token"].as_u64().unwrap(),
+            },
+            &mut state,
+            &Default::default(),
+        );
+        assert!(
+            matches!(actions.as_slice(), [Action::Source(app::sources::SourceAction::AudioMuse(action))]
+            if matches!(action.as_ref(), app::sources::audiomuse::Command::RemoveDescription { query } if query == "Bright strings"))
+        );
+    }
+
+    #[test]
+    fn search_labels_the_result_and_its_recent_entry() {
+        let mut state = AppState::new();
+        let mut adapter = Adapter::default();
+        state.search.query = "example".into();
+        state.search.results = Some(crate::library::models::SearchResults {
+            tracks: vec![crate::library::models::Track {
+                title: "Example".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let rows = search(&state, &mut adapter);
+        assert_eq!(rows[0]["label"], "Example");
+        assert!(rows[0]["subtitle"].as_str().unwrap().starts_with("Track"));
+        state.search.query.clear();
+        state
+            .search
+            .recent
+            .push(app::library_details::RecentResult {
+                label: "Example playlist".into(),
+                key: "playlist".into(),
+                target: app::library_details::RecentTarget::Playlist,
+            });
+        let rows = search(&state, &mut adapter);
+        assert_eq!(rows[0]["label"], "Example playlist");
+        assert_eq!(rows[0]["subtitle"], "Playlist");
+    }
 
     #[tokio::test]
     async fn playlist_picker_filters_and_appends_the_original_selection() {
@@ -1541,6 +1786,7 @@ mod tests {
         }
         let document = model(&state, &mut adapter, &mut Assets::default());
         assert_eq!(document["columns"][0]["title"], "Downloads");
+        assert_eq!(document["columns"][0]["namedDestination"], false);
         assert_eq!(document["columns"][0]["summary"], "1 item · 5.0 MB");
         assert_eq!(document["sheet"], serde_json::Value::Null);
         assert!(!state.track_pane_open);
@@ -1583,6 +1829,7 @@ mod tests {
         let mut adapter = Adapter::default();
         let mut assets = Assets::default();
         let snapshot = model(&state, &mut adapter, &mut assets);
+        assert_eq!(snapshot["columns"][0]["namedDestination"], true);
         assert!(snapshot["columns"][0]["albumDetailsArtwork"].is_string());
         assert!(snapshot["columns"][0]["rows"][0]["artwork"].is_null());
         state.artist_nav.columns[0].play_all_row = Some(PlayAllRow::Playlist {
@@ -1590,6 +1837,7 @@ mod tests {
             title: "Playlist".into(),
         });
         let snapshot = model(&state, &mut adapter, &mut assets);
+        assert_eq!(snapshot["columns"][0]["namedDestination"], true);
         assert!(snapshot["columns"][0]["rows"][0]["artwork"].is_string());
         state.artist_nav.columns[0].artwork_visible = false;
         let snapshot = model(&state, &mut adapter, &mut assets);
@@ -1633,7 +1881,7 @@ mod tests {
             &Default::default(),
         );
         assert!(
-            matches!(actions.as_slice(), [Action::System(SystemAction::OpenExternalSearch { query: Some(query), .. })] if query == "Momus")
+            matches!(actions.as_slice(), [Action::System(SystemAction::OpenExternalSearch { query: Some(query), .. })] if query.text() == "Momus")
         );
         assert!(state.popups.input_dialog().is_none());
     }

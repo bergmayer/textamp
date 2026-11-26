@@ -214,12 +214,16 @@ async fn compilations_browse_from_server_and_offline_cache_and_reset_on_refresh(
     })
     .await;
     let items = &app.state.artist_nav.columns.last().unwrap().items;
-    assert!(matches!(items.first(), Some(BrowseItem::ArtistInfo { .. })));
-    assert!(matches!(items.get(1), Some(BrowseItem::AllTracks { .. })));
+    assert!(matches!(items.first(), Some(BrowseItem::AllTracks { .. })));
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, BrowseItem::ArtistInfo { .. }))
+    );
     assert!(items.iter().any(|item| item.key() == session.key("solo")));
     assert!(!items.iter().any(|item| item.key() == session.key("comp")));
     assert!(matches!(
-        items.get(2),
+        items.get(1),
         Some(BrowseItem::CompilationTracks { .. })
     ));
     // A compilation-only artist, reached by search, needs no getArtist fallback.
@@ -368,6 +372,132 @@ async fn compilations_browse_from_server_and_offline_cache_and_reset_on_refresh(
             .iter()
             .any(|item| matches!(item, BrowseItem::Compilations))
     );
+}
+
+#[tokio::test]
+async fn compilation_performer_keeps_its_page_and_cached_portrait_but_is_excluded_from_recommendations()
+ {
+    let performer =
+        json!({"id":"credit-id","name":"Guest","albumCount":0,"coverArt":"cover-guest"});
+    let (url, requests, server) = server(move |method, params| {
+        let response = match method {
+            "search3" => {
+                assert_eq!(params["musicFolderId"], "1");
+                assert_eq!(params["query"], "Guest");
+                json!({"searchResult3":{"artist":[performer]}})
+            }
+            "getArtistInfo2" if params["id"] == "credit-id" => json!({"artistInfo2":{"biography":"Performer biography."}}),
+            "getArtistInfo2" => json!({"artistInfo2":{"biography":"Album artist biography.","similarArtist":[performer,{"id":"ordinary","name":"Peer"}]}}),
+            "getCoverArt" => return (200, "P3\n1 1\n255\n10 80 120\n".into()),
+            _ => fixture(method, params),
+        };
+        (200, envelope(response))
+    }).await;
+    let session = session(url);
+    let mut app = App::new(session.clone());
+    let guest = "track_artist:guest";
+    let owner = session.key("owner");
+    app.state.library.artists = Arc::new(
+        [(&*owner, "Owner"), (guest, "Guest")]
+            .map(|(key, title)| textamp::library::models::Artist {
+                rating_key: key.into(),
+                title: title.into(),
+                ..Default::default()
+            })
+            .into(),
+    );
+    app.state
+        .library
+        .compilations
+        .artist_keys
+        .insert(guest.into());
+    app.state
+        .library
+        .compilations
+        .artist_map
+        .insert(guest.into(), vec![session.key("comp")]);
+    app.state.library.albums = Arc::new(vec![textamp::library::models::Album {
+        rating_key: session.key("album"),
+        parent_rating_key: Some(owner.clone()),
+        ..Default::default()
+    }]);
+    let scope = app.state.active_library.clone().unwrap();
+    let portrait = session
+        .artwork(&session.key("cover-guest"), &scope)
+        .await
+        .unwrap();
+    for (key, name) in [(&*owner, "Owner"), (guest, "Guest")] {
+        app.send(BrowseAction::OpenInLibrary {
+            artist_key: if key == guest {
+                session.key("credit-id")
+            } else {
+                key.into()
+            },
+            artist_name: name.into(),
+            album_key: None,
+            album_title: None,
+        })
+        .await;
+        while app
+            .state
+            .artist_nav
+            .columns
+            .last()
+            .and_then(|c| c.artist_header.as_ref())
+            .is_none_or(|h| h.task.is_some())
+            || (key == guest && !app.state.artwork.grid_cache.contains_key(guest))
+        {
+            app.receive().await;
+        }
+        let column = app.state.artist_nav.columns.last().unwrap();
+        let header = column.artist_header.as_ref().unwrap();
+        assert_eq!(header.artist_key, key);
+        if key == guest {
+            assert_eq!(header.excerpt(), "Performer biography.");
+            assert_eq!(app.state.artwork.grid_cache[guest], portrait);
+            #[cfg(feature = "mobile")]
+            {
+                let art = textamp::mobile::character_art(
+                    &app.state.artwork.grid_cache[guest],
+                    "halfblocks",
+                )
+                .unwrap();
+                assert!(
+                    art["cells"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|cell| cell[1] == json!([10, 80, 120]))
+                );
+            }
+            assert!(
+                column
+                    .items
+                    .iter()
+                    .any(|i| matches!(i, BrowseItem::CompilationTracks { .. }))
+            );
+        } else {
+            assert_eq!(
+                header
+                    .document
+                    .related_artists
+                    .iter()
+                    .map(|a| a.title.as_str())
+                    .collect::<Vec<_>>(),
+                ["Peer"]
+            );
+        }
+    }
+    assert_eq!(
+        requests
+            .lock()
+            .await
+            .iter()
+            .filter(|(method, _)| method == "getCoverArt")
+            .count(),
+        1
+    );
+    server.abort();
 }
 
 #[test]
@@ -1153,13 +1283,13 @@ async fn navidrome_station_list_and_random_album_work_without_sonic_or_plex() {
     app.catalog().await;
     assert!(
         app.state.station_nav.columns[0]
-            .stations
+            .stations()
             .iter()
             .any(|s| s.title == "Random Artist Mix")
     );
     assert!(
         app.state.station_nav.columns[0]
-            .stations
+            .stations()
             .iter()
             .any(|s| s.title == "Play Random Albums")
     );
@@ -1620,7 +1750,6 @@ fn system_sidebar_keyboard_mouse_and_overflow_use_the_rendered_rows() {
     use textamp::app::state::{BrowseNavigationState, CategoryRow};
     let session = session("http://example.test".into());
     let mut app = App::new(session.clone());
-    app.state.desktop_split_view = true;
     app.state.category_column_focused = true;
     app.state.library.playlists = std::sync::Arc::new(
         (0..40)
@@ -1651,7 +1780,7 @@ fn system_sidebar_keyboard_mouse_and_overflow_use_the_rendered_rows() {
         .unwrap();
     app.state.category_column_index = index;
     let actions = key_input::handle_key(
-        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut app.state,
         &app.config,
     );
@@ -1919,7 +2048,7 @@ async fn audiomuse_browse_uses_existing_tracks_and_normal_navigation_without_pla
     assert_eq!(app.state.artist_nav.columns[0].items[0].title(), "rock");
     app.state.category_column_focused = false;
     for action in key_input::handle_key(
-        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut app.state,
         &app.config,
     ) {
@@ -2898,28 +3027,34 @@ async fn sonic_extension_uses_native_similarity_and_validates_path_endpoints() {
         app.receive().await;
     }
     assert_eq!(app.state.similar.tracks[0].title, "Song second");
-    app.state.adventure.start_track = Some(app.state.library.all_tracks[0].clone());
-    app.state.adventure.end_track = Some(app.state.library.all_tracks[1].clone());
-    app.send(SettingsAction::SetAdventureLength(5)).await;
-    while app.state.adventure.generating {
-        app.receive().await;
+    use textamp::app::state::JourneyStage;
+    for fail in [false, true] {
+        invalid.store(fail, std::sync::atomic::Ordering::Relaxed);
+        app.send(SearchAction::OpenAdventureLauncher).await;
+        let launcher = app.state.popups.adventure_launcher_mut().unwrap();
+        launcher.start_track = Some(app.state.library.all_tracks[0].clone());
+        launcher.end_track = Some(app.state.library.all_tracks[1].clone());
+        launcher.track_count_input = "5".into();
+        app.send(SearchAction::AdventureLauncherGenerate).await;
+        while matches!(
+            app.state.popups.adventure_launcher().unwrap().stage,
+            JourneyStage::Generating { .. }
+        ) {
+            app.receive().await;
+        }
+        let stage = &app.state.popups.adventure_launcher().unwrap().stage;
+        if fail {
+            assert!(
+                matches!(stage, JourneyStage::Failed(error) if error.contains("invalid sonic path"))
+            );
+        } else {
+            assert!(matches!(stage, JourneyStage::Ready(tracks) if tracks.len() == 3));
+            assert!(app.state.queue.tracks.is_empty());
+            app.send(SearchAction::AdventureLauncherPlay).await;
+            assert_eq!(app.state.queue.tracks.len(), 3);
+            assert_eq!(app.state.queue.tracks.last().unwrap().title, "Song second");
+        }
     }
-    assert_eq!(app.state.queue.tracks.len(), 3);
-    assert_eq!(app.state.queue.tracks.last().unwrap().title, "Song second");
-    app.state.adventure.start_track = Some(app.state.library.all_tracks[0].clone());
-    app.state.adventure.end_track = Some(app.state.library.all_tracks[1].clone());
-    invalid.store(true, std::sync::atomic::Ordering::Relaxed);
-    app.send(SettingsAction::SetAdventureLength(5)).await;
-    while app.state.adventure.generating {
-        app.receive().await;
-    }
-    assert!(
-        app.state
-            .notifications
-            .last_error
-            .as_ref()
-            .is_some_and(|e| e.contains("invalid sonic path"))
-    );
     assert!(
         !requests
             .lock()
@@ -2974,8 +3109,7 @@ async fn provider_biography_and_recommendations_are_scoped() {
         app.receive().await;
     }
     let text = &app.state.popups.artist_bio().unwrap().document.text;
-    assert!(text.starts_with("An artist biography."));
-    assert!(text.contains("supplied by Navidrome"));
+    assert_eq!(text, "An artist biography.");
     app.send(DataAction::LoadSimilarTracks {
         rating_key: session.key("second"),
         title: "Second".into(),
@@ -3560,28 +3694,26 @@ async fn jump_to_artist_and_album_leave_overlays_and_analysis_for_real_library_c
         assert!(app.state.sources.nav_collection.is_none());
         assert_eq!(app.state.view, View::Browse);
         assert!(app.state.search.pending_album_key.is_none());
+        let selected = app.state.artist_nav.focused().unwrap();
         assert_eq!(
             app.state.artist_nav.columns.len(),
-            if album { 4 } else { 3 }
-        );
-        assert_eq!(
-            app.state.artist_nav.focused_column,
             if album { 3 } else { 2 }
         );
-        assert!(
-            matches!(app.state.artist_nav.columns.last().unwrap().details.as_ref(),
-            Some(textamp::app::state::BrowseDetails::Album {..}) if album)
-                || matches!(
-                    app.state
-                        .artist_nav
-                        .columns
-                        .last()
-                        .unwrap()
-                        .details
-                        .as_ref(),
-                    Some(textamp::app::state::BrowseDetails::Artist(_))
-                ) && !album
+        assert_eq!(
+            app.state.artist_nav.focused_column + 1,
+            app.state.artist_nav.columns.len()
         );
+        if album {
+            assert!(
+                matches!(selected.play_all_row.as_ref(), Some(textamp::app::state::PlayAllRow::Album { rating_key, .. }) if rating_key == &session.key("album"))
+            );
+            assert!(!selected.tracks.is_empty());
+        } else {
+            assert_eq!(
+                selected.artist_header.as_ref().unwrap().artist_key,
+                session.key("artist")
+            );
+        }
         assert!(app.state.queue.tracks.is_empty());
     }
     task.abort();
@@ -4200,15 +4332,13 @@ async fn random_search_and_name_jumps_select_the_same_artist_and_album_ancestors
             matches!(app.state.artist_nav.columns[1].selected_item(),Some(BrowseItem::Album{key,..}) if key==&session.key("album")),
             "route {route}"
         );
-        if route != 3 {
-            assert!(
-                matches!(app.state.artist_nav.focused().and_then(|col| col.details.as_ref()),
-                Some(textamp::app::state::BrowseDetails::Album { artwork_key, .. }) if artwork_key == &session.key("album")),
-                "route {route}"
-            );
-        } else {
-            assert_eq!(app.state.artist_nav.columns.len(), 3);
-        }
+        assert_eq!(app.state.artist_nav.columns.len(), 3);
+        let column = app.state.artist_nav.focused().unwrap();
+        assert!(
+            matches!(&column.play_all_row, Some(textamp::app::state::PlayAllRow::Album { rating_key, .. }) if rating_key == &session.key("album")),
+            "route {route}"
+        );
+        assert!(!column.tracks.is_empty(), "route {route}");
         assert!(app.state.queue.tracks.is_empty());
     }
     task.abort();
@@ -4313,6 +4443,55 @@ async fn seeded_radio_uses_one_chooser_and_refills_from_evolving_or_fixed_seed()
     server.abort();
 }
 
+#[test]
+fn track_rating_choices_stay_inside_the_submenu_even_after_use() {
+    use textamp::app::sources::navidrome::commands::Command;
+    use textamp::app::{
+        command_catalog, command_history, command_palette, state::PaletteCommandKind,
+    };
+    let session = session("http://fixture.invalid".into());
+    let mut app = App::new(session.clone());
+    app.state
+        .queue
+        .tracks
+        .push(session.track(serde_json::from_value(song("first", 1, 1)).unwrap()));
+    app.state.view = View::Queue;
+    let rating = PaletteCommandKind::Navidrome(Command::Rating(5));
+    app.state
+        .palette
+        .history
+        .remember(command_history::key(&rating).unwrap());
+    let group = command_catalog::path(&rating);
+    assert_eq!(group, ["Edit", "Track Rating"]);
+    for query in ["", "stars", "rate song"] {
+        command_palette::open_with_query(&mut app.state, query);
+        let palette = &app.state.palette;
+        let mut visible = palette.matches.iter().map(|&i| &palette.entries[i].command);
+        assert!(
+            !visible
+                .clone()
+                .any(|c| matches!(c, PaletteCommandKind::Navidrome(Command::Rating(_))))
+        );
+        if !query.is_empty() {
+            assert!(visible.any(
+                |c| matches!(c, PaletteCommandKind::OpenCommandGroup(path) if path == &group)
+            ));
+        }
+    }
+    command_palette::run(PaletteCommandKind::OpenCommandGroup(group), &mut app.state);
+    let palette = &app.state.palette;
+    let mut ratings = palette
+        .matches
+        .iter()
+        .filter_map(|&i| match &palette.entries[i].command {
+            PaletteCommandKind::Navidrome(Command::Rating(stars)) => Some(*stars),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    ratings.sort_unstable();
+    assert_eq!(ratings, [0, 1, 2, 3, 4, 5]);
+}
+
 #[tokio::test]
 async fn saved_playlist_appears_immediately_and_refreshes_only_playlists() {
     let saved = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -4337,6 +4516,19 @@ async fn saved_playlist_appears_immediately_and_refreshes_only_playlists() {
     app.catalog().await;
     app.state.queue.tracks =
         vec![session.track(serde_json::from_value(song("first", 1, 1)).unwrap())];
+    let store = session.cache_store().unwrap();
+    let catalog = store.ticket("catalog");
+    let browse = store.ticket("browse-catalog-v1");
+    let original_catalog = catalog
+        .read::<serde_json::Value>(Duration::from_secs(60))
+        .unwrap()
+        .unwrap()
+        .value;
+    let original_browse = browse
+        .read::<serde_json::Value>(Duration::from_secs(60))
+        .unwrap()
+        .unwrap()
+        .value;
     requests.lock().await.clear();
     app.send(QueueAction::SaveQueueAsPlaylist("A Saved Queue".into()))
         .await;
@@ -4365,6 +4557,35 @@ async fn saved_playlist_appears_immediately_and_refreshes_only_playlists() {
             .playlists
             .iter()
             .any(|playlist| playlist.title == "A Saved Queue")
+    );
+    assert_eq!(
+        catalog
+            .read::<serde_json::Value>(Duration::from_secs(60))
+            .unwrap()
+            .unwrap()
+            .value,
+        original_catalog
+    );
+    assert_eq!(
+        browse
+            .read::<serde_json::Value>(Duration::from_secs(60))
+            .unwrap()
+            .unwrap()
+            .value,
+        original_browse
+    );
+    let mut reopened = App::new(session.clone());
+    textamp::app::sources::navidrome::open(&mut reopened.state, &reopened.tx);
+    while reopened.state.library_loading {
+        reopened.receive().await;
+    }
+    assert!(
+        reopened
+            .state
+            .library
+            .playlists
+            .iter()
+            .any(|p| p.title == "A Saved Queue")
     );
     let calls = requests.lock().await;
     assert_eq!(

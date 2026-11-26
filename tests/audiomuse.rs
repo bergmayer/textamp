@@ -151,11 +151,14 @@ async fn sonic_queries_are_read_only_scoped_and_validate_response_shapes() {
             "Discovery must not create playlists or analysis jobs"
         );
         match r.path.as_str() {
-            "api/mood_centroids" => (200, json!({"calm":[{"index":3}],"empty":[]})),
+            "api/mood_centroids" => (200, json!({"calm":[{"index":3},{"index":4}],"empty":[]})),
             "api/similar_tracks" => {
                 assert_eq!(r.query["n"], "100");
                 if r.query.contains_key("mood") {
                     assert_eq!(r.query["mood"], "calm");
+                    if r.query["centroid_index"] == "4" {
+                        return (200, json!([{"item_id":"match"},{"item_id":"another"}]));
+                    }
                     assert_eq!(r.query["centroid_index"], "3");
                 } else {
                     assert_eq!(r.query["item_id"], "seed");
@@ -181,7 +184,7 @@ async fn sonic_queries_are_read_only_scoped_and_validate_response_shapes() {
         .unwrap();
     assert_eq!(api.similar("seed").await.unwrap(), ["match"]);
     assert_eq!(api.moods().await.unwrap(), ["calm"]);
-    assert_eq!(api.mood("calm").await.unwrap(), ["match"]);
+    assert_eq!(api.mood("calm").await.unwrap(), ["match", "another"]);
     assert_eq!(
         api.path("seed", "end", 5).await.unwrap(),
         ["seed", "match", "end"]
@@ -421,8 +424,12 @@ async fn cold_sync_retries_an_interrupted_page_once() {
             (200, page(json!([analysis("one", "a")])))
         })
         .await;
-        let api = Client::connect(&connection(&fixture.url), "fixture-password").await.unwrap();
-        let result = api.refresh(&Snapshot::default(), &HashSet::from(["one".into()])).await;
+        let api = Client::connect(&connection(&fixture.url), "fixture-password")
+            .await
+            .unwrap();
+        let result = api
+            .refresh(&Snapshot::default(), &HashSet::from(["one".into()]))
+            .await;
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
         if recover {
             assert!(result.unwrap().tracks.contains_key("one"));

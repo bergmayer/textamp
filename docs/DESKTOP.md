@@ -19,20 +19,13 @@ across snapshots. Queue and column projections refresh on state-changing work;
 passive playback ticks reuse them. `connection` owns Settings submission status by
 window identity. Credentials stay on the command path, outside snapshots.
 `surface` projects workflow content, `workflows` owns persistent workflow sessions
-and their provider task leases, and `surface_view` renders Kit dialogs or native
-windows according to the application window mode.
+and their provider task leases, and `surface_view` renders Kit dialogs.
 
 Kit supplies standard controls, forms, description lists, menus, popovers,
 breadcrumbs, dialogs, virtual lists, scrollbars, sliders and resizers. Custom
 layout composes Miller columns, artwork, queue tools and audio visualizers.
 
-Library and Now Playing share one window by default. View → Modes → GUI: Multiple Windows enables persistent independent windows for Now Playing, the visualizer, the
-command palette and workflows. The visualizer retains its shared tab and playback
-data in its own resizable window, available through Window → Visualizer; Single Window and Text keep it embedded. View → Modes → GUI: Single Window returns to one document window
-with temporary Kit dialogs. Settings uses a Kit overlay in single-window mode and a native window in multi-window mode. New native windows cascade within the usable display bounds. Appearance includes a shared Mode control for Text, GUI Single Window, and GUI Multiple Windows. The choice persists. Closing the main window in single
-mode quits the application. Multiple-window mode keeps playback and menus alive
-when every window is closed; an application-level coordinator opens requested
-windows independently of any document view's lifetime. ⌘1 and ⌘3 show Library and
+Library and Now Playing share one window. Settings and the command palette open as overlays. ⌘1 and ⌘3 show Library and
 Now Playing. The Mac
 GUI uses the macOS system output without device-selection or pairing controls.
 View Options stays a fixed size across all column and grouping states.
@@ -40,8 +33,8 @@ View Options stays a fixed size across all column and grouping states.
 ## Interaction
 
 **Audio Player** is a main-sidebar destination. The Window menu opens the same
-column within the library window. Choose a mounted volume and a playlist, then
-use **Sync Now**. The column also includes reconnect sync, cancellation, eject,
+column within the library window. Choose storage on a connected MTP player and a playlist, then
+use **Review Sync…**. The column also includes reconnect sync, cancellation,
 and progress. See [MP3 players](MP3_PLAYERS.md) for ownership and firmware
 limitations. Manual sync opens a review with expandable file groups and an explicit Apply Sync button. On this player is a read-only, searchable list grouped by library. Both views use Kit disclosure controls and virtualized file lists.
 
@@ -59,7 +52,7 @@ through the hierarchy. Enter opens the selected item like Right Arrow; Command-E
 and the following tracks. Double-click plays. Context menus target the clicked
 item and preserve an existing multi-selection when applicable.
 
-Alphabetical columns expose a fitted alphabet rail alongside a scrollbar that stays visible while the main list overflows. Alphabet jumps center the selected row, clamped at the list ends. Reverse alphabetical order reverses the rail.
+Alphabetical columns overlay the alphabet picker on the trailing edge of the viewport beside a scrollbar that stays visible while the main list overflows. Alphabet jumps center the matching row or grid band and keep focus in the current column. Return or a click on an item opens it. Reverse alphabetical order reverses the rail.
 Letter keys jump by initial; Shift-letter uses the second letter within the
 current initial. A Kit text field above the list provides filtering and is
 shown by clicking the column title or by focusing the filter. Filtering applies
@@ -71,13 +64,11 @@ mode it expands upward over the retained library. Artwork grows into the resizab
 header, playback controls move beneath it, and visualizers and queue occupy the
 space below. The transport and queue keep the same resizable column layout in
 both views, including during the transition, so the controls retain their
-horizontal alignment after resizing. A small chevron collapses the player. Separate windows retain the
-bottom transport and its track tile raises the other window. Now Playing combines square artwork, metadata,
+horizontal alignment after resizing. A small chevron collapses the player. Now Playing combines square artwork, metadata,
 visualizers and a reorderable queue. Below 720 points wide or 520 points tall,
 Now Playing responds with square artwork and minimal playback/seek controls.
 Growing the window restores the full layout. Play Queue opens independently beside
-the library or player, or in its own window in multi-window mode. Queue tools sit
-in their own area at the bottom of that pane, above the fixed footer; Radio opens its sidebar columns.
+the library or player. Queue tools sit at the right end of the transport; Radio opens its sidebar columns.
 Left from the first content column focuses the sidebar. Up/Down navigates visible
 rows, Enter/Right opens them, and Left collapses a section. Sidebar menus and
 disclosures remain Kit components; their tracked scroll container exposes the
@@ -100,14 +91,14 @@ artwork retain their prior presentation during the pause and the owned listing
 request, then update together. Sidebar disclosure rows use the same Kit menu-item
 geometry as top-level destinations; expandable groups have a trailing disclosure button and
 category children have an additional 24-point indent.
-Album View Options offers Large album covers with matching virtual row heights.
+Album View Options offers Grid and List.
 Album track columns begin with an Album Info entry. Arrow navigation and mouse
 selection open its details pane without selecting or playing a track. Selecting
 an album in its parent column opens the track listing without an automatic
 album-details pane. Meters keeps its blue RMS-history chart below the stereo
 bars, with a separate scale and space above the correlation indicator.
 
-Settings is available from the application menu and Command-comma in an overlay in single-window mode and a native window in multi-window mode. Saving credentials does not activate a library or alter
+Settings is available from the application menu and Command-comma in an overlay. Saving credentials does not activate a library or alter
 playback. Other reading and configuration workflows use the same Kit theme and follow the
 same presentation mode. Persistent workflow sessions keep their input, selection
 and results when another workflow is opened. Provider completions retain their
@@ -128,9 +119,7 @@ through its unfiltered command API. Fuzzy match ranges use styled text inside
 Kit's interactive rows because Kit Label's match highlighting accepts contiguous
 strings. The temporary picker sizes to its results. It uses the existing fuzzy matcher rather
 than importing Zed's workspace-specific picker. Textamp has no keymap editor, so
-it does not present Zed's Add/Change Keybinding action. In multiple-window mode,
-the palette remains open after execution; Escape or closing its window dismisses
-it. Temporary dialogs retain Kit's focus restoration and dismissal ownership.
+it does not present Zed's Add/Change Keybinding action. Temporary dialogs retain Kit's focus restoration and dismissal ownership.
 
 ## Runtime and verification
 
@@ -205,22 +194,22 @@ Settings retains its independent [Mac settings presentation](https://developer.a
 | Surface | Presentation and controls | Layout and behavior |
 |---|---|---|
 | Library | Native primary window; Kit toolbar groups, sidebar menus/disclosures, ListItem rows, resizers, description lists and scrollbars. | Leading navigation, central Miller columns, trailing selected-item inspector. Selection is distinct from playback. Inspector actions stay with their item; column headers hold column commands. |
-| Now Playing | Same primary window in single-window mode; independent native player in multiple-window mode. Kit buttons, sliders, mode selector and queue controls. | Square artwork and track information above visualizers; queue and its tools stay together. Keep the transport outside scrolling content. Visualization choices use horizontally scrollable, content-sized segmented tabs without a duplicate pop-up selector. Distinguish expanding a visualizer from native Enter Full Screen. |
+| Now Playing | Primary window. Kit buttons, sliders, mode selector and queue controls. | Square artwork and track information above visualizers; queue and its tools stay together. Keep the transport outside scrolling content. Visualization choices use horizontally scrollable, content-sized segmented tabs without a duplicate pop-up selector. Distinguish expanding a visualizer from native Enter Full Screen. |
 | Mini-player | Responsive presentation of Now Playing, retaining native chrome. | Square cover, title/artist and minimal playback/seek controls. Growing restores the full layout and queue position. Every icon needs an accessible action name and the seek slider needs an accessible time value. |
 | Settings | Temporary Kit dialog or independent native window according to mode, with grouped Kit settings pages and Form/Field content. | Retain the category sidebar for settings categories and account/cache organization; this avoids a crowded toolbar. It must use Mac typography, appropriate pane titles, a single pane-selection owner and predictable focus. General preferences save immediately. |
 | Libraries and connection editor | One account row per Navidrome connection; folders are scopes, not separate accounts. Masked credential Inputs, Form/Field, one Save Connection action and Cancel. | Show included folder names. Editing or saving never switches the active source or playback. Use a native folder chooser with a displayed path for local libraries; typed paths may remain as an additional keyboard option. Place advanced analysis fields in a disclosure group. |
 | Artwork, Audio, Sidebar and Search settings | Radio groups/pop-up pickers for one-of-many settings; checkboxes for independent flags. | Show current values without requiring repeated clicks. Keep rendering controls with artwork, streaming quality with audio and discovery-service flags with search. Audio routing remains macOS-owned. |
 | Cache & Scanning | Grouped per-library metadata/artwork/analysis information, standard progress and command buttons. | Separate Scan/Refresh, Cancel Scan and Clear operations; show task state beside the relevant scope. Use determinate progress only when a real total exists. Destructive labels and confirmations identify exactly which cache is affected. |
 | About | Reusable branding content in Settings About; expose it from the app menu through a standard About presentation. | Original ANSI logo, Textamp name and version, then concise product information. Treat the ANSI work as an accessible image; its monospaced decorative rendering is separate from UI typography. |
-| View Options | Fixed Kit dialog or native utility window according to mode; labeled sort radio group, direction control, independent checkboxes. | Keep one stable footprint. Date Added is available for Recently Added and restores the provider's original newest-first ordering; Oldest First reverses it. Covers, large covers and playlist grouping are independent options where applicable. Changes are immediate; no Apply/Save footer is needed. |
+| View Options | Fixed Kit dialog or native utility window according to mode; labeled sort radio group, direction control, independent checkboxes. | Keep one stable footprint. Date Added is available for Recently Added and restores the provider's original newest-first ordering; Oldest First reverses it. Album columns offer Grid or List. Single-album pages keep tracks in release order. Other track columns offer artwork visibility, and playlist and download track lists can be grouped by album. Changes are immediate; no Apply/Save footer is needed. |
 | Library chooser | A current-selection picker or, for many sources, a compact native list window. | Differentiate All Folders from a named Folder scope. Click and keyboard activation choose the same scope. The account-wide catalog combines both Navidrome folders; it does not require activating two mutually exclusive folder views. |
 | Search | Temporary dialog or persistent native result browser according to mode, Kit search field/scope selector, ListItem results and an adjacent inspector. | Keep the query and scope visible, stable window dimensions, and explicit loading, empty and failure states. Selection opens information; playback remains an explicit action. |
 | Artist/Album/Track Info | Selected-item inspector using borderless DescriptionList, artwork and relevant controls. Optional independent reading windows remain native. | Album Info is an explicit entry in album track columns. Link metadata to the library, with visible keyboard focus as well as hover affordances. Use aligned label/value columns, square artwork and adequate separation. |
 | Biography, lyrics, text readers and Help | Temporary dialogs or resizable persistent native readers; selectable Kit TextView and structured help content. | Use content titles, readable line lengths, normal copy/select behavior, a scrollbar when content overflows and platform close controls. Keep source/external links separate from playback controls. |
 | Artist Mix | The Radio detail pane with a search Input and checkbox artist list, limited to 12 selected artists. | Show selected artists and a distinct Start Radio action. Maintain Cancel and keyboard selection. |
 | Journey / describe-music generation | Destinations under AI in the sidebar with inline forms, result browsers and explicit actions. | Put start/end selection beside their values, use a number input for track count and a search field for lookup. Preview Journey builds a route; Play Journey explicitly replaces the queue. Swap Tracks is secondary and Back is navigation. Show task cancellation and errors in context. |
-| Save/rename prompts and destructive confirmations | A native task-attached sheet/alert where supported, or a native utility window with equivalent semantics when required. | Use Kit-managed temporary dialogs in single-window mode and task-attached native confirmation surfaces in multiple-window mode. Name fields have visible labels. Save/Cancel and destructive roles are explicit; destructive operations do not become the default solely because their button is last. Other windows remain usable when the task permits. |
-| Command palette | Kit Command inside a managed Kit Dialog in single-window mode or a persistent native window in multiple-window mode. | Retain the Command-symbol toolbar button and colon shortcut outside inputs. Escape immediately dismisses it, including a nonempty query. Keep focus restoration and domain commands distinct from generic utility-window cancellation. |
+| Save/rename prompts and destructive confirmations | A native task-attached sheet/alert where supported, or a native utility window with equivalent semantics when required. | Use Kit-managed temporary dialogs. Name fields have visible labels. Save/Cancel and destructive roles are explicit; destructive operations do not become the default solely because their button is last. Other windows remain usable when the task permits. |
+| Command palette | Kit Command inside a managed Kit Dialog. | Retain the Command-symbol toolbar button and colon shortcut outside inputs. Escape immediately dismisses it, including a nonempty query. Keep focus restoration and domain commands distinct from generic utility-window cancellation. |
 | Radio and queue edits | The Radio sidebar destination uses compact Miller columns for continuous stations and subcategories, including Artist Mix; icon buttons apply queue edits once. | The Radio icon uses the active theme accent while a station is engaged. Allow Same Artist is an Audio settings checkbox. Shuffle/repeat are stateful icon controls with names, tooltips and accessible values. |
 
 ### Typography, spacing and depth
@@ -255,7 +244,7 @@ appearance. Keep artwork and visualizer color independent from control tint.
 |---|---|
 | Miller columns instead of a standard navigation stack | Large music hierarchies benefit from simultaneous parent/child context. Preserve stable parent selection, proportional resizing and keyboard traversal. |
 | Persistent overflow scrollbars | Scrollbars remain visible while content overflows for discoverable scrolling in large catalogs. They disappear when content fits; the filter field sits outside the scrolling list. The alphabet rail does not replace the main scrollbar. |
-| Alphabet rail and second-letter jumps | Direct navigation is useful for catalogs with tens of thousands of artists. Show it only for alphabetical ordering; reverse it with that order and prevent overlap with text. |
+| Alphabet rail and second-letter jumps | Direct navigation is useful for catalogs with tens of thousands of artists. Show it only for alphabetical ordering; reverse it with that order and keep the underlying grid and list at their normal width. |
 | Toggleable column-filter field | Clicking the title replaces it with a stock Kit input in the header. It is hidden until requested to preserve browsing space. |
 | Return opens; double-click plays | Return shares Right Arrow navigation. Double-click plays albums, playlists and tracks; Command-Return plays a track and those following. Queue Return starts at the existing queue position. |
 | Persistent playback controls | Playback needs stable access across music tasks. The collapsed transport sits below Library; in the expanded single-window player it sits below the artwork header. Controls remain outside scrolling content with equivalent menu and keyboard commands. |
@@ -292,8 +281,7 @@ and separate Preview Journey and Play Journey actions. Back to Results is a seco
 finder action; it never receives default-button styling. Every returned path
 reserves both endpoint artists and removes repeated intermediate artists while
 preserving path order. Missing artist metadata or an insufficient distinct-artist
-path fails without replacing playback. The GUI never displays the terminal Queue
-view as a library destination; playback queue controls live in Now Playing.
+path fails without replacing playback. The desktop GUI presents the playback queue and its controls in the right sidebar.
 
 Sidebar keyboard playlist inspection uses the same 250 ms pause as Miller-column
 inspection. Deferred commands retain playlist identity and library generation,
@@ -343,9 +331,9 @@ Go to Random Album (Discover menu, ⌘⇧R) reveals an album from the active cat
 
 Search uses Kit Input with a magnifying-glass prefix, built-in clear control, rounded semantic fill and a full-width query field. Journey uses one surface in either window mode, with both editable endpoints above its inline track search, maximum length, route preview and explicit Play Journey action.
 
-Library jumps use the shared OpenInLibrary reducer, including related-track selection, random albums and search results. Track destinations select the canonical artist, album and track before opening details. Back restores the prior library view; the six-entry history records jumps, not ordinary browsing. Compilation branches and stale-completion guards apply to these destinations. Split view uses the embedded Now Playing pane without a second regular player window; explicit full-screen visualizer remains available. The macOS icon derives its palette from the active theme and updates the Dock and the writable app bundle’s Finder icon through AppKit, using the shared Terminal Note cell-grid artwork.
+Library jumps use the shared OpenInLibrary reducer, including related-track selection, random albums and search results. Track destinations select the canonical artist, album and track before opening details. Back restores the prior library view; the six-entry history records jumps, not ordinary browsing. Compilation branches and stale-completion guards apply to these destinations. The macOS icon derives its palette from the active theme and updates the Dock and the writable app bundle’s Finder icon through AppKit, using the shared Terminal Note cell-grid artwork.
 
-The Details pane participates in equal-width layout alongside all visible Miller columns. Its header identifies Album Details, Track Details or Artist Details. Single-window temporary dialogs dismiss on title-bar clicks. Held-arrow navigation accelerates after a short delay without issuing intermediate inspection requests. Queue remix icons sit beside shuffle and repeat; Radio station selection uses compact Miller columns in the Radio browser. Search input Return submits the omnibox, and type tabs filter its existing results.
+The Details pane participates in equal-width layout alongside all visible Miller columns. Track and artist details have their own pane. Album information appears in the track column. The Play button sits below the album title and artist, above the metadata. Single-window temporary dialogs dismiss on title-bar clicks. Held-arrow navigation accelerates after a short delay without issuing intermediate inspection requests. Queue remix icons sit beside shuffle and repeat; Radio station selection uses compact Miller columns in the Radio browser. Search input Return submits the omnibox, and type tabs filter its existing results.
 
 Artist columns pin Compilations directly below All Tracks. All Tracks playback
 uses the same small header play icon as playlists. Settings, Search and Command
@@ -395,23 +383,17 @@ layout, sidebar choices and cache sections retain headings in the content pane.
 
 Manual Queue is available from the Radio browser, shared palette and Queue Type
 menu. It retains queued tracks and prevents further station refills. Clear
-Queue also clears the active station. The Queue header shows its current mode and a Kit pull-down for changing it;
+Queue also clears the active station. The Queue Type pull-down shows the current mode and lets the user change it;
 radio navigation also remains in the sidebar, palette and native menu.
 
-Play Queue and Now Playing are independent presentations. In single-window mode,
-Queue rises beside the library and the Kit divider reallocates width to the browser;
-Now Playing rises over the remaining content independently. Reduce Motion disables
-both transitions. In multi-window mode Queue has its own native window and keyboard
-focus, without a second transport. The queue list uses the shared playback occurrence
+The Mac queue and Library sidebars open independently and both default to 280 points. The transport’s up chevron opens Now Playing. Its down chevron sits directly above that control, along the right edge of the player. The queue stays in place while Now Playing opens or closes. Opening Now Playing preserves the Library sidebar’s width and expanded or collapsed state. An expanded sidebar keeps the focused library column or the root destinations, according to the current selection. Back (⌘[) moves up one level. The Library sidebar expands in place from its icon strip, moving the player to the right. Selecting a destination replaces the sidebar rows with a single browsing column in the same space. Radio categories such as Decade Mix fill the sidebar when opened. Back returns through the column hierarchy to the sidebar. The queue stays anchored on the right. Dismissing Now Playing restores the full column layout at the current destination. Reduce Motion disables
+both transitions. The queue list uses the shared playback occurrence
 identity, including duplicate tracks. The queue button uses the standard list icon.
-The utility/status footer remains fixed at 40 points. Queue Tools uses a Kit dropdown in the queue header beside Queue Type. A clipboard and pencil
-identify queue editing and a broadcast tower identifies queue type/radio. Active
+The main window uses a 72-point transport and a 20-point status bar. Queue Tools and Queue Type sit at the bottom of the right sidebar. Active
 queue modes remain highlighted; tool toggles are checked inside the menu. The default Queue width is 280
 points; its divider remains adjustable.
 The transport uses left-aligned playback controls, a lighter track-information area
-with a seek slider, then track actions, lyrics, queue and volume. Equal trailing
-and leading reservations center the information area; when the Queue is open,
-the leading reservation compensates for its width while room remains for labels. Muting preserves the
+with a seek slider, then track actions, lyrics, queue and volume. The information area stays centered as the queue opens or changes width. Muting preserves the
 restore volume while showing zero on the slider and a crossed-out speaker.
 Queue Type lists Manual Queue and stations first, followed by Repeat and Continue with Related Tracks at the bottom. Auto-Mix
 is an independent switch with an overlapping-circle Kit icon. Queue edits remain one-time operations.
@@ -444,7 +426,7 @@ The Now Playing information card uses a four-column Kit DescriptionList for
 technical fields and paired artist/album fields and a full-width genre row, without a nested
 scroll view. Its transport embeds seeking in the track-information area, with volume at the trailing edge.
 Utility messages occupy the right edge in place of the item count. Queue tools
-stay beneath the independently visible Play Queue. While a station is active, its Queue Type pull-down offers Manual Queue, related continuation and stations.
+sit at the bottom of the right sidebar. While a station is active, its Queue Type pull-down offers Manual Queue, related continuation and stations.
 Stopping converts the radio queue into a regular queue without restarting audio,
 and invalidates outstanding station refills.
 
@@ -483,18 +465,20 @@ new search is pending; matching results replace the child listing. Its prompt
 has a Search action and no separate History button. The history itself restores
 saved results from the active library.
 
-The visualizer selector uses content-sized, horizontally scrollable Kit segmented tabs without an overflow menu. The visualization area remains visible; its initial height is the minimum allowed by the Kit resize handle.
+The visualizer selector uses content-sized, horizontally scrollable Kit segmented tabs without an overflow menu. The transport waveform button shows or hides the visualization area. When visible, its initial height is the minimum allowed by the Kit resize handle. Lyrics, album notes and artist biographies use the visualizer pane while Now Playing is open. Clicking transport metadata opens Now Playing. Clicking playback artwork in either Mac presentation opens a compact artwork window with playback controls and a scrubber along its bottom edge. Clicking the artwork again restores the previous window size and view.
 A continuous top separator frames the collapsed transport and Up Next together.
 
 ## Player layout rationale
 
-The player uses an independent main content pane and Queue panel. Artwork
+The player uses a main content pane with an attached queue. Artwork
 and aligned metadata share the upper content area. Transport text is centered
 within its lighter field, with artwork to its left and playback controls preceding
 the field. The visualization
 uses the content background rather than another inset card. A single fixed
-utility footer carries Back and app commands on the left. Queue Type and Queue Tools use stock Kit dropdowns in the queue header. Checked
+utility footer shows status. While Now Playing is open, Back appears at the trailing edge of the Library header or below the toggle in its collapsed rail. The transport and utility controls share one edge-to-edge surface. Now Playing slides as a full-height panel from behind its top edge. The sidebar toggle sits at the top left. Next and History at the top right each open their queue view and close it on a second click. Search, Settings, the command palette and a configurable radio shortcut remain available below the queue navigation on the right rail. The Now Playing sheet rises between the rails. Queue Type and Queue Tools use Kit dropdowns on the right rail. The right rail switches the queue between Next and History. History retains the latest 512 plays across launches and can be cleared independently. Checked
 items show active settings, and disabled items retain their capability rules.
+
+Library management uses an AppKit sheet with native segmented controls, checkboxes and action buttons. GPUI Kit provides the controls in the surrounding Settings window.
 
 This follows Apple's [layout](https://developer.apple.com/design/human-interface-guidelines/layout)
 and [split-view](https://developer.apple.com/design/human-interface-guidelines/split-views)
@@ -540,8 +524,7 @@ The bottom toolbar has a pressed-state sidebar toggle and an inset item count.
 Click a sidebar group name to open its destinations in a column. Groups with 1–512 items, including Playlists, have an arrow to expand or collapse them inline. Radio and nested destinations use columns.
 View Options uses a fixed 540 by 300 point window with a two-column control grid.
 Its controls also appear in View's Sort and View Options submenus with current
-checkmarks and existing key equivalents. Large covers use 128-point artwork in
-144-point rows. Empty waveforms have no time ruler; empty spectrograms have no
+checkmarks and existing key equivalents. Empty waveforms have no time ruler; empty spectrograms have no
 playback-position line.
 
 Palette requests reopen a missing Kit dialog independently of the current music
@@ -596,9 +579,7 @@ The saved theme is published before creating the first window, and applied befor
 its controls are constructed. Music searches open the native app on macOS. A failed native handoff reports
 an error and never redirects to a browser.
 
-Selecting a similar album navigates to its Album Details destination with ancestor
-selections restored. Similar Albums uses a track from that destination album,
-including when the explicit details column has keyboard focus.
+Album links restore the ancestor selections and open the album page. Its Similar Albums grid groups recommendations for the first album track by release. The Similar Artists grid below it uses Navidrome’s related artists for the album artist.
 
 The Miller browser keeps its horizontal Kit scrollbar in a fixed 12-point bottom
 gutter outside the scrolling columns. It stays visible while columns overflow.
@@ -614,7 +595,7 @@ details pane in the search window. Local bundles use an available Apple developm
 certificate to keep macOS privacy authorization stable across builds;
 `TEXTAMP_CODESIGN_IDENTITY` selects an explicit signing identity.
 
-The terminal frontend projects the same source-aware sidebar groups, queue actions, library jumps and Journey endpoint choices. Its column title is the inline filter entry point; the title and header actions have a keyboard cursor as well as pointer targets. Content columns share available width equally and overflow horizontally below the terminal minimum width. The left sidebar remains fixed. Terminal transport controls use a five-row arrangement with centered metadata, a scrubber and elapsed/remaining time; notifications occupy the fixed bottom-right footer. External terminal image protocols use character rendering beneath modals and palettes; embedded Text retains images and clips their Unicode placements around overlays.
+The terminal right rail keeps Next and History above Settings, Search, Commands, and Radio, with Queue Type, Queue Tools, and Clear below. History rows support replay, Play Next, and Track Details in both desktop presentations. Its column title is the inline filter entry point; the title and header actions have a keyboard cursor as well as pointer targets. Content columns share available width equally and overflow horizontally below the terminal minimum width. The left sidebar remains fixed. Terminal transport controls use a five-row arrangement with centered metadata, a scrubber and elapsed/remaining time; notifications occupy the fixed bottom-right footer. External terminal image protocols use character rendering beneath modals and palettes; embedded Text retains images and clips their Unicode placements around overlays.
 
 Terminal playback controls live in detail panes rather than ordinary list headers.
 A terminal has no hover state; the footer names the focused control. Tab and
@@ -626,8 +607,7 @@ buttons always operate on the selected track. All presentations dispatch shared
 library, queue and playback commands.
 Describe Music keeps an inline query above the same history and result columns.
 
-The terminal uses heavier single-line outlines for the sidebar and queue, with lighter single-line Miller
-columns. Queue Type and Queue Tools share the queue header. The terminal opens
+The terminal keeps the Library sidebar at its current width when Now Playing opens. Its ‹ button and Backspace step up one level. The queue has a borderless header and two-line track rows. Queue Type and Queue Tools sit in the right rail. The terminal opens
 these menus through its contextual palette; embedded Text mode paints native line
 icons over the terminal symbols. Tab switches panes; arrows select header menus,
 transport and footer controls.
@@ -648,8 +628,8 @@ active. The track card has a separate surface with contrast-aware text, includin
 in monochrome themes. Inline filters belong to their selected column and do not
 filter or remove adjacent columns.
 
-Terminal album track lists expose a labeled Album Details row above the tracks.
-Artist Details is an explicit destination in the artist's album list. Enter on
+Desktop and terminal album columns place Artist Biography to the left of Play and Album Info to its right. Play Next, Add to Queue and Download are in the column header. Albums with at least two tracks offer track ordering in View Options. In the terminal, Album Notes opens the review in the text reader. Scroll over a recommendation grid to see its next or previous page.
+Artist Biography opens from the album page or the command palette. Artist navigation opens the album list. Enter on
 library items opens content or details without playback; explicit playback
 controls and double-click retain playback behavior. Opening a details column
 reveals its full width and gives it keyboard focus.
@@ -677,7 +657,7 @@ and completions. Its projections and native window registry remain adapters;
 logical workflows use shared state and `app::workflow::Context`.
 
 `--text` creates no PTY or child player. Ratatui writes VT output to an in-process
-sink with explicit cell/pixel metrics. Bundled libghostty-vt 1.0.1 parses it.
+sink with explicit cell/pixel metrics. Bundled libghostty-vt 1.0.2 parses it.
 The host reads render-state rows, dirty flags, grapheme clusters, styles, cursor
 and Kitty placements. It decodes PNG images and draws cached textures separately
 from cell backgrounds and text. Unicode box rules and block graphics use continuous cell geometry, including
@@ -756,8 +736,7 @@ Windowed graphical and Text presentations share transport/footer dimensions,
 sidebar and queue widths, Now Playing header measurements and transport time
 labels. Handoffs retain resized pane dimensions. Text remains monospace and GUI
 uses the system font; terminal-cell rounding can differ by less than one cell.
-Both frontends put album captions beside small artwork and below large, left-aligned artwork; captions include an available year. Large Artwork is the
-same shared View Options setting in both frontends, retaining its saved key.
+Album columns share a Grid or List preference. In the graphical grid, arrow keys select covers and Return opens the album in the next column.
 Both transports retain their thumbnail or note placeholder in Library and Now
 Playing. Terminal placement protocols are recreated with a renderer, while
 mode-independent decoded image caches remain reusable.
@@ -777,15 +756,15 @@ Kit dialog backdrops cover document content below the title bar. The title bar r
 
 Appearance uses a Kit list for theme previews. Highlighting changes only the sample; clicking the highlighted theme again or pressing Enter applies the shared preference.
 
-Command-Option-T cycles GUI Multiple Windows, GUI Single Window, and Text through the shared Mode preference. It is also available in View and the windowed palettes.
+Command-Option-T switches between GUI and Text through the shared Mode preference. It is also available in View and the windowed palettes.
 
 The Kit list normally confirms rows on the first click. Theme rows intercept that click to preview a newly highlighted choice; a second click or Enter confirms it.
 
 ### Keyboard focus
 
-Graphical mode uses Tab and Shift+Tab to traverse native controls, including the
-transport sliders. Arrow keys navigate within the focused library list or control.
-Text mode retains panel traversal with Tab and arrow navigation inside panels.
+Tab and Shift+Tab move between panes in both frontends. Arrow keys move between
+rows and controls, and Enter activates the selection. In the graphical transport,
+Up and Down move through controls, and Left and Right adjust the focused slider.
 Application navigation bindings are defined in `src/app/shortcuts.rs`; native
 adapters retain window activation while dispatching the same shared commands.
 Settings dialogs let Kit capture the originating focus before focusing their
@@ -813,3 +792,5 @@ External music searches resolve the visible detail, active artist or album colum
 then playback. ⌘⇧A (Ctrl+Shift+A in the TUI) sends the Apple Music search URL
 to the Music app using macOS Launch Services. Windows targets the installed
 Apple Music package with the same URL. Other desktop platforms report Apple Music search as unavailable. Spotify prefers its app and desktop YouTube uses web results.
+
+The brushed aluminum theme draws horizontal grain on the title bar, window rim, and transport. A light outer lip and dark inner border surround the workspace. The library and queue meet the workspace at full-height dividers, and browser column headers align with the sidebar headers. List rows alternate white and pale blue, column headers use a tinted fill, and the track display uses pale green. The title bar retains its native window controls and drag behavior.

@@ -5,7 +5,6 @@ use crate::app::Action;
 use crate::app::AppState;
 use crate::app::action::*;
 use crate::app::command_palette;
-use crate::app::presentation::is_two_row_browse_column;
 use crate::app::scrollbar::{calc_thumb, scroll_offset_from_y};
 use crate::app::state::{
     BrowseCategory, BrowseItem, BrowseNavigationState, PlaybackMode, ScrollbarDrag, ScrollbarView,
@@ -61,11 +60,138 @@ fn handle_filtered_column_click(
 
 /// Handle mouse events.
 pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -> Vec<Action> {
+    if !state.palette.open
+        && matches!(state.popups.modal(), crate::app::state::Modal::Closed)
+        && !matches!(state.view, View::Settings | View::Similar | View::Related)
+    {
+        let point = (event.column, event.row).into();
+        if let Some((_, index)) = state
+            .hit_regions
+            .history_rows
+            .iter()
+            .find(|(r, _)| r.contains(point))
+            .copied()
+        {
+            match event.kind {
+                MouseEventKind::ScrollDown => {
+                    state.scroll.history_offset = None;
+                    state.history_cursor = (state.history_cursor + 3)
+                        .min(state.listening_history.len().saturating_sub(1))
+                }
+                MouseEventKind::ScrollUp => {
+                    state.scroll.history_offset = None;
+                    state.history_cursor = state.history_cursor.saturating_sub(3)
+                }
+                MouseEventKind::Down(MouseButton::Right) => {
+                    state.set_view(View::Queue);
+                    state.history_cursor = index;
+                    state.scroll.history_offset =
+                        state.hit_regions.history_rows.first().map(|(_, i)| *i);
+                    state.palette.player_context = false;
+                    return crate::app::command_palette::open(state);
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    state.set_view(View::Queue);
+                    let Some(play) = state.listening_history.get(index) else {
+                        return vec![];
+                    };
+                    state.scroll.history_offset =
+                        state.hit_regions.history_rows.first().map(|(_, i)| *i);
+                    let now = std::time::Instant::now();
+                    let previous = state.scroll.history_click.replace((play.id.clone(), now));
+                    state.history_cursor = index;
+                    if previous.is_some_and(|(id, t)| {
+                        id == play.id && now.duration_since(t).as_millis() < 400
+                    }) {
+                        state.scroll.history_click = None;
+                        return vec![crate::app::listening_history::track_action(
+                            &play.id,
+                            crate::app::track_context::ContextKind::PlayTrack,
+                        )];
+                    }
+                }
+                _ => {}
+            }
+            return vec![];
+        }
+        if event.kind == MouseEventKind::Down(MouseButton::Left) {
+            state.tui_rail_focus = None;
+        }
+        if event.kind == MouseEventKind::Down(MouseButton::Left) {
+            if state
+                .hit_regions
+                .sidebar_back
+                .is_some_and(|r| r.contains(point))
+            {
+                return if state.tui_player_raised() || state.jump_history.head().is_some() {
+                    vec![NavigationAction::Back.into()]
+                } else {
+                    vec![]
+                };
+            }
+            if state
+                .hit_regions
+                .sidebar_toggle
+                .is_some_and(|r| r.contains(point))
+            {
+                return vec![NavigationAction::ToggleSidebar.into()];
+            }
+            if state
+                .hit_regions
+                .queue_clear
+                .is_some_and(|r| r.contains(point))
+            {
+                return crate::app::transport_controls::activate(
+                    state,
+                    crate::app::transport_controls::TransportControl::Clear,
+                );
+            }
+            if state
+                .hit_regions
+                .rail_radio
+                .is_some_and(|r| r.contains(point))
+            {
+                return crate::app::tui_navigation::RailControl::Radio.activate(state);
+            }
+        }
+    }
+    if event.kind == MouseEventKind::Down(MouseButton::Left)
+        && let Some(index) = state
+            .hit_regions
+            .miller_columns
+            .as_ref()
+            .and_then(|layout| {
+                layout
+                    .columns
+                    .iter()
+                    .find(|r| r.area.contains((event.column, event.row).into()))
+                    .map(|r| r.col_idx)
+            })
+        && let Some(col) = state
+            .browse_nav_mut()
+            .and_then(|nav| nav.columns.get_mut(index))
+    {
+        col.recommendation_focus = None;
+    }
     if event.kind == MouseEventKind::Down(MouseButton::Left)
         && !state.palette.open
         && matches!(state.popups.modal(), crate::app::state::Modal::Closed)
     {
         let point = ratatui::layout::Position::new(event.column, event.row);
+        if let Some((_, history)) = state
+            .hit_regions
+            .queue_tabs
+            .iter()
+            .find(|(rect, _)| rect.contains(point))
+            .copied()
+        {
+            return if history {
+                crate::app::tui_navigation::RailControl::History
+            } else {
+                crate::app::tui_navigation::RailControl::Next
+            }
+            .activate(state);
+        }
         if let Some((_, id)) = state
             .hit_regions
             .download_cancel
@@ -678,19 +804,6 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
         return vec![];
     }
 
-    if event.kind == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
-        && state.hit_regions.biography_radio.is_some_and(|area| {
-            area.contains(ratatui::layout::Position::new(event.column, event.row))
-        })
-        && let Some(popup) = state.popups.artist_bio()
-    {
-        let action = RadioAction::StartArtistRadio {
-            key: popup.artist_key.clone(),
-            title: popup.artist_name.clone(),
-        };
-        state.popups.set_artist_bio(None);
-        return vec![action.into()];
-    }
     // Artist bio popup intercepts all mouse events when active
     if let Some(popup) = state.popups.artist_bio_mut() {
         let max_scroll = state
@@ -772,7 +885,14 @@ pub fn handle_mouse(event: crossterm::event::MouseEvent, state: &mut AppState) -
         event.kind,
         MouseEventKind::Down(MouseButton::Left | MouseButton::Right)
     ) {
-        state.set_view(pointer_view(state, click_col, click_row));
+        let view = pointer_view(state, click_col, click_row);
+        if view == View::Browse && state.tui_player_raised() {
+            state.tui_browsing_player = true;
+            if !state.tui_sidebar_visible {
+                state.tui_sidebar_visible = true;
+            }
+        }
+        state.set_view(view);
     }
 
     match event.kind {
@@ -956,6 +1076,19 @@ fn pointer_view(state: &AppState, column: u16, row: u16) -> View {
         return state.view;
     }
 
+    if regions
+        .sheet_library_area
+        .is_some_and(|r| r.contains(point))
+    {
+        return View::Browse;
+    }
+    if regions
+        .category_column
+        .as_ref()
+        .is_some_and(|rail| rail.inner.contains(point))
+    {
+        return View::Browse;
+    }
     if regions.now_playing_content.as_ref().is_some_and(|r| {
         r.visualizer_tab_area.contains(point) || r.visualizer_content_area.contains(point)
     }) {
@@ -1122,6 +1255,19 @@ fn handle_search_result_click(
         return vec![];
     }
 
+    if state.search.query.is_empty() && !state.search.recent.is_empty() {
+        let offset = NavigationService::calc_scroll_offset(
+            state.list_state.search_item_index,
+            results_height,
+            state.search.recent.len(),
+        );
+        return state
+            .search
+            .recent
+            .get(offset + visual_row)
+            .map(|result| vec![result.open()])
+            .unwrap_or_default();
+    }
     let Some(ref results) = state.search.results else {
         return vec![];
     };
@@ -1295,25 +1441,9 @@ fn handle_transport_down(
         return vec![];
     };
     let point = (click_col, click_row).into();
-    if let Some(link) = state
-        .hit_regions
-        .detail_links
-        .iter()
-        .rev()
-        .find(|link| link.area.contains(point))
+    if regions.seekbar.contains(point)
+        && crate::app::transport_controls::TransportControl::Seek.enabled(state)
     {
-        return link.action(state).into_iter().collect();
-    }
-    if let Some(link) = state
-        .hit_regions
-        .artist_links
-        .iter()
-        .rev()
-        .find(|link| link.area.contains(point))
-    {
-        return link.action(state.library_generation).into_iter().collect();
-    }
-    if regions.seekbar.contains(point) && state.playback.duration_ms > 0 {
         state.seek_drag = Some(regions.seekbar);
         return seek_at(click_col, regions.seekbar, state.playback.duration_ms);
     }
@@ -1322,6 +1452,17 @@ fn handle_transport_down(
         .iter()
         .find(|(rect, _)| rect.contains(point))
     {
+        use crate::app::transport_controls::TransportControl;
+        if matches!(
+            control,
+            TransportControl::Track | TransportControl::Artist | TransportControl::Album
+        ) {
+            return if state.tui_player_raised() {
+                vec![]
+            } else {
+                crate::app::transport_controls::activate(state, TransportControl::Player)
+            };
+        }
         if *control == crate::app::transport_controls::TransportControl::Volume {
             state.volume_drag = true;
             return vec![
@@ -1499,19 +1640,14 @@ fn miller_hit_test(
 
         let click_offset = (click_row - inner_y) as usize;
 
-        // Use pinned scroll offset if set for this column
-        let pinned = state
-            .scroll
-            .browse
-            .and_then(|(pc, po)| if pc == col_idx { Some(po) } else { None });
+        let scroll_offset = state
+            .hit_regions
+            .miller_offsets
+            .iter()
+            .find(|(index, _)| *index == col_idx)
+            .map(|(_, offset)| *offset)?;
 
-        if col.artwork_visible {
-            let offset = state
-                .hit_regions
-                .miller_offsets
-                .iter()
-                .find(|(index, _)| *index == col_idx)
-                .map_or(0, |(_, offset)| *offset);
+        if col.artwork_visible || crate::app::view_options::album_grid(state, col_idx) {
             return state
                 .hit_regions
                 .miller_item_rows
@@ -1519,52 +1655,21 @@ fn miller_hit_test(
                 .find(|(index, area, _)| {
                     *index == col_idx && area.contains((click_col, click_row).into())
                 })
-                .map(|(_, _, item)| (col_idx, *item, offset));
-        } else if filter_active
+                .map(|(_, _, item)| (col_idx, *item, scroll_offset));
+        }
+        let rows_per_item = usize::from(col_region.rows_per_item.max(1));
+        let display_idx = scroll_offset + click_offset / rows_per_item;
+        if filter_active
             && state.list_filter.column == col_idx
-            && state.list_filter.results.is_some()
+            && let Some(results) = &state.list_filter.results
         {
-            // Filtered mode: only matched items are shown
-            if let Some(ref results) = state.list_filter.results {
-                if results.matched_indices.is_empty() {
-                    return None;
-                }
-                let total_display = results.matched_indices.len();
-                let visible_height = inner_height as usize;
-
-                // display_selected_idx = position of col.selected_index in matched list
-                let display_selected = results
-                    .matched_indices
-                    .iter()
-                    .position(|&idx| idx == col.selected_index)
-                    .unwrap_or(0);
-                let scroll_offset = pinned.unwrap_or_else(|| {
-                    helpers::calc_scroll_offset(display_selected, visible_height, total_display)
-                });
-                let display_idx = scroll_offset + click_offset;
-
-                if display_idx < total_display {
-                    // Map through matched_indices to get actual item index
-                    return Some((col_idx, results.matched_indices[display_idx], scroll_offset));
-                }
-            }
-            return None;
-        } else {
-            // Check if this column uses 2-row display
-            let is_two_row = is_two_row_browse_column(state, col, col_idx, nav);
-            let rows_per_item = if is_two_row { 2 } else { 1 };
-
-            let total_items = col.items.len();
-            let visible_height = inner_height as usize;
-            let visible_item_count = visible_height / rows_per_item;
-            let scroll_offset = pinned.unwrap_or_else(|| {
-                helpers::calc_scroll_offset(col.selected_index, visible_item_count, total_items)
-            });
-            let item_idx = scroll_offset + click_offset / rows_per_item;
-
-            if item_idx < total_items {
-                return Some((col_idx, item_idx, scroll_offset));
-            }
+            return results
+                .matched_indices
+                .get(display_idx)
+                .map(|&index| (col_idx, index, scroll_offset));
+        }
+        if display_idx < col.items.len() {
+            return Some((col_idx, display_idx, scroll_offset));
         }
 
         return None;
@@ -1848,6 +1953,20 @@ fn handle_browse_click(
     modifiers: KeyModifiers,
     state: &mut AppState,
 ) -> Vec<Action> {
+    if let Some((_, track, destination)) = state
+        .hit_regions
+        .album_related
+        .iter()
+        .find(|(rect, _, _)| rect.contains((click_col, click_row).into()))
+    {
+        return vec![
+            BrowseAction::OpenDetailsInLibrary {
+                track: Box::new(track.clone()),
+                destination: *destination,
+            }
+            .into(),
+        ];
+    }
     if crate::app::player_sync::visible(state)
         && let Some((rect, index, command)) = state
             .hit_regions
@@ -1905,7 +2024,8 @@ fn handle_browse_click(
                     }
                     Some(crate::app::state::CategoryRow::Header(title)) => {
                         state.category_column_index = item_idx;
-                        if click_col <= cat_region.inner.x + 1
+                        if state.tui_sidebar_visible
+                            && click_col <= cat_region.inner.x + 1
                             && crate::app::sidebar::allows_disclosure(
                                 &crate::app::sidebar::sidebar(state),
                                 title,
@@ -2017,6 +2137,7 @@ fn handle_browse_click(
                 state.track_pane_open = false;
                 state.track_pane_focused = false;
                 state.track_pane_index = 0;
+                crate::app::tui_navigation::focus_root_after_close(state);
                 return vec![];
             }
             if (pane.play_button.contains((click_col, click_row).into())
@@ -2056,6 +2177,9 @@ fn handle_browse_click(
                         state.track_pane_focused && state.track_pane_index == new_pane_idx;
                     state.track_pane_focused = true;
                     state.track_pane_index = new_pane_idx;
+                    if let Some(track) = state.focused_track() {
+                        state.scroll.track_detail = Some((track.rating_key.clone(), pane.scroll));
+                    }
                     if !was_selected {
                         return vec![];
                     }
@@ -2125,6 +2249,7 @@ fn handle_browse_click(
                 });
                 if let Some(col_idx) = close_target {
                     crate::app::handlers::key_input::close_browse_column_at(state, col_idx);
+                    crate::app::tui_navigation::focus_root_after_close(state);
                     return vec![];
                 }
             }
@@ -2144,7 +2269,7 @@ fn handle_browse_click(
                 }
                 state.category_column_focused = false;
                 state.track_pane_focused = false;
-                return vec![SearchAction::OpenSortPopup.into()];
+                return crate::app::view_options::open_for_input(state);
             }
 
             // Check if click is on a column title bar (border row)
@@ -2433,6 +2558,7 @@ fn handle_folder_click(click_row: u16, click_col: u16, state: &mut AppState) -> 
         });
         if let Some(col_idx) = close_target {
             crate::app::handlers::key_input::close_browse_column_at(state, col_idx);
+            crate::app::tui_navigation::focus_root_after_close(state);
             return vec![];
         }
     }
@@ -2952,7 +3078,6 @@ fn handle_related_click(click_row: u16, click_col: u16, state: &mut AppState) ->
     // Click highlights; second click on already-highlighted item activates
     let already_selected = state.list_state.related_index == clicked_idx;
     state.scroll.related = Some(scroll_offset);
-    state.scroll.related_click_time = Some(std::time::Instant::now());
     state.list_state.related_index = clicked_idx;
 
     if already_selected {
@@ -3110,6 +3235,18 @@ fn handle_browse_scroll(
     click_col: u16,
     state: &mut AppState,
 ) -> Vec<Action> {
+    if let Some(pane) = &state.hit_regions.track_pane
+        && pane.outer.contains((click_col, click_row).into())
+        && let Some(track) = state.pane_track()
+    {
+        let offset = if up {
+            pane.scroll.saturating_sub(3)
+        } else {
+            pane.scroll.saturating_add(3).min(pane.max_scroll)
+        };
+        state.scroll.track_detail = Some((track.rating_key.clone(), offset));
+        return vec![];
+    }
     if let Some(region) = state
         .hit_regions
         .category_column
@@ -3153,6 +3290,140 @@ fn handle_browse_scroll(
                     .unwrap_or_else(|| line_count.saturating_sub(1)),
             )
         };
+        return vec![];
+    }
+    if let Some(region) = state
+        .hit_regions
+        .miller_columns
+        .as_ref()
+        .and_then(|layout| {
+            layout
+                .columns
+                .iter()
+                .find(|r| r.area.contains((click_col, click_row).into()))
+        })
+        && let Some(column) = state
+            .browse_nav()
+            .and_then(|n| n.columns.get(region.col_idx))
+        && (column.has_album_details()
+            || column.artist_header.is_some()
+            || crate::app::view_options::album_grid(state, region.col_idx))
+    {
+        let index = region.col_idx;
+        let neighbors = region
+            .album_scroll
+            .map(|scroll| {
+                (
+                    scroll.first.saturating_sub(1),
+                    (scroll.first + 1).min(scroll.max_first),
+                )
+            })
+            .or_else(|| {
+                state
+                    .hit_regions
+                    .grid_scroll_neighbors
+                    .iter()
+                    .find(|(col, _, _)| *col == index)
+                    .map(|&(_, previous, next)| (previous, next))
+            });
+        if let Some((previous, next)) = neighbors {
+            if let Some(column) = state
+                .browse_nav_mut()
+                .and_then(|nav| nav.columns.get_mut(index))
+            {
+                column.recommendation_focus = None;
+            }
+            state.scroll.browse = Some((index, if up { previous } else { next }));
+            return vec![];
+        }
+        let filtered = state.list_filter.results.as_ref().filter(|_| {
+            state.list_filter.active
+                && state.list_filter.column == index
+                && state.list_filter.category == state.browse_category
+        });
+        let total = filtered.map_or(column.items.len(), |f| f.matched_indices.len());
+        let start = state
+            .hit_regions
+            .miller_offsets
+            .iter()
+            .find(|(i, _)| *i == index)
+            .map_or(0, |(_, s)| *s);
+        let mut tiles = state
+            .hit_regions
+            .miller_item_rows
+            .iter()
+            .filter(|(i, _, _)| *i == index)
+            .peekable();
+        let first_y = tiles.peek().map(|(_, r, _)| r.y);
+        let first_band = tiles
+            .clone()
+            .take_while(|(_, r, _)| Some(r.y) == first_y)
+            .count();
+        let visible = if region.is_art_mode {
+            tiles.count().max(1)
+        } else {
+            usize::from(region.inner.height) / usize::from(region.rows_per_item.max(1))
+        };
+        let stride = if up && crate::app::view_options::album_grid(state, index) {
+            let previous = start
+                .checked_sub(1)
+                .and_then(|p| filtered.map_or(Some(p), |f| f.matched_indices.get(p).copied()))
+                .and_then(|i| column.items.get(i));
+            if matches!(previous, Some(BrowseItem::Album { .. })) {
+                crate::app::view_options::terminal_grid_columns(region.inner.width)
+            } else {
+                1
+            }
+        } else {
+            first_band.max(1)
+        };
+        // Scroll the catalog first, then its recommendation rows, from anywhere in the pane.
+        let pages = &state.hit_regions.recommendation_pages;
+        let capacity = crate::app::view_options::terminal_grid_columns(region.inner.width);
+        let page_turn = |section: usize, last: usize| {
+            let page = column
+                .recommendation_focus
+                .filter(|(s, _)| *s == section)
+                .map_or(column.recommendation_pages[section], |(_, item)| {
+                    item / capacity
+                })
+                .min(last);
+            if up {
+                page.checked_sub(1)
+            } else {
+                (page < last).then_some(page + 1)
+            }
+        };
+        let candidates = pages.iter().filter(|(_, col, _, _)| *col == index);
+        let turn = if up {
+            candidates
+                .rev()
+                .find_map(|(_, _, s, last)| page_turn(*s, *last).map(|p| (*s, p)))
+        } else if start + visible >= total {
+            candidates
+                .into_iter()
+                .find_map(|(_, _, s, last)| page_turn(*s, *last).map(|p| (*s, p)))
+        } else {
+            None
+        };
+        if let Some((section, page)) = turn {
+            if let Some(col) = state
+                .browse_nav_mut()
+                .and_then(|nav| nav.columns.get_mut(index))
+            {
+                col.recommendation_focus = None;
+                col.recommendation_pages[section] = page;
+            }
+            return vec![];
+        }
+        let next = if up {
+            start.saturating_sub(stride)
+        } else if start + visible < total {
+            start.saturating_add(stride)
+        } else {
+            start
+        };
+        state.scroll.browse = Some((index, next));
         return vec![];
     }
     // If a mouse click recently set the scroll pin, ignore scroll events
@@ -3547,6 +3818,9 @@ fn handle_scrollbar_drag(mouse_y: u16, state: &mut AppState) -> Vec<Action> {
     );
 
     match drag.view {
+        ScrollbarView::Album => {
+            state.scroll.browse = Some((drag.col_idx, new_offset));
+        }
         ScrollbarView::Browse | ScrollbarView::Folder => {
             state.scroll.browse = Some((drag.col_idx, new_offset));
             state.scroll.browse_click_time = Some(std::time::Instant::now());
@@ -3680,6 +3954,30 @@ fn try_browse_scrollbar_click(
         }
 
         let col = &nav.columns[col_idx];
+        if let Some(scroll) = col_reg.album_scroll {
+            let visible = scroll.bands - scroll.max_first;
+            if let Some(thumb) = scrollbar_hit_test_bordered(
+                click_col,
+                click_row,
+                col_reg.area,
+                scroll.bands,
+                visible,
+                scroll.first,
+            ) {
+                let offset = start_scrollbar_drag(
+                    click_row,
+                    thumb,
+                    scroll.bands,
+                    visible,
+                    ScrollbarView::Album,
+                    col_idx,
+                    state,
+                );
+                state.scroll.browse = Some((col_idx, offset));
+                return Some(vec![]);
+            }
+            continue;
+        }
         let inner_height = col_reg.inner.height as usize;
 
         // When filter is active on this column, use filtered item count

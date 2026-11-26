@@ -17,6 +17,29 @@ async fn native_music_search_handoff() {
     assert_eq!(notice, None);
 }
 
+#[tokio::test]
+#[ignore = "Queries the live US Apple catalog"]
+async fn apple_music_song_opens_its_catalog_album_with_the_track_selected() {
+    use textamp::services::external_search::{MusicQuery, resolve};
+    let result = resolve(
+        SearchTarget::AppleMusic,
+        MusicQuery::Song {
+            artist: "Guided by Voices".into(),
+            title: "Doughnut for a Snowman".into(),
+            album: Some("Let's Go Eat the Factory".into()),
+        },
+    )
+    .await;
+    let url =
+        reqwest::Url::parse(result.native_url.as_deref().expect("song should resolve")).unwrap();
+    assert_eq!(url.host_str(), Some("music.apple.com"));
+    assert_eq!(url.path_segments().unwrap().next_back(), Some("480002450"));
+    assert!(
+        url.query_pairs()
+            .any(|(key, value)| key == "i" && value == "480002454")
+    );
+}
+
 #[test]
 fn external_search_preserves_special_characters_as_one_query() {
     let query = "Björk & Ryuichi Sakamoto - A/B + #1?";

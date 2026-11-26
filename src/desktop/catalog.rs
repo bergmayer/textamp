@@ -57,9 +57,13 @@ pub(super) fn compact_controls(mut controls: Vec<Control>) -> Vec<Control> {
 }
 
 pub fn collection_controls(row: &PlayAllRow, tracks: &[Track]) -> Vec<Control> {
-    compact_controls(crate::app::playback_controls::collection_controls(
-        row, tracks,
-    ))
+    let mut controls = crate::app::playback_controls::collection_controls(row, tracks);
+    if matches!(row, PlayAllRow::Album { .. }) {
+        controls[0] = controls[0].clone().with_next_control(&controls[1]);
+        controls
+    } else {
+        compact_controls(controls)
+    }
 }
 pub use crate::app::details::Kind as PreviewKind;
 pub use crate::app::details::{Document as Preview, similar_seed};
@@ -135,18 +139,12 @@ mod sidebar_tests {
             parent_rating_key: Some("destination-album".into()),
             ..Default::default()
         };
-        let tracks = BrowseColumn::new_with_tracks("Destination", vec![], vec![track]);
-        let mut details = BrowseColumn::new("Album Details", vec![]);
-        details.play_all_row = Some(PlayAllRow::Album {
+        let mut tracks = BrowseColumn::new_with_tracks("Destination", vec![], vec![track]);
+        tracks.play_all_row = Some(PlayAllRow::Album {
             rating_key: "destination-album".into(),
             title: "Destination".into(),
         });
-        details.details = Some(BrowseDetails::Album {
-            artwork_key: "destination-album".into(),
-            lines: vec![],
-        });
-        state.artist_nav.columns = vec![tracks, details];
-        state.artist_nav.focused_column = 1;
+        state.artist_nav.columns = vec![tracks];
         let (seed, albums) = similar_seed(&state).expect("destination seed");
         assert_eq!(seed.rating_key, "destination-track");
         assert!(albums);
@@ -202,11 +200,10 @@ mod sidebar_tests {
                 description: None,
             }],
         ));
-        assert!(
-            !sidebar(&state)
-                .iter()
-                .any(|row| row.label == "Radio Stations" || row.label == "Library Mix")
-        );
+        let rows = sidebar(&state);
+        let station = rows.iter().find(|row| row.label == "Library Mix").unwrap();
+        assert!(matches!(station.actions.as_slice(),
+            [crate::app::Action::Navigation(crate::app::action::NavigationAction::OpenRadioStation(key))] if key == "library"));
         assert!(
             super::super::radio::project(&state).columns[0]
                 .stations

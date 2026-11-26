@@ -2,7 +2,7 @@
 //! chooses its metadata agents (e.g. album-nfo-notes followed by apple-music).
 //! AudioMuse supplies related music separately and does not supply these notes.
 use super::{NavAction, effects};
-use crate::app::{AppState, Event, View, details};
+use crate::app::{AppState, Event, View, state::PlayAllRow};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -20,9 +20,18 @@ impl Notes {
 
 pub fn reconcile(state: &mut AppState, events: &mpsc::Sender<Event>) {
     let target = (state.view == View::Browse && !state.downloads.is_offline())
-        .then(|| details::album_info_selection(state))
+        .then(|| {
+            let nav = state.browse_nav()?;
+            nav.columns
+                .iter()
+                .rev()
+                .find_map(|column| match &column.play_all_row {
+                    Some(PlayAllRow::Album { rating_key, .. }) => Some(rating_key.as_str()),
+                    _ => None,
+                })
+        })
         .flatten();
-    let Some(((key, _), session)) = target.zip(state.sources.active.navidrome()) else {
+    let Some((key, session)) = target.zip(state.sources.active.navidrome()) else {
         if state.sources.album_notes.take().is_some() {
             state.sources.nav_tasks.remove("album-notes");
         }

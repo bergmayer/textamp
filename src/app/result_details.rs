@@ -35,3 +35,14 @@ pub fn track_list(app: &AppState) -> Option<(&[Track], usize)> {
     tracks.get(index)?;
     Some((tracks, index))
 }
+
+/// Playback controls share a horizontal row above the vertical recommendations.
+pub(crate) fn vertical_selection(index: usize, last: usize, down: bool) -> usize {
+    if down && last >= 3 {
+        index.saturating_add(1).clamp(3, last)
+    } else if !down && index >= 3 {
+        if index == 3 { 0 } else { index - 1 }
+    } else {
+        index.min(last)
+    }
+}

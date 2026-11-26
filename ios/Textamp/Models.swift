@@ -17,7 +17,16 @@ struct ExternalSearchRequest: Decodable, Equatable {
 
   @MainActor
   func open(using handoff: (URL, Bool) async -> Bool) async -> Bool {
-    if requiresApp { return await handoff(webURL, true) }
+    if requiresApp {
+      if url != webURL, await handoff(url, true) { return true }
+      if await handoff(webURL, true) { return true }
+      guard webURL.host == "music.apple.com", webURL.lastPathComponent == "search",
+        webURL.path != "/search", var local = URLComponents(url: webURL, resolvingAgainstBaseURL: false)
+      else { return false }
+      local.path = "/search"
+      guard let localURL = local.url else { return false }
+      return await handoff(localURL, true)
+    }
     if await handoff(url, url.scheme == "https") { return true }
     return await handoff(webURL, false)
   }
@@ -30,6 +39,7 @@ struct CommandButton: Decodable, Equatable, Identifiable {
   var section: String?
   var menuGroup: String?
   var group: String?
+  var artwork: String?
   var subtitle: String?
   var description: String?
   var checked: Bool?
@@ -53,6 +63,9 @@ struct SimpleCommand: Decodable, Equatable {
   let label: String
 }
 struct MusicRow: Decodable, Equatable, Identifiable {
+  var balancedCaption: String?
+  var albumCaption: String { year.map { "\(title) (\($0))" } ?? title }
+
   var pending: String?
   var cancel: CommandButton?
   let id: String
@@ -83,6 +96,15 @@ extension Array where Element == CommandButton {
     return groups.compactMap { sections[$0] }
   }
 }
+struct ArtistHeader: Decodable, Equatable {
+  var mix: CommandButton?
+  var search: CommandButton?
+  var loading: Bool?
+  let artwork: String
+  let text: String
+  let reader: CommandButton
+}
+
 struct Column: Decodable, Equatable, Identifiable {
   var playlistEditing: Bool?
   var playlistEditControls: [CommandButton]?
@@ -90,20 +112,25 @@ struct Column: Decodable, Equatable, Identifiable {
   let id: String
   let title: String
   var compactTitle: String?
+  var namedDestination: Bool?
   let rows: [MusicRow]
   let count: Int
   let more: Bool?
   let sections: [ColumnSection]?
   let selectedPosition: Int?
-  let artworkStart: Int?
+  var gridEnd: Int?
+  var gridStart: Int?
   let detail: Bool
   let filter: String
   let filterActive: Bool?
   let options: [CommandButton]
-  let largeArtwork: Bool
   var albumDetailsArtwork: String?
   var albumArtworkKey: String?
-  let albumDetails: CommandButton?
+  var artistRelated: [CommandButton]?
+  var relatedArtists: [CommandButton] { artistRelated ?? albumPage?.related ?? [] }
+  var showsRecommendations: Bool { albumPage?.hasRecommendations == true || !relatedArtists.isEmpty }
+  var artistHeader: ArtistHeader?
+  var albumPage: Details?
   let playback: [CommandButton]?
   let radio: Bool?
   let sidebar: Bool?
@@ -126,6 +153,15 @@ struct ReviewPassage: Decodable, Equatable {
   let italic: Bool
 }
 struct Details: Decodable, Equatable {
+  let artistBio: CommandButton?
+  let lyrics: String?
+  var hasRecommendations: Bool { !similar.isEmpty || !related.isEmpty || !message.isEmpty }
+  func hasSameAlbumHeader(as other: Details?) -> Bool {
+    guard let other else { return false }
+    return title == other.title && subtitle == other.subtitle && rows == other.rows
+      && albumArtist == other.albumArtist
+      && review == other.review && albumURL == other.albumURL
+  }
   let review: [ReviewPassage]?
   let albumURL: URL?
   let albumArtist: CommandButton?
@@ -136,7 +172,7 @@ struct Details: Decodable, Equatable {
   let rows: [[String]]
   let text: String
   let loading: Bool
-  let artwork: String
+  let artwork: String?
   let actions: [CommandButton]
   let links: [CommandButton]
   let related: [CommandButton]
@@ -167,11 +203,16 @@ struct LibraryInfo: Decodable, Equatable, Identifiable {
   let pages: [LibrarySettingsPage]
 }
 struct InputForm: Decodable, Equatable {
+  let fileMode: String?
+  let generation: UInt64?
+  let asset: String?
   let title: String
   let text: String
   let submit: String?
 }
 struct UtilityDialog: Decodable, Equatable {
+  var selected: [CommandButton]?
+  var search: CommandButton?
   let title: String
   let text: String
   let loading: Bool
@@ -204,11 +245,14 @@ struct Snapshot: Decodable, Equatable {
   let settingsOpen: Bool
   let libraryLoading: Bool
   let roots: [CommandButton]
+  var libraryStations: [CommandButton]?
   let sidebarGroups: [CommandButton]
   let columns: [Column]
   let detail: Details?
   var canReturn: Bool?
+  var playingDetail: Details?
   let trackDetail: Bool
+  let history: [ListeningEntry]?
   let queue: [MusicRow]
   let tools: [CommandButton]
   let settings: [CommandButton]
@@ -394,4 +438,11 @@ struct LyricsDisplayLine: Decodable, Equatable {
 struct LyricsSpan: Decodable, Equatable {
   let text: String
   let active: Bool
+}
+
+struct ListeningEntry: Decodable, Identifiable, Equatable {
+  let id: String
+  let title: String
+  let artist: String
+  let album: String
 }

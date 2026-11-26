@@ -14,7 +14,7 @@ A standard Navidrome connection supports catalog browsing, playback, server play
 | Describe music and Search lyrics across the catalog | Configure direct AudioMuse access. Describe music needs the CLAP index. Search lyrics needs the AudioMuse lyrics index. Displaying lyrics for the playing track uses Navidrome’s lyrics API or embedded lyrics for local files. The optional `nd-lyrics` Navidrome plugin can fetch additional lyrics. |
 | Opposite Day and Enemies | Install the custom **Distant Rank v1** plugin **on the AudioMuse server** and configure direct AudioMuse access in Textamp. This “far distance” plugin ranks tracks by cosine distance. Opposite Day compares candidates with the queue average. Enemies finds a distant match for each analyzed track. |
 | Album Details from local sidecars, with Apple Music editorial fallback | Album Details reads Navidrome’s standard `getAlbumInfo2` response. To serve local reviews, configure the read-only `album-nfo-notes` Navidrome plugin before the `apple-music` metadata agent. Persisting eligible Apple reviews requires a separate exporter with library write access. Paragraphs and source credits belong in the sidecar’s `<review>`; Textamp displays the returned notes. |
-| Artist biographies from local metadata files | Install the `artist-nfo-metadata` plugin on Navidrome to read Kodi-style `artist.nfo` files. Textamp also supports server-supplied biographies and a Wikipedia fallback. |
+| Artist biographies from local metadata files | Install the `artist-nfo-metadata` plugin on Navidrome to read Kodi-style `artist.nfo` files. Artist portraits use the library artwork cache. Compilation-only performers can have portraits and biographies without an artist folder or sidecar. They remain accessible through search and direct links and are excluded from Similar Artists. Textamp also supports server-supplied biographies and a Wikipedia fallback. |
 | Search Apple Music | Install Apple Music on the device running Textamp. This command opens the native app independently of the server’s `apple-music` metadata agent. |
 
 For configuration and behavior, see [Radio and AudioMuse](#radio-and-audiomuse) and [library sources](docs/LIBRARY_SOURCES.md).
@@ -81,8 +81,11 @@ See [iOS build and platform details](docs/IOS.md).
 
 ## macOS application
 
-The Mac GUI and TUI sidebars include **Audio Player**. Choose Navidrome
-playlists in the column and select **Review Sync…** to inspect additions, updates, removals and matching files. **Apply Sync** transfers the changes. **On this player…** searches the indexed files across libraries.
+The Mac GUI and TUI sidebars include **Audio Player**. Connect the player in MTP (file transfer) mode. Choose Navidrome
+playlists in the column and select **Review Sync…** to inspect additions, updates, removals and matching files. **Apply Sync** transfers the changes. If an MTP transfer is interrupted, Textamp tries to reconnect to the same player and storage up to three times and retries the interrupted file. **On this player…** searches the indexed files across libraries.
+The queue has **Next** and **History** tabs. Shuffle keeps the current track first (or the first queued track before playback starts) and shuffles the rest. Playing a later queue entry clears the entries above it. Skipped entries do not count as plays. History retains up to 512 plays across launches. On Mac, the trash button on the right sidebar clears the selected queue tab. Clearing History preserves upcoming music. In the TUI queue, press **h** to switch tabs and **c** in History to clear it.
+
+Audio Player lists the last successful sync with each player on this Mac, including disconnected players. **Clear Sync History** clears those dates and device names.
 The player carries its sync selections between Macs configured for the same library.
 Synced tracks are organized as `Textamp <library ID>/Artist/Album/01 Title.ext` on the player.
 For WebDAV, browse and filter cached folders or open **Synced folders** to review
@@ -101,9 +104,9 @@ The desktop-enabled build is one application with three launch modes:
 ```
 
 Finder launch and desktop builds without a mode flag restore the last successful
-windowed mode, using Graphical mode for a new profile. Multi Window GUI, Single Window GUI and Text are choices under View → Modes and both palettes.
-In Now Playing, song, artist and album names open their library details. Multi-window mode includes Window → Visualizer.
-⌘⌥T cycles GUI Multiple Windows → GUI Single Window → Text. ⌘⇧T (or Ctrl+Shift+T) also cycles the three modes in the running session. Playback, library requests, browsing and unfinished forms stay alive.
+windowed mode, using Graphical mode for a new profile. GUI and Text are choices under View → Modes and both palettes.
+In Now Playing, song, artist and album names open their library details.
+⌘⌥T switches between GUI and Text. ⌘⇧T (or Ctrl+Shift+T) also switches modes in the running session. Playback, library requests, browsing and unfinished forms stay alive.
 Text mode embeds the existing Ratatui interface through bundled libghostty-vt;
 it needs neither a separate Ghostty installation nor another player process.
 
@@ -131,9 +134,9 @@ masked credential inputs, list items, menus, tabs, dialogs, breadcrumbs,
 metadata descriptions, scrollbars, status bars and transport sliders. See the
 GUI-only component policy in [AGENTS.md](AGENTS.md).
 
-Settings (**Textamp → Settings…**, **⌘,**) uses an overlay in single-window mode and a native window in multi-window mode, with
+Settings (**Textamp → Settings…**, **⌘,**) uses an overlay, with
 Libraries, Appearance, Audio, Sidebar, Search and About categories.
-Appearance offers Text, GUI Single Window, and GUI Multiple Windows in one Mode control; standalone terminals omit it. Theme previews show the highlighted choice; confirmation applies it.
+Appearance offers Text and GUI in one Mode control; standalone terminals omit it. Theme previews show the highlighted choice; confirmation applies it.
 Libraries accepts Subsonic/Navidrome, WebDAV and local sources plus optional
 AudioMuse credentials. Opening Settings or saving a connection leaves the active
 source and playback unchanged. **F10**, Up/Down selects a category; Enter/Right
@@ -152,36 +155,22 @@ letter within the current first-letter group; # and % address numbers and symbol
 letter shortcuts. Album/track previews, with explicit play/queue actions, follow
 the last open Miller column. **⌘-click** and **Shift-click** select multiple tracks;
 right-click targets the clicked item and preserves an appropriate existing group.
-Artist Details appears above All Tracks in an artist’s album column in both
-frontends. It opens an adjacent details pane with the biography, artist photos and Artist Mix (R or its button in the TUI). GUI album
-track columns begin with Album Details, followed by tracks. The TUI exposes an Album Details row above the album track list. Selecting Album Details
-opens album metadata, playback/queue actions and similar albums in the details pane;
-selecting a track shows its information. Merely selecting an album does not open
-the details pane.
+Artist columns start with All Tracks. Album pages show cover art, metadata and tracks, with Artist Biography and Album Info on either side of Play. Track Details includes available lyrics and track-specific artwork. In the terminal, Left and Right choose playback controls, Down selects a similar track, and Page Up and Page Down scroll through the lyrics. Similar Albums shows recommended releases in a cover grid beneath the tracks. Similar Artists follows with portraits of artists that Navidrome associates with the album artist. Artist album lists show a centered portrait and biography excerpt above the albums, with a Similar Artists grid below.
 
-Library and Now Playing share one window by default. Clicking the bottom track tile
-expands its transport upward over the library in 240 ms, growing the artwork into
-the player header. Playback controls sit below the artwork, with visualizers and queue below.
+Library and Now Playing share one window by default. Click empty space in the transport bar to open Now Playing or return to the library. Click transport metadata to open Now Playing. On Mac, click the cover to enter mini mode and click it again to return. The Mac sidebar’s top-level icons stay accessible beside the player. The left sidebar has a visibility toggle. Next and History on the right open the queue to that view. Click the selected icon again to close it. Search, Settings, the command palette and Radio sit below Next and History on the right. Click Radio to start the selected station or hold it to choose a station for future clicks. Playback controls sit in the transport bar.
 A small chevron collapses the player back to the bottom; library selection and
 scroll positions stay in place. The artwork header and queue remain resizable;
 transport controls keep their horizontal alignment throughout the transition.
-Column headers retain their full title when it fits. In narrower columns they
+Column headers start with a capital letter and show the full title when it fits. In narrower columns they
 drop the “albums —” or “tracks —” prefix before applying middle ellipsis.
-When collapsed, the queue pane shows Up Next: the next queued track, artwork,
-artist and remaining count. Click it to open Now Playing, or right-click for the
-track menu. An empty queue shows “Nothing queued.”
-Motion follows the system Reduce Motion setting. View → GUI: Multiple Windows enables independent
-Library, player and visualizer windows; View → GUI: Single Window combines them again. Artwork and track
-information sit above the visualization; its six tabs select waveform, spectrum, spectrogram, vectorscope, landscape or studio meters. Artwork remains visible beside the track information. The actual play
-queue occupies the side pane. Its header has Queue Type (list icon) and
-Queue Tools (clipboard-and-pencil icon) dropdowns for radio modes and queue edits. Undo (⌘Z) and
+Motion follows the system Reduce Motion setting. Artwork and track
+information sit above the visualization; its six tabs select waveform, spectrum, spectrogram, vectorscope, landscape or studio meters. Artwork remains visible beside the track information. On Mac, Next and History open in their own resizable sidebar alongside either Library or Now Playing. The sheet slides up from the edge-to-edge transport, which also holds the navigation and status controls. Opening Now Playing from a focused library column keeps that column in the sidebar. Back (⌘[) moves up one level. Selecting an icon expands the Library sidebar in place. Choose a destination to browse one column at a time alongside Now Playing. Closing that column returns the sidebar to its root. Dismissing it restores the full library layout. The TUI uses ‹ or Backspace to step up in the single Library column. Queue Type, Queue Tools, and Clear sit at the foot of the right sidebar. Double-click a History track to replay it, or open its context menu for Play Next and Track Details. In the terminal, use Enter, +, and Right for those actions. Undo (⌘Z) and
 Save Queue as Playlist are available in the menu bar. Queue Tools also opens Save Queue as Playlist. Clear Queue is undoable
-without restarting playback. These tools work in full and split Now Playing
-views, including the independent Queue panel. The Queue Type dropdown in the Play Queue header selects Manual Queue, Continue with Related Tracks, or a radio station; its active indicator marks a non-manual queue.
+without restarting playback. The Queue Type dropdown selects Manual Queue, Continue with Related Tracks, or a radio station; its active indicator marks a non-manual queue.
 Stations replace the queue; continuation preserves it and starts from its final track.
 Radio and related-track modes append a batch when the second-to-last track starts.
 Auto-Mix overlaps adjacent songs with equal-power fades.
-Lyrics uses the active Navidrome connection to fetch structured lyrics on demand. Synchronized lines and optional words follow playback and seeking; turn off Follow Playback to read freely. Multiple entries offer a language choice. Local files use embedded lyrics. The app does not write lyrics to music files or its library cache. When no lyrics are available, an explicit web search remains available.
+Lyrics uses the active Navidrome connection to fetch structured lyrics on demand. Follow Playback keeps the current timed line in view as the song plays or seeks. The graphical apps enlarge and tint that line. The terminal uses bold accent text. Turn off Follow Playback to read freely. Multiple entries offer a language choice. Local files use embedded lyrics. The app does not write lyrics to music files or its library cache. When no lyrics are available, an explicit web search remains available.
 Artist, album and genre names in
 Now Playing navigate to their Library destinations. The bottom transport shows
 the current cover. Drag queue entries to reorder them, including selected
@@ -210,6 +199,11 @@ Mac uses the system UI font. **⌃⌘F** toggles the native Mac window's full-sc
 
 Library is a sidebar heading with Artists, Albums and Tracks destinations.
 File → Create New Playlist… creates an empty playlist on the active Navidrome server. The same command is available under File in the command palette.
+
+**File → Export Playlist** saves the open playlist as UTF-8 M3U8 or CSV. **Export Queue** saves the current playback order. **File → Import Playlist…** creates a new playlist on the connected Navidrome server, named after the selected file. Choose an M3U, M3U8 or CSV file. M3U entries match library file paths. CSV accepts a Path or Title column and can use Artist and Album to distinguish tracks. Order and repeated tracks are preserved. An unmatched or ambiguous entry stops the import before anything is saved. The terminal uses a themed file picker. Mac, iPhone and iPad use their system file pickers.
+
+Individual star ratings are under **Edit → Track Rating** in the command palette and the Mac menu bar.
+
 Settings → Sidebar follows the sidebar’s groups, labels and order, including the
 Albums subitems. Its visibility checkboxes retain hidden destinations so they can
 be restored. Status, loading and error messages use an opaque, fixed-height strip
@@ -217,12 +211,18 @@ below the transport. The focused column’s displayed-row count appears there on
 column headers contain the title and relevant controls.
 Radio Stations is available in the queue’s Radio menu, Discover and the command
 palette. Artist Mix and seed-based stations use a single chooser.
-Each column's View Options button offers the same sort modes, direction,
+In text mode, F6 or the column’s ≡ button opens View → View Options in the command palette. The Mac menu bar uses the same submenu. Unavailable options appear dimmed.
+
+Single-album pages keep tracks in release order. Other columns’ View Options buttons offer the same sort modes, direction,
 grouping and artwork options as the TUI for that kind of column. Show artwork
 defaults on and is remembered by column type across both presentations; playlists
-also have Group by album.
-Album rows without artwork show a generic cover in the same square slot, including
-when Large Artwork is enabled.
+also have Group by album. Album columns default to **Grid**, including grouped downloads and playlists.
+Choose **List** in View Options for compact rows. In the Mac grid, Left and Right
+move between covers, Up and Down move by row, and Return opens the selected album. On an artist’s page, the web search button appears below the portrait
+when a biography is unavailable. When a biography is available, open **…more**
+to find the same button in the reader. In the terminal, press Up from the first row and Enter to open the biography. The album page offers the biography button
+while availability is unknown and switches to web search after an unsuccessful lookup. Choose Google or DuckDuckGo in Search settings.
+Album rows without artwork show a generic cover in the same square slot.
 Settings → Cache & Scanning shows per-library disk use, re-scan/cancel and clear
 controls. Both frontends share cached startup, weekly refresh and cache jobs.
 
@@ -248,7 +248,9 @@ Global command-palette actions are also available in the native menu bar,
 including volume/seek, sorting, radio/queue-edit tools, provider queue commands and the
 current radio-station hierarchy. Bare letter keys jump within the focused column.
 
-Radio in the sidebar, Discover → Radio, and the queue’s Radio button all open the same Radio columns in the library workspace. Artist Mix sits alongside the other stations and opens the artist chooser. Stations requiring an input open their controls immediately in the detail pane; selecting them does not start playback. Discover includes Radio, AI, Journey, Library Mix, random album playback and Go to Random Album.
+Textamp recalculates station availability from each Navidrome catalog when it loads or refreshes. Mood, genre and decade choices require two distinct matching tracks. AudioMuse mood choices are checked against the selected library when Mood Mix opens. Local and WebDAV libraries use playable files found during folder scanning and browsing. A WebDAV album folder can supply artwork in `cover.jpg`; embedded track artwork takes precedence during playback.
+
+Radio in the sidebar, Discover → Radio, and the queue’s Radio button all open the same Radio columns in the library workspace. Radio lists stations and station categories. One-time edits such as Shuffle, Twofer and Stretch live in Queue Tools. Artist Mix opens an artist chooser. On iPhone and iPad, search by name, add or remove artists, then tap Play Mix. Stations requiring an input open their controls immediately in the detail pane; selecting them does not start playback. Discover includes Radio, AI, Journey, Library Mix, random album playback and Go to Random Album.
 The fast-scroll alphabet index occupies a separate fitted strip, without
 covering track names. Library navigation dismisses discovery popups and their
 return targets.
@@ -257,7 +259,7 @@ Native dialogs present search and adjacent result details, similar/related music
 biographies, lyrics/analysis, sorting, output
 selection, library management and confirmations. Capability checks, cancellation,
 request identities and stale-response protection remain shared with the TUI.
-Native themes retain Kit's neutral surfaces with the selected theme's accent.
+The brushed aluminum theme frames the Mac workspace in textured silver with an inset border. Mobile uses a narrower rim. The terminal uses flat silver surfaces and blue selections.
 The desktop remains experimental. See [desktop architecture and interactions](docs/DESKTOP.md)
 and [runtime boundaries](docs/RUNTIME.md). The complete TUI remains the default frontend.
 
@@ -285,12 +287,11 @@ choice in the Window menu and command palette. Both share one playback engine
 and queue. Shrinking Now Playing below 720 points wide or 520 points tall shows a
 mini-player with square artwork, title, artist, playback buttons and a seek slider;
 expanding restores metadata and visualizers. Play Queue is independent: its transport
-button opens a rising, resizable panel beside Library or Now Playing in single-window
-mode, or a separate window in multi-window mode. View Options stays a fixed size, including its Large Artwork option.
+button opens a rising, resizable panel beside Library or Now Playing. View Options stays a fixed size.
 Recently Added offers Date Added sorting to restore the server’s newest-first
 order after another sort; Oldest First reverses it.
 Left from the first browser column focuses the sidebar; Up/Down moves through its
-visible destinations and disclosure headings. Enter/Right opens a destination;
+visible destinations and disclosure headings. Enter opens a destination. Arrow keys move within grids and between existing columns;
 Left collapses its section. Keyboard selections scroll into view.
 
 ## Terminal layout
@@ -300,14 +301,12 @@ Folders, Genres, Decades, AI and playlists. Enter toggles a disclosure; Right ex
 or enters it and Left collapses it. Click a triangle to expand or collapse its group.
 
 Press **⌘2** (windowed), **Ctrl+2**, **Ctrl+U**, or **|** to show or hide Play Queue on the right;
-Left returns to the workspace. Queue Type and Queue Tools are icon menus in the
-queue header. Up from the first track reaches Queue Type; Right reaches Queue
+Left returns to the workspace. Queue Type and Queue Tools are icon menus on the right of the transport. Up from the first track reaches Queue Type; Right reaches Queue
 Tools. Enter opens the contextual menu. Queue tools
 include shuffle, repeat, Twins, Twofer, Stretch, Doppelganger, Opposite Day, Enemies, save, clear, undo,
 Queue Type and Auto-Mix. The queue heading identifies the active station or continuation mode.
 
-Now Playing places artwork and clickable artist metadata above the transport and
-visualizer. Settings has a category pane and a content pane; About displays the
+Now Playing places the visualizer between the artwork and the transport. Settings has a category pane and a content pane; About displays the
 original colored ANSI logo. Both frontends use the system's audio output.
 
 Terminal columns share the available width equally and scroll horizontally when they
@@ -353,6 +352,7 @@ on a second click. **:** or **Ctrl+P** opens the command palette. Available comm
 - **Artwork** selects Images, ANSI half blocks or Braille for the active library.
   Graphical and Text mode retain separate rendering choices. External terminals
   without an image protocol use half blocks without changing the saved choice.
+  Artwork encoding follows the library when switching between GUI and text mode.
   Column View Options remember artwork visibility by column type, shared between
   presentations; artwork is on by default.
 - **Cache** shows metadata and artwork size for that library. Downloaded
@@ -391,11 +391,11 @@ different backend.
 | Key | Action |
 |---|---|
 | `:` | Command palette; `:q` Enter quits |
-| `/` / `Ctrl+F` | Filter focused column / search |
-| `Tab` / `Shift+Tab` | Next / previous panel in Text mode; next / previous control in Graphical mode |
+| `/` / `Ctrl+F` | Filter focused column / search. Empty search shows the last 12 results chosen in this library. Select one to open it directly. |
+| `Tab` / `Shift+Tab` | Next / previous pane |
 | `⌘2` / `Ctrl+2` / `Ctrl+U` / `\|` | Show or hide the queue |
 | `Alt+T` | Focus transport controls |
-| `Alt+A` | Focus visible artist names; arrows select, Enter opens Artist Details |
+| `Alt+A` | Focus visible artist names; arrows select, Enter opens the artist’s albums |
 | `↑↓ ←→`, Enter, Backspace | Select, drill in, drill out |
 | `Space`, `<`, `>` | Play/pause, previous, next |
 | `Shift+←→` / `Ctrl+Shift+↑↓` | Seek 10 seconds / volume |
@@ -403,7 +403,7 @@ different backend.
 | `Ctrl+S` | Save queue as a server playlist |
 | `Ctrl+X` / `Ctrl+Z` | Clear queue / undo edit |
 | `F1` / `F2` / `,` | Help / Settings |
-| `F3` / `F4` / `F5` / `F6` | Switch library / Artist Details / refresh / sort |
+| `F3` / `F4` / `F5` / `F6` | Switch library / Artist Biography / refresh / sort |
 | `Alt+←` | Back from a library jump |
 | `Ctrl+Q` / `Ctrl+C` | Quit |
 
@@ -457,6 +457,8 @@ ambiguous matches are not guessed, including when another match has no English
 article. Conflicting server identities are withheld; Wikipedia retains its strict
 identity checks. An image failure does not discard loaded biography text. If both biography
 sources are unavailable, the pane says “No biography available”.
+While a biography loads, the artist column offers web search. The preview and its …more button appear when usable text arrives. Textamp keeps up to 32 completed lookups in memory for the active library. A result with prose is reusable for 24 hours and a miss for one hour. Refresh Library clears those results.
+
 Navidrome supports biographies through optional external agents, but their
 availability depends on server configuration and coverage. Articles show clean text and photos. Arrows
 scroll/change photos; B opens the source. Down past the text or Tab focuses
@@ -467,17 +469,13 @@ Apple Music and YouTube searches are enabled by default; Spotify can be enabled
 in Search settings. The iOS overflow menu offers app-only searches. External search
 uses visible details first, then the active artist or album column, then the playing
 track; commands are disabled without a music subject. All enabled services are
-available in the contextual palette. Search Apple Music uses ⌘⇧A on Apple keyboards or Ctrl+Shift+A in the desktop and terminal interfaces. Textamp passes the selected query as an Apple Music search link to the native Music app. If the operating system cannot open it there, Textamp reports the failure. Music controls the screen shown after launch.
+available in the contextual palette. Search Apple Music uses ⌘⇧A on Apple keyboards or Ctrl+Shift+A in the desktop and terminal interfaces. On iOS, for a selected song, album, or artist, Textamp checks Apple’s U.S. catalog for an exact match and opens its link in Music. An ambiguous or missing match, or an unavailable catalog, falls back to the original search link. Music controls whether it displays search results after launch.
 
 ## Radio and AudioMuse
 
-Radio controls are shared. Local/WebDAV offer Library Mix and Random Album
-Radio; bottommost music folders are albums. Discovery samples branches, bounded
-to 256 directories and 30 seconds per request, rather than indexing the whole
-tree. It is not uniform album sampling.
+Each radio station needs playable music from at least 20 distinct albums credited to 20 distinct album artists. A session queues at most one track from each album, including refills. Starting a new session makes those albums eligible again. Browsing albums and decades has no minimum.
 
-Navidrome offers random album/artist, deep cuts, time travel, date and genre
-stations. Random Artist Mix requires 25+ tracks in the selected library.
+Textamp rebuilds catalog station choices when it loads a library or finishes a refresh. Local folder scans use embedded album and album-artist tags from sampled files. For WebDAV, Textamp learns those credits from files opened for playback in the active library. Artist and sonic mixes check the recommendations for the chosen seed before starting playback.
 **Alt+R** starts Play Random Albums. Sonic Mix continues the current song before
 matches; a different selected seed plays first. It is also in the track menu.
 
@@ -490,24 +488,23 @@ The Navidrome stations use these selection rules:
 
 | Station | What it plays |
 | --- | --- |
-| Play Random Albums | A randomly chosen album in disc/track order. |
-| Random Artist Mix | A random artist with at least 25 distinct catalog tracks; shuffled batches of up to 100 tracks. |
+| Play Random Albums | One song per randomly chosen album. |
+| Random Artist Mix | A mix drawn from artists with at least 25 distinct catalog tracks each. |
 | Library Mix | Up to 100 shuffled tracks from the active library per batch. |
 | Deep Cuts Mix | Shuffled tracks at or below the library's 25th-percentile play count; ties can include more than a quarter. |
 | Time Travel Mix | Successive release decades, oldest to newest, with shuffled tracks in each batch. |
 | On This Day | Tracks from albums released on today's month/day, regardless of year. |
-| Mood Mix | Tracks from albums with the chosen mood tag; AudioMuse mood choices use its analyzed matches instead. |
-| Style / Genre Mix | Tracks from albums with the chosen genre tag. |
+| Mood Mix | Catalog moods use matching albums. AudioMuse moods use analyzed tracks. |
+| Style / Genre Mix | Shuffles songs from albums with the chosen genre. |
 | Decade Mix | Tracks from albums released in the chosen decade. |
-| Artist Mix | Choose one or more artists. Two tracks from the selection are followed by one related track when available. |
+| Artist Mix | Choose one or more artists. Combines their tracks with related recommendations. |
 | Sonic Mix | Recommendations follow the currently playing track at each refill. |
 | Stay Close Mix | Recommendations keep using the original chosen track as their seed. |
 
-Artist Mix accepts up to 12 selected artists. If related discovery is unavailable, playback continues with tracks by those artists.
+The Artist Mix control in an artist’s column header starts a mix for that artist. In Radio, choose Artist Mix to select up to 12 artists before starting playback.
 Station choices follow
 the active library's capabilities and sonic settings. Metadata stations use the
-cached catalog; unavailable tags or play counts produce a visible error. Refills
-exclude currently audible/upcoming tracks, while earlier tracks can recur.
+cached catalog; unavailable tags or play counts produce a visible error.
 
 In Settings → Libraries, **I** toggles Sonic features for a server library.
 Off hides analysis-dependent controls and cancels pending analysis work without
@@ -520,6 +517,8 @@ analysis export (`/api/sync`) is required. The **audiomuse** sidebar offers labe
 tempo, energy, key, analyzed tracks, Describe music and Search lyrics. CLAP and
 lyrics searches require their respective indexes. Partial scans yield partial
 results. Inferred labels remain separate from genres in file tags.
+On iPhone and iPad, swipe left on a Describe Music history entry or hold it and choose Remove from History. This removes the saved search and its results from the current library.
+
 Describe music uses a compact wrapped prompt that scrolls as you type. When its
 sidebar row (or Search lyrics) is highlighted, Right returns to the current
 results; Enter opens a new search prompt. Before a search, Right also opens the
@@ -571,8 +570,7 @@ In **Settings → Libraries**, use **A / Add library**, **Enter / Manage**, or
 **F5 / Re-scan** for the selected library. F5 cancels a running scan. Its status
 appears below the list, without changing the active library or playback.
 
-**Settings → Libraries → Enter** shows that library's on-disk cache size,
-including AudioMuse. **Re-scan library now** rebuilds its catalog/tree and enabled
+**Settings → Libraries → Manage → Cache** shows the library’s on-disk metadata, analysis and artwork sizes. For Navidrome it also shows when the last full catalog sync completed. **Re-scan library now** rebuilds its catalog/tree and enabled
 AudioMuse data without switching libraries or interrupting playback. Select it
 again to cancel. Failures preserve the last usable snapshot. **Clear library
 cache** removes only that library's metadata/analysis; reopen or re-scan to rebuild.
@@ -631,14 +629,13 @@ the focused slider. Settings opens in a centered popover that adapts to the term
 
 Settings values, command variants, queue tools and detail metadata use shared
 application definitions. Album artwork cards put the title and year beside small images and below
-large images in both presentations. The Artwork preference also controls Artist Details images.
+large images in both presentations.
 The terminal footer describes the focused control ahead of background activity. Track-and-following operations appear in the contextual command palette.
 
 The windowed Text and graphical modes retain pane geometry when switching, with
 a monospace font in Text mode and the system font in graphical mode. Both show
 elapsed and remaining time beneath the transport scrubber and retain the small
-artwork thumbnail in Library and Now Playing. Large Artwork is available in
-both View Options interfaces. Embedded Text uses graphical visualizers with
+artwork thumbnail in Library and Now Playing. Embedded Text uses graphical visualizers with
 graphics artwork and character visualizers with half-block or braille artwork.
 
 On Unix, Cargo test executables run with a temporary XDG profile through the repository runner. Normal Cargo launches retain the selected personal profile. Direct native checks must set separate configuration, data, cache and state paths.
@@ -648,4 +645,4 @@ For repeatable large-catalog and cached-startup measurements, see
 F5 retries failed related music in the current detail pane while keeping the
 library destination and its tracks visible.
 
-In Discover, Command–Option–R opens Radio, Command–Option–L starts Library Mix, Command–Option–A plays random albums in track order, and Command–Option–J opens Journey. Terminal bindings use Control–Alt with the same letters. Command–Shift–R browses a random album. In Settings → About, tap or click the logo four times to read the last six days of activity.
+In Discover, Command–Option–R opens Radio, Command–Option–L starts Library Mix, Command–Option–A starts Play Random Albums, and Command–Option–J opens Journey. Terminal bindings use Control–Alt with the same letters. Command–Shift–R browses a random album. In Settings → About, tap or click the logo four times to read the last six days of activity.

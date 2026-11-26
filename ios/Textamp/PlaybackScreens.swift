@@ -15,8 +15,8 @@ struct MiniPlayer: View {
           model.selectTab("now_playing")
         } label: {
           HStack {
-            Artwork(id: player.artwork).frame(width: 40, height: 40).playerBounds(.cover).clipShape(
-              RoundedRectangle(cornerRadius: 5))
+            Artwork(id: player.artwork).clipShape(RoundedRectangle(cornerRadius: 5))
+              .playerBounds(.cover).frame(width: 40, height: 40)
             VStack(alignment: .leading) {
               Text(player.title).font(.subheadline.bold()).lineLimit(1).playerBounds(.title)
               if !player.artist.isEmpty {
@@ -132,6 +132,42 @@ private extension View {
   }
 }
 
+/// The sheet sheds its header space as its shared content moves into the transport.
+struct TransportSurface: Shape {
+  var expansion: CGFloat
+  let bar: CGRect
+  let compactContentTop: CGFloat?
+  let expandedContentTop: CGFloat?
+
+  var animatableData: CGFloat {
+    get { expansion }
+    set { expansion = newValue }
+  }
+
+  func path(in bounds: CGRect) -> Path {
+    let p = min(1, max(0, expansion))
+    func mix(_ compact: CGFloat, _ expanded: CGFloat) -> CGFloat {
+      compact + p * (expanded - compact)
+    }
+    var top = mix(bar.minY, bounds.minY)
+    if let compactContentTop, let expandedContentTop {
+      let compactInset = max(0, compactContentTop - bar.minY)
+      let expandedInset = max(0, expandedContentTop - bounds.minY)
+      // Keep the compact padding throughout the drag. Restore the extra header
+      // space only near the expanded endpoint.
+      top += max(0, expandedInset - compactInset) * (p - pow(p, 10))
+    }
+    let rect = CGRect(x: mix(bar.minX, bounds.minX), y: top,
+                      width: mix(bar.width, bounds.width), height: max(0, mix(bar.maxY, bounds.maxY) - top))
+    return RoundedRectangle(cornerRadius: 22).path(in: rect)
+  }
+}
+
+private struct PlayerScrolled: PreferenceKey {
+  static let defaultValue = false
+  static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
+}
+
 struct TransportPresentation: View {
   let expanded: Bool
   let lift: CGFloat
@@ -143,6 +179,8 @@ struct TransportPresentation: View {
   @Environment(AppModel.self) private var model
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var expansion: CGFloat = 0
+  @State private var playerScrolled = false
+  @State private var mayMinimize: Bool?
   @GestureState private var dragging = false
 
   private func settle(open: Bool) {
@@ -158,6 +196,7 @@ struct TransportPresentation: View {
   var body: some View {
     ZStack {
       if expanded || presenting {
+        let full = fullLayout.frames.mapValues { $0.offsetBy(dx: -origin.x, dy: -origin.y) }
         VStack(spacing: 0) {
           Button(action: model.dismissNowPlaying) {
             Capsule().fill(model.theme.muted).frame(width: 36, height: 5)
@@ -167,36 +206,40 @@ struct TransportPresentation: View {
           NowPlayingNavigation()
         }
         .frame(width: size.width, height: size.height)
-        .background(model.theme.bg)
+        .background(model.theme.baseFill)
         .environment(\.playerExpansion, reduceMotion ? 1 : expansion)
         .environment(fullLayout)
         .overlay {
           if let player = model.player {
             PlayerMorph(expansion: expansion, compact: transport,
-              full: fullLayout.frames.mapValues { $0.offsetBy(dx: -origin.x, dy: -origin.y) },
+              full: full,
               size: size, player: player, reduceMotion: reduceMotion)
               .allowsHitTesting(false).accessibilityHidden(true)
           }
         }
         .mask {
           if let bar = transport[.surface], !reduceMotion {
-            RoundedRectangle(cornerRadius: 22)
-              .frame(width: bar.width + expansion * (size.width - bar.width),
-                     height: bar.height + expansion * (size.height - bar.height))
-              .position(x: bar.midX + expansion * (size.width / 2 - bar.midX),
-                        y: bar.midY + expansion * (size.height / 2 - bar.midY))
+            let movingParts: [PlayerPart] = [.cover, .title, .artist, .play, .next]
+            let measured = movingParts.filter { transport[$0] != nil && full[$0] != nil }
+            TransportSurface(expansion: expansion, bar: bar,
+              compactContentTop: measured.compactMap { transport[$0]?.minY }.min(),
+              expandedContentTop: measured.compactMap { full[$0]?.minY }.min())
           } else { Rectangle() }
         }
         .opacity(reduceMotion ? expansion : 1)
+        .onPreferenceChange(PlayerScrolled.self) { playerScrolled = $0 }
         .contentShape(Rectangle())
         .simultaneousGesture(
           DragGesture(minimumDistance: 16, coordinateSpace: .global)
             .updating($dragging) { _, active, _ in active = true }
             .onChanged { value in
-              guard value.translation.height > abs(value.translation.width) else { return }
+              if mayMinimize == nil { mayMinimize = !playerScrolled || value.startLocation.y < origin.y + 64 }
+              guard mayMinimize == true, value.translation.height > abs(value.translation.width) else { return }
               expansion = max(0, 1 - value.translation.height / max(1, size.height))
             }
             .onEnded { value in
+              defer { mayMinimize = nil }
+              guard mayMinimize == true else { return }
               let down = value.translation.height
               if down > abs(value.translation.width), down > 40,
                  down > size.height * 0.35 || value.velocity.height > 520 {
@@ -250,9 +293,9 @@ private struct PlayerMorph: View, Animatable {
   }
 
   var body: some View {
-    if !reduceMotion {
+    if !reduceMotion && expansion < 1 {
       ZStack(alignment: .topLeading) {
-        model.theme.card.overlay { model.theme.bg.opacity(expansion) }
+        model.theme.card.overlay { Rectangle().fill(model.theme.baseFill).opacity(expansion) }
           .opacity(min(1, (1 - expansion) * 4))
         Group {
           if let cover = rect(.cover) {
@@ -320,8 +363,8 @@ struct NowPlayingNavigation: View {
 struct NowPlayingScreen: View {
   @Environment(AppModel.self) var model
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+  @State private var detailsRequested = false
   var inWorkspace = false
-  @State private var waveformExpanded = false
   var body: some View {
     GeometryReader { geometry in
       if let player = model.player {
@@ -333,31 +376,62 @@ struct NowPlayingScreen: View {
               && ((inWorkspace && available >= 720)
                 || (available >= 500 && content.size.width > content.size.height * 1.3))
             ScrollView {
-              PlayerArrangement(
-                availableHeight: max(0, content.size.height - 32), horizontal: horizontal
-              ) {
-                Artwork(id: player.artwork).aspectRatio(1, contentMode: .fit).playerBounds(.cover)
-                  .clipShape(RoundedRectangle(cornerRadius: 14))
-                  .shadow(color: .black.opacity(0.12), radius: 12, y: 5)
-                controls(player)
+              VStack(spacing: 0) {
+                PlayerArrangement(
+                  availableHeight: max(0, content.size.height - 32), horizontal: horizontal
+                ) {
+                  Color.clear.aspectRatio(1, contentMode: .fit)
+                    .overlay {
+                      Artwork(id: player.artwork).clipShape(RoundedRectangle(cornerRadius: 14))
+                        .playerBounds(.cover)
+                    }
+                    .accessibilityElement(children: .ignore).accessibilityLabel("Album artwork")
+                    .accessibilityIdentifier("now-playing-artwork")
+                    .shadow(color: .black.opacity(0.12), radius: 12, y: 5)
+                  controls(player)
+                }
+                .clipped()
+                .padding(.horizontal, 24).padding(.vertical, 16)
+                .frame(maxWidth: horizontal ? 1040 : 580)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: content.size.height, alignment: .top)
+                .background(GeometryReader { section in
+                  Color.clear.preference(key: PlayerScrolled.self,
+                    value: section.frame(in: .named("playing-scroll")).minY < -2)
+                })
+                ActivityStatus()
+                if let key = player.key {
+                  VStack(alignment: .leading, spacing: 16) {
+                    Text("Track Details").font(.headline).accessibilityAddTraits(.isHeader)
+                    if let detail = model.snapshot?.playingDetail, detail.id == "details:track:" + key {
+                      TrackMetadataContent(detail: detail)
+                    } else { ProgressView() }
+                  }
+                  .padding(20).frame(maxWidth: .infinity, alignment: .leading)
+                  .accessibilityIdentifier("playing-track-details")
+                }
               }
-              .padding(.horizontal, 24).padding(.vertical, 16)
-              .frame(maxWidth: horizontal ? 1040 : 580)
-              .frame(maxWidth: .infinity)
-              if inWorkspace { ActivityStatus() }
+            }
+            .accessibilityIdentifier("playing-scroll")
+            .coordinateSpace(name: "playing-scroll")
+            .onPreferenceChange(PlayerScrolled.self) { scrolled in
+              if scrolled && !detailsRequested {
+                detailsRequested = true
+                model.send("now_playing_details", ["visible": true])
+              }
+            }
+            .onDisappear {
+              detailsRequested = false
+              model.send("now_playing_details", ["visible": false])
             }
           }
           volumeControls(player).padding(.horizontal, 24).padding(.vertical, 8)
-            .background(model.theme.bg)
+            .background(model.theme.baseFill)
         }
       } else {
         ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
       }
-    }.background(model.theme.bg)
-      .accessibilityHidden(waveformExpanded)
-      .fullScreenCover(isPresented: $waveformExpanded) {
-        ExpandedPlaybackWaveform().environment(model)
-      }
+    }.background(model.theme.baseFill)
       .navigationTitle("Now Playing").navigationBarTitleDisplayMode(
         .inline
       )
@@ -396,17 +470,7 @@ struct NowPlayingScreen: View {
         }
       }
       playbackMode(player)
-      HStack(spacing: 8) {
-        PlaybackWaveform(player: player)
-        Button {
-          waveformExpanded = true
-        } label: {
-          Image(systemName: "arrow.up.left.and.arrow.down.right")
-            .font(.caption).padding(8).background(
-              model.theme.card, in: RoundedRectangle(cornerRadius: 6))
-        }.accessibilityLabel("Expand Waveform").frame(width: 44, height: 44)
-          .disabled(player.key == nil)
-      }
+      PlaybackWaveform(player: player)
       PlaybackTransportControls(player: player)
     }
   }
@@ -461,7 +525,8 @@ private struct PlayerArrangement: Layout {
   ) {
     let (side, controls, gap) = dimensions(bounds.width, subviews)
     subviews[0].place(
-      at: CGPoint(x: horizontal ? bounds.minX : bounds.midX - side / 2, y: bounds.minY),
+      at: CGPoint(x: horizontal ? bounds.minX + side / 2 : bounds.midX, y: bounds.minY),
+      anchor: .top,
       proposal: .init(width: side, height: side))
     subviews[1].place(
       at: CGPoint(
@@ -506,73 +571,113 @@ struct QueueScreen: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var editMode = EditMode.inactive
   var docked = false
+  @State private var history = false
   var rows: [MusicRow] { model.snapshot?.queue ?? [] }
   var body: some View {
-    List {
-      ForEach(rows) { row in
-        HStack(spacing: 10) {
-          Button {
-            model.send("queue_play", ["index": row.index, "key": row.key])
-          } label: {
-            Image(
-              systemName: row.selected && model.player?.playing == true
-                ? "speaker.wave.2.fill" : "play.fill"
-            ).frame(width: 44, height: 44)
-          }.buttonStyle(.borderless).accessibilityLabel("Play \(row.title)")
-            .accessibilityValue(row.selected ? "Now Playing" : "")
-          Button {
-            Divider()
-            if let details = row.details { model.invoke(details.token) }
-          } label: {
-            VStack(alignment: .leading, spacing: 5) {
-              Text(row.title).lineLimit(2).foregroundStyle(model.theme.text)
-              Text(row.subtitle).font(.subheadline).lineLimit(2).foregroundStyle(model.theme.muted)
-            }.frame(maxWidth: .infinity, alignment: .leading)
-          }.buttonStyle(.plain)
-        }.padding(.vertical, 6).listRowBackground(
-          row.selected ? model.theme.tint.opacity(0.16) : model.theme.card
-        )
-        .swipeActions {
-          Button(role: .destructive) {
-            model.send("queue_remove", ["index": row.index, "key": row.key])
-          } label: {
-            Label("Remove", systemImage: "trash")
+    VStack(spacing: 0) {
+      Picker("Queue", selection: $history) {
+        Text("Next").tag(false)
+        Text("History").tag(true)
+      }.pickerStyle(.segmented).padding(.horizontal)
+      if history {
+        List(model.snapshot?.history ?? []) { entry in
+          HStack(spacing: 10) {
+            Button {
+              model.send("history_track", ["id": entry.id, "operation": "play"])
+            } label: {
+              Image(systemName: "play.fill").frame(width: 44, height: 44)
+            }.buttonStyle(.borderless).accessibilityLabel("Play \(entry.title)")
+            Button {
+              model.send("history_track", ["id": entry.id, "operation": "details"])
+            } label: {
+              VStack(alignment: .leading, spacing: 5) {
+                Text(entry.title).foregroundStyle(model.theme.text)
+                Text("\(entry.artist) · \(entry.album)").font(.subheadline).foregroundStyle(model.theme.muted)
+              }.frame(maxWidth: .infinity, alignment: .leading)
+            }.buttonStyle(.plain)
+          }.listRowBackground(model.theme.card)
+            .contextMenu {
+              Button("Play Next", systemImage: "text.insert") {
+                model.send("history_track", ["id": entry.id, "operation": "next"])
+              }
+            }
+        }.scrollContentBackground(.hidden)
+      } else {
+      List {
+          ForEach(rows) { row in
+            HStack(spacing: 10) {
+              Button {
+                model.send("queue_play", ["index": row.index, "key": row.key])
+              } label: {
+                Image(
+                  systemName: row.selected && model.player?.playing == true
+                    ? "speaker.wave.2.fill" : "play.fill"
+                ).frame(width: 44, height: 44)
+              }.buttonStyle(.borderless).accessibilityLabel("Play \(row.title)")
+                .accessibilityValue(row.selected ? "Now Playing" : "")
+              Button {
+                Divider()
+                if let details = row.details { model.invoke(details.token) }
+              } label: {
+                VStack(alignment: .leading, spacing: 5) {
+                  Text(row.title).lineLimit(2).foregroundStyle(model.theme.text)
+                  Text(row.subtitle).font(.subheadline).lineLimit(2).foregroundStyle(model.theme.muted)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+              }.buttonStyle(.plain)
+            }.padding(.vertical, 6).listRowBackground(
+              row.selected ? model.theme.tint.opacity(0.16) : model.theme.card
+            )
+            .swipeActions {
+              Button(role: .destructive) {
+                model.send("queue_remove", ["index": row.index, "key": row.key])
+              } label: {
+                Label("Remove", systemImage: "trash")
+              }
+            }
+            .contextMenu {
+              Button("Play", systemImage: "play") {
+                model.send("queue_play", ["index": row.index, "key": row.key])
+              }
+              if let details = row.details {
+                Button("Track Details", systemImage: "info.circle") { model.invoke(details.token) }
+              }
+              if row.details != nil { Divider() }
+              if row.index > 0 {
+                Button("Remove Above", systemImage: "arrow.up", role: .destructive) {
+                  model.send("queue_remove_side", ["index": row.index, "key": row.key, "above": true])
+                }
+              }
+              if row.index + 1 < (model.snapshot?.queue.count ?? 0) {
+                Button("Remove Below", systemImage: "arrow.down", role: .destructive) {
+                  model.send("queue_remove_side", ["index": row.index, "key": row.key, "above": false])
+                }
+              }
+              Button("Remove", systemImage: "trash", role: .destructive) {
+                model.send("queue_remove", ["index": row.index, "key": row.key])
+              }
+            }
           }
-        }
-        .contextMenu {
-          Button("Play", systemImage: "play") {
-            model.send("queue_play", ["index": row.index, "key": row.key])
+          .onMove { offsets, to in
+            guard let from = offsets.first else { return }
+            move(from: from, to: to)
           }
-          if let details = row.details {
-            Button("Track Details", systemImage: "info.circle") { model.invoke(details.token) }
+          .onDelete { offsets in
+            for index in offsets.sorted(by: >) {
+              let row = rows[index]
+              model.send("queue_remove", ["index": index, "key": row.key])
+            }
           }
-          if row.details != nil { Divider() }
-          Button("Remove", systemImage: "trash", role: .destructive) {
-            model.send("queue_remove", ["index": row.index, "key": row.key])
+        }.environment(\.editMode, $editMode).scrollContentBackground(.hidden).background(model.theme.baseFill)
+          .overlay {
+            if rows.isEmpty {
+              ContentUnavailableView("Queue is empty", systemImage: "music.note.list")
+            }
           }
-        }
       }
-      .onMove { offsets, to in
-        guard let from = offsets.first else { return }
-        move(from: from, to: to)
-      }
-      .onDelete { offsets in
-        for index in offsets.sorted(by: >) {
-          let row = rows[index]
-          model.send("queue_remove", ["index": index, "key": row.key])
-        }
-      }
-    }.environment(\.editMode, $editMode).scrollContentBackground(.hidden).background(model.theme.bg)
-      .overlay {
-        if rows.isEmpty {
-          ContentUnavailableView(
-            "Queue is empty", systemImage: "music.note.list",
-            description: Text("Add music from your library."))
-        }
-      }
-      .navigationTitle("Play Queue").navigationBarTitleDisplayMode(.inline)
+    }.background(model.theme.baseFill)
+      .navigationTitle("Play Queue").navigationBarTitleDisplayMode(.large)
       .toolbar {
-        if !docked || editMode.isEditing {
+        if !history && (!docked || editMode.isEditing) {
           ToolbarItem(placement: .topBarLeading) {
             Button(editMode.isEditing ? "Done" : "Edit Queue",
                    systemImage: editMode.isEditing ? "checkmark" : "pencil", action: toggleEditing)
@@ -581,12 +686,17 @@ struct QueueScreen: View {
           }
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
-          queueType
-          QueueToolsMenu(
-            tools: model.snapshot?.tools ?? [], invoke: model.invoke,
-            edit: docked && !editMode.isEditing ? toggleEditing : nil,
-            canEdit: !rows.isEmpty
-          ).equatable()
+          if history {
+            Button("Clear History", role: .destructive) { model.send("clear_history") }
+              .disabled(model.snapshot?.history?.isEmpty != false)
+          } else {
+            queueType
+            QueueToolsMenu(
+              tools: model.snapshot?.tools ?? [], invoke: model.invoke,
+              edit: docked && !editMode.isEditing ? toggleEditing : nil,
+              canEdit: !rows.isEmpty
+            ).equatable()
+          }
         }
       }
       .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: rows.map(\.id))
@@ -691,8 +801,6 @@ private func toolIcon(_ identity: String?) -> Image {
 private struct PlaybackPositionSlider: UIViewRepresentable {
   @Environment(AppModel.self) var model
   let player: Player
-  let identifier: String
-
   func makeCoordinator() -> Coordinator { Coordinator() }
 
   func makeUIView(context: Context) -> UISlider {
@@ -711,7 +819,7 @@ private struct PlaybackPositionSlider: UIViewRepresentable {
   func updateUIView(_ slider: UISlider, context: Context) {
     slider.isEnabled = player.key != nil && player.duration > 0
     slider.accessibilityLabel = "Waveform Position"
-    slider.accessibilityIdentifier = identifier
+    slider.accessibilityIdentifier = "waveform-position"
     slider.thumbTintColor = UIColor(model.theme.tint)
     let hasWaveform = player.waveform?.isEmpty == false
     slider.minimumTrackTintColor = hasWaveform ? .clear : UIColor(model.theme.tint)
@@ -746,8 +854,6 @@ private struct PlaybackTimeLabels: View {
 struct PlaybackWaveform: View {
   @Environment(AppModel.self) var model
   let player: Player
-  var expanded = false
-  var height: CGFloat = 64
   var body: some View {
     VStack(spacing: 2) {
       GeometryReader { geometry in
@@ -777,9 +883,7 @@ struct PlaybackWaveform: View {
                 "seek",
                 ["milliseconds": UInt64(max(0, min(player.duration, player.position + delta)))])
             }
-          PlaybackPositionSlider(
-            player: player,
-            identifier: expanded ? "expanded-waveform-position" : "waveform-position")
+          PlaybackPositionSlider(player: player)
         }.contentShape(Rectangle())
           .simultaneousGesture(
             DragGesture(minimumDistance: 8).onEnded { value in
@@ -793,7 +897,7 @@ struct PlaybackWaveform: View {
             }
           )
 
-      }.frame(height: expanded ? nil : height)
+      }.frame(height: 64)
       PlaybackTimeLabels(player: player).font(.caption2.monospacedDigit())
     }
   }
@@ -802,48 +906,4 @@ struct PlaybackWaveform: View {
     model.send("seek", ["milliseconds": UInt64(max(0, min(1, x / width)) * player.duration)])
   }
 
-}
-
-struct ExpandedPlaybackWaveform: View {
-  @Environment(AppModel.self) var model
-  @Environment(\.dismiss) private var dismiss
-  var body: some View {
-    VStack(spacing: 12) {
-      HStack {
-        Text(model.player?.title ?? "Now Playing").font(.headline).lineLimit(1)
-        Spacer()
-        SheetDismissButton { dismiss() }.padding(8)
-      }
-      if let player = model.player { PlaybackWaveform(player: player, expanded: true) }
-    }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity)
-      .foregroundStyle(model.theme.text).background(model.theme.bg.ignoresSafeArea())
-      .background(WaveformOrientation())
-  }
-}
-
-/// Request orientation after the full-screen host has completed presentation.
-private struct WaveformOrientation: UIViewControllerRepresentable {
-  final class Controller: UIViewController {
-    private weak var scene: UIWindowScene?
-    private var previous: UIInterfaceOrientationMask?
-    override func viewDidAppear(_ animated: Bool) {
-      super.viewDidAppear(animated)
-      guard previous == nil, let scene = view.window?.windowScene else { return }
-      self.scene = scene
-      previous = scene.interfaceOrientation.isLandscape ? .landscape : .portrait
-      scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
-      scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscape))
-    }
-    override func viewDidDisappear(_ animated: Bool) {
-      super.viewDidDisappear(animated)
-      if let previous { scene?.requestGeometryUpdate(.iOS(interfaceOrientations: previous)) }
-      previous = nil
-    }
-  }
-  func makeUIViewController(context: Context) -> Controller {
-    let controller = Controller()
-    controller.view.isUserInteractionEnabled = false
-    return controller
-  }
-  func updateUIViewController(_ controller: Controller, context: Context) {}
 }

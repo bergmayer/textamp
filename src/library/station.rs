@@ -11,6 +11,7 @@ pub fn standard_stations(
     [
         ("randomAlbum", "Play Random Albums", false, AlbumRadio),
         ("randomArtist", "Random Artist Mix", false, ArtistRadio),
+        ("artist-picker", "Artist Mix", false, ArtistRadio),
         ("library", "Library Mix", false, LibraryRadio),
         ("deepCuts", "Deep Cuts Mix", false, PlayCounts),
         ("timeTravel", "Time Travel Mix", false, ReleaseYears),
@@ -82,7 +83,10 @@ pub struct Station {
 
 impl Station {
     pub fn is_browsable(&self) -> bool {
-        !(self.is_separator() || self.is_action() || self.is_dj_mode() || self.is_remix())
+        !matches!(
+            self.station_type.as_str(),
+            "action" | "separator" | "dj_mode" | "remix"
+        )
     }
 
     /// Stations with a category or seed picker cannot start directly from their row.
@@ -99,12 +103,8 @@ impl Station {
             return description;
         }
         match self.identifier.as_deref().unwrap_or("") {
-            "randomAlbum" => {
-                "Plays a randomly chosen album in track order, then another album. New albums are added as the queue approaches its end."
-            }
-            "randomArtist" => {
-                "Plays tracks by a randomly chosen artist, then continues with another artist."
-            }
+            "randomAlbum" => "Plays one track from each randomly chosen album.",
+            "randomArtist" => "Mixes artists who each have at least 25 tracks in this library.",
             "library" => "Plays a continuing selection of tracks from your library.",
             "deepCuts" => {
                 "Plays less frequently played tracks from your library and keeps adding more."
@@ -120,6 +120,7 @@ impl Station {
             }
             "style" => "Choose a genre to start a continuing station of matching tracks.",
             "decade" => "Choose a release decade to start a continuing station of matching tracks.",
+            "artist-picker" => "Choose artists to mix with related music from your library.",
             "artistMix" => "Mixes an artist's tracks with related artists and keeps adding more.",
             "albumMix" => "Mixes an album with sonically related tracks and keeps adding more.",
             "sonic" => {
@@ -162,26 +163,6 @@ impl Station {
         } else {
             StationKind::Other
         }
-    }
-
-    /// Check if this station is a visual separator (non-selectable).
-    pub fn is_separator(&self) -> bool {
-        self.station_type == "separator"
-    }
-
-    /// Check if this station is a DJ mode item.
-    pub fn is_dj_mode(&self) -> bool {
-        self.station_type == "dj_mode"
-    }
-
-    /// Check if this station is a remix action item.
-    pub fn is_remix(&self) -> bool {
-        self.station_type == "remix"
-    }
-
-    /// Check if this station is an action item (non-playable, triggers an action).
-    pub fn is_action(&self) -> bool {
-        self.station_type == "action"
     }
 
     /// Check if this station is a category with sub-stations.

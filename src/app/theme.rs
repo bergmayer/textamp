@@ -12,6 +12,7 @@ pub enum ThemeName {
     SolarizedLight,
     Dark,
     Platinum,
+    BrushedAluminum,
     BlackAndWhite,
     WhiteOnBlack,
     /// Vintage amber-on-black CRT (IBM 3270 / DEC monochrome look).
@@ -41,6 +42,7 @@ impl ThemeName {
             ThemeName::HotDogStand,
             ThemeName::Norton,
             ThemeName::Platinum,
+            ThemeName::BrushedAluminum,
             ThemeName::BlackAndWhite,
             ThemeName::WhiteOnBlack,
             ThemeName::Amber,
@@ -51,11 +53,12 @@ impl ThemeName {
     /// Display name for the theme.
     pub fn display_name(&self) -> &'static str {
         match self {
-            ThemeName::System => "System",
+            ThemeName::System => "system",
             ThemeName::Dark => "dark",
             ThemeName::SolarizedDark => "solarized dark",
             ThemeName::SolarizedLight => "solarized light",
             ThemeName::Platinum => "platinum",
+            ThemeName::BrushedAluminum => "brushed aluminum",
             ThemeName::BlackAndWhite => "black and white",
             ThemeName::WhiteOnBlack => "white on black",
             ThemeName::Amber => "amber crt",
@@ -75,6 +78,7 @@ impl ThemeName {
             ThemeName::SolarizedDark => "solarized-dark",
             ThemeName::SolarizedLight => "solarized-light",
             ThemeName::Platinum => "platinum",
+            ThemeName::BrushedAluminum => "brushed-aluminum",
             ThemeName::BlackAndWhite => "black-and-white",
             ThemeName::WhiteOnBlack => "white-on-black",
             ThemeName::Amber => "amber",
@@ -91,6 +95,7 @@ impl ThemeName {
         match s.to_lowercase().as_str() {
             "solarized-dark" | "solarizeddark" => ThemeName::SolarizedDark,
             "solarized-light" | "solarizedlight" => ThemeName::SolarizedLight,
+            "brushed-aluminum" | "brushedaluminum" => ThemeName::BrushedAluminum,
             "system" => ThemeName::System,
             "dark" => ThemeName::Dark,
             "platinum" | "mac" | "macos9" => ThemeName::Platinum,

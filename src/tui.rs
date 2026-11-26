@@ -2,14 +2,14 @@
 //!
 //! Handles input events, async task coordination, and state updates.
 
+use crate::app::PlayStatus;
 use crate::app::{AppState, Event};
-use crate::app::{PlayStatus, View};
 
 use crate::ui;
 
 use anyhow::Result;
 use crossterm::event::{self, DisableMouseCapture, Event as CrosstermEvent, MouseEventKind};
-use crossterm::execute;
+use crossterm::{SynchronizedUpdate, execute};
 use ratatui::prelude::*;
 use std::io::Stdout;
 use std::sync::Arc;
@@ -130,7 +130,6 @@ fn tick_requires_render(state: &AppState) -> bool {
         library.labels_loading,
         library.formats_loading,
         library.studios_loading,
-        library.right_panel_loading,
         state.station_nav.loading,
     ]
     .contains(&true);
@@ -274,9 +273,7 @@ impl EventLoop {
             ui::motion::SceneMotion::new(std::env::var("TERM").as_deref() != Ok("dumb"));
 
         if std::env::var("TERM").as_deref() != Ok("dumb") {
-            let player = state.view == View::NowPlaying
-                || (state.view == View::Queue
-                    && state.tui_queue_workspace == crate::app::state::TuiWorkspace::NowPlaying);
+            let player = state.tui_player_raised();
             state.tui_motion.initialize(
                 state.tui_sidebar_visible,
                 state.tui_queue_visible,
@@ -284,12 +281,12 @@ impl EventLoop {
                 Instant::now(),
             );
         }
+        let mut picker = ui::playlist_picker::PlaylistPicker::default();
         // Main loop
         loop {
+            picker.sync(state);
             let now = Instant::now();
-            let player = state.view == View::NowPlaying
-                || (state.view == View::Queue
-                    && state.tui_queue_workspace == crate::app::state::TuiWorkspace::NowPlaying);
+            let player = state.tui_player_raised();
             state.tui_motion.sync(
                 state.tui_sidebar_visible,
                 state.tui_queue_visible,
@@ -308,14 +305,19 @@ impl EventLoop {
             // 10 FPS; idle screens perform no redraws at all.
             if dirty && last_render.elapsed() >= render_rate {
                 let mut feedback = None;
-                terminal.draw(|f| {
-                    feedback = Some(ui::render_with_motion(
-                        f,
-                        state,
-                        &mut scene_motion,
-                        ui::OutputHost::Terminal,
-                    ));
-                })?;
+                std::io::stdout().sync_update(|_| {
+                    terminal
+                        .draw(|f| {
+                            feedback = Some(ui::render_with_motion(
+                                f,
+                                state,
+                                &mut scene_motion,
+                                ui::OutputHost::Terminal,
+                            ));
+                            picker.draw(f, state);
+                        })
+                        .map(|_| ())
+                })??;
                 if let Some(feedback) = feedback {
                     state.apply_render_feedback(feedback);
                 }
@@ -379,7 +381,9 @@ impl EventLoop {
                 }
                 let event_needs_render =
                     !matches!(&event, Event::Tick) || tick_requires_render(state);
-                let actions = crate::app::runtime::reduce(event, state, config, event_tx);
+                let actions = picker
+                    .input(&event, state)
+                    .unwrap_or_else(|| crate::app::runtime::reduce(event, state, config, event_tx));
                 for action in actions {
                     crate::app::dispatch::dispatch_action(action, state, audio, config, event_tx)
                         .await?;

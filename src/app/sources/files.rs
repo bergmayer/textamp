@@ -11,10 +11,17 @@ pub enum FileAction {
         refreshing: bool,
         result: Result<Vec<FolderEntry>, String>,
     },
+    Cover {
+        generation: u64,
+        key: String,
+        playback: bool,
+        result: Result<Option<Vec<u8>>, String>,
+    },
     Prepared {
         generation: u64,
         id: u64,
         track: Box<Track>,
+        tagged_album: bool,
         artwork: Option<Vec<u8>>,
         result: Result<MediaFile, String>,
     },
@@ -37,6 +44,31 @@ pub(super) fn dispatch(
     audio: &mut AudioPlayer,
 ) -> anyhow::Result<Vec<Action>> {
     match action {
+        FileAction::Cover {
+            generation,
+            key,
+            playback,
+            result,
+        } => {
+            if generation != state.library_generation
+                || !state
+                    .library
+                    .folder_cover_jobs
+                    .get(&playback)
+                    .is_some_and(|(k, _)| k == &key)
+            {
+                return Ok(vec![]);
+            }
+            state.library.folder_cover_jobs.remove(&playback);
+            match result {
+                Ok(Some(bytes)) => state.artwork.insert_grid_art(key, bytes),
+                Ok(None) => {
+                    state.artwork.remove_grid_art(&key);
+                    state.library.missing_folder_covers.insert(key);
+                }
+                Err(error) => tracing::debug!("WebDAV cover unavailable: {error}"),
+            }
+        }
         FileAction::Listed {
             generation,
             id,
@@ -151,6 +183,7 @@ pub(super) fn dispatch(
             generation,
             id,
             track,
+            tagged_album,
             artwork,
             result,
         } => {
@@ -169,6 +202,13 @@ pub(super) fn dispatch(
                     state.set_error(format!("Play file: {error}"));
                 }
                 Ok(file) => {
+                    if tagged_album {
+                        let was_available = state.library.folder_radio.available();
+                        state.library.folder_radio.observe((*track).clone());
+                        if !was_available && state.library.folder_radio.available() {
+                            super::radio::load_folder_stations(state);
+                        }
+                    }
                     let paused = state.playback.status == PlayStatus::Paused;
                     state.artwork.current_thumb = Some(track.rating_key.clone());
                     state.artwork.current_data = artwork;
@@ -197,6 +237,59 @@ pub(super) fn dispatch(
     Ok(vec![])
 }
 
+fn request_folder_cover(
+    state: &mut AppState,
+    tx: &mpsc::Sender<Event>,
+    source: &crate::library::FolderSource,
+    dir: &str,
+    playback: bool,
+    force: bool,
+) {
+    if !matches!(source.location, FolderLocation::Webdav { .. }) {
+        return;
+    }
+    let key = Track::folder_cover_key(&source.id, dir);
+    if force {
+        state.library.missing_folder_covers.remove(&key);
+    }
+    if (!force
+        && (state.artwork.grid_cache.contains_key(&key)
+            || state.library.missing_folder_covers.contains(&key)))
+        || state
+            .library
+            .folder_cover_jobs
+            .get(&playback)
+            .is_some_and(|(k, _)| k == &key)
+    {
+        return;
+    }
+    let source = source.clone();
+    let directory = dir.to_owned();
+    let events = tx.clone();
+    let generation = state.library_generation;
+    let identity = key.clone();
+    let task = crate::app::tasks::spawn(async move {
+        let result = crate::library::webdav::folder_cover(&source, &directory)
+            .await
+            .map_err(|e| e.to_string());
+        let _ = events
+            .send(Event::Effect(
+                FileAction::Cover {
+                    generation,
+                    key: identity,
+                    playback,
+                    result,
+                }
+                .into(),
+            ))
+            .await;
+    });
+    state
+        .library
+        .folder_cover_jobs
+        .insert(playback, (key, TaskLease::new(&task)));
+}
+
 pub(super) fn load(state: &mut AppState, tx: &mpsc::Sender<Event>, path: String, column: usize) {
     load_folder(state, tx, path, column, false);
 }
@@ -217,6 +310,7 @@ fn load_folder(
     else {
         return;
     };
+    request_folder_cover(state, tx, &source, &path, false, force);
     if path.is_empty() {
         super::cache::start(LibraryChoice::Folder(source.clone()), false, state, tx);
     }
@@ -406,6 +500,9 @@ pub fn play(
         state.set_error("Library has been removed".into());
         return;
     };
+    let directory = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    track.parent_rating_key = Some(Track::folder_cover_key(&source.id, directory));
+    request_folder_cover(state, tx, &source, directory, true, false);
     state.sources.media = crate::app::sources::MediaPreparation::Idle;
     audio.stop_for_preparation();
     state.playback.request_id = audio.playback_id();
@@ -423,26 +520,27 @@ pub fn play(
     let task = crate::app::tasks::spawn(async move {
         let result = source.file(&path).await;
         let failed_track = track.clone();
-        let (track, artwork, result) = match result {
+        let (track, artwork, tagged_album, result) = match result {
             Ok(file) => crate::app::tasks::spawn_blocking(move || {
-                let artwork = match track.read_file_metadata(&file.path) {
+                let (artwork, tagged_album) = match track.read_tags(&file.path, true) {
                     Ok(artwork) => artwork,
                     Err(error) => {
                         tracing::debug!("Audio tags unavailable: {error}");
-                        None
+                        (None, false)
                     }
                 };
-                (track, artwork, Ok(file))
+                (track, artwork, tagged_album, Ok(file))
             })
             .await
-            .unwrap_or_else(|error| (failed_track, None, Err(error.to_string()))),
-            Err(error) => (track, None, Err(format!("{error:#}"))),
+            .unwrap_or_else(|error| (failed_track, None, false, Err(error.to_string()))),
+            Err(error) => (track, None, false, Err(format!("{error:#}"))),
         };
         let _ = tx
             .send(Event::Effect(Action::from(FileAction::Prepared {
                 generation,
                 id,
                 track: Box::new(track),
+                tagged_album,
                 artwork,
                 result,
             })))

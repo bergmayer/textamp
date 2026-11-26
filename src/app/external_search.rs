@@ -6,7 +6,7 @@ use super::{
     },
 };
 use crate::library::models::Track;
-use crate::services::external_search::SearchTarget;
+use crate::services::external_search::{MusicQuery, SearchTarget};
 
 /// A validated search ready for the platform adapter.
 #[derive(Debug)]
@@ -14,7 +14,7 @@ pub struct Request {
     /// Service that receives the query.
     pub target: SearchTarget,
     /// User text, kept separate from executable or URL syntax.
-    pub query: String,
+    pub query: MusicQuery,
 }
 
 /// Why an external search cannot be dispatched.
@@ -63,8 +63,18 @@ fn column_subject(column: &BrowseColumn) -> Option<Subject<'_>> {
 }
 
 pub(super) fn subject(state: &AppState) -> Option<Subject<'_>> {
+    if state.view == View::NowPlaying
+        && let Some(track) = state.current_track()
+    {
+        return Some(Subject::Track(track));
+    }
     if state.view == View::Browse && !state.category_column_focused {
-        if let Some((key, title)) = super::details::album_info_selection(state) {
+        if state
+            .browse_nav()
+            .and_then(|nav| nav.focused())
+            .is_some_and(|col| col.header_selection != super::state::ColumnHeaderSelection::Items)
+            && let Some((key, title)) = super::details::album_info_selection(state)
+        {
             return Some(Subject::Album { key, title });
         }
         if let Some(track) = state
@@ -99,19 +109,15 @@ pub(super) fn subject(state: &AppState) -> Option<Subject<'_>> {
         .map(Subject::Track)
 }
 
-fn with_artist(artist: &str, title: &str) -> String {
-    let artist = artist.trim();
-    let title = title.trim();
-    if artist.is_empty() {
-        title.into()
-    } else {
-        format!("{artist} - {title}")
+pub fn track_query(track: &Track) -> MusicQuery {
+    MusicQuery::Song {
+        artist: track.track_artist().into(),
+        title: track.title.clone(),
+        album: track
+            .parent_title
+            .clone()
+            .filter(|name| !name.trim().is_empty()),
     }
-}
-
-/// Search text for an explicitly targeted track, including its individual performer.
-pub fn track_query(track: &Track) -> String {
-    with_artist(track.track_artist(), &track.title)
 }
 
 fn album_artist<'a>(state: &'a AppState, key: &str) -> &'a str {
@@ -149,13 +155,20 @@ fn album_artist<'a>(state: &'a AppState, key: &str) -> &'a str {
 
 /// Selection and focused details own the search before the surrounding column or playback.
 pub fn query(state: &AppState) -> Option<String> {
+    selected_query(state).map(|query| query.text())
+}
+
+pub fn selected_query(state: &AppState) -> Option<MusicQuery> {
     subject(state)
         .map(|subject| match subject {
-            Subject::Artist(name) => name.to_owned(),
-            Subject::Album { key, title } => with_artist(album_artist(state, key), title),
+            Subject::Artist(name) => MusicQuery::Artist(name.into()),
+            Subject::Album { key, title } => MusicQuery::Album {
+                artist: album_artist(state, key).into(),
+                title: title.into(),
+            },
             Subject::Track(track) => track_query(track),
         })
-        .filter(|query| !query.trim().is_empty())
+        .filter(|query| !query.text().trim().is_empty())
 }
 
 /// Why a contextual search is unavailable, without allocating a query during rendering.
@@ -211,13 +224,15 @@ pub fn enabled(state: &AppState, target: SearchTarget) -> bool {
 pub fn request(
     state: &AppState,
     target: SearchTarget,
-    query: Option<String>,
+    query: Option<MusicQuery>,
 ) -> Result<Request, Error> {
     if !enabled(state, target) {
         return Err(Error::Disabled(target.name()));
     }
-    let query = query.or_else(|| self::query(state)).ok_or(Error::Empty)?;
-    if query.trim().is_empty() {
+    let query = query
+        .or_else(|| selected_query(state))
+        .ok_or(Error::Empty)?;
+    if query.text().trim().is_empty() {
         return Err(Error::Empty);
     }
     Ok(Request { target, query })
@@ -253,6 +268,15 @@ mod tests {
         });
         column
     }
+    #[test]
+    fn now_playing_search_uses_the_playing_track_even_if_another_queue_row_is_selected() {
+        let mut state = AppState::new();
+        state.view = View::NowPlaying;
+        state.queue.tracks = vec![track("first", "First"), track("second", "Second")];
+        state.queue.index = Some(1);
+        assert_eq!(query(&state).as_deref(), Some("Momus - Second"));
+    }
+
     #[test]
     fn selected_tracks_and_focused_details_take_priority_over_playback() {
         let mut state = browsing();
@@ -341,7 +365,7 @@ mod tests {
         let actions =
             super::super::command_palette::run(PaletteCommandKind::SearchAppleMusic, &mut state);
         assert!(
-            matches!(actions.as_slice(), [super::super::Action::System(super::super::action::SystemAction::OpenExternalSearch { query: Some(query), .. })] if query == "Momus - Spacewalk")
+            matches!(actions.as_slice(), [super::super::Action::System(super::super::action::SystemAction::OpenExternalSearch { query: Some(query), .. })] if query.text() == "Momus - Spacewalk")
         );
     }
 
@@ -350,7 +374,7 @@ mod tests {
         let mut state = AppState::new();
         let query = "Björk & 日本語 / music";
         let request = request(&state, SearchTarget::YouTube, Some(query.into())).unwrap();
-        assert_eq!(request.query, query);
+        assert_eq!(request.query.text(), query);
         assert!(matches!(
             super::request(&state, SearchTarget::AppleMusic, Some("  ".into())),
             Err(Error::Empty)

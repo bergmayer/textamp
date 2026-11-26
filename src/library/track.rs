@@ -69,6 +69,12 @@ pub struct Track {
 }
 
 impl Track {
+    pub fn folder_cover_key(source_id: &str, directory: &str) -> String {
+        format!(
+            "folder-cover:{source_id}:{}",
+            urlencoding::encode(directory)
+        )
+    }
     pub fn from_folder(source_id: &str, path: &str) -> Self {
         let identity = format!("folder:{source_id}:{}", urlencoding::encode(path));
         let file = std::path::Path::new(path);
@@ -77,6 +83,10 @@ impl Track {
                 source_id: source_id.into(),
                 path: path.into(),
             },
+            parent_rating_key: Some(Self::folder_cover_key(
+                source_id,
+                path.rsplit_once('/').map_or("", |(dir, _)| dir),
+            )),
             key: identity.clone(),
             rating_key: identity,
             title: file
@@ -105,6 +115,14 @@ impl Track {
         &mut self,
         path: &std::path::Path,
     ) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self.read_tags(path, true)?.0)
+    }
+
+    pub(crate) fn read_tags(
+        &mut self,
+        path: &std::path::Path,
+        playback: bool,
+    ) -> anyhow::Result<(Option<Vec<u8>>, bool)> {
         use symphonia::core::{io::MediaSourceStream, meta::StandardTagKey, probe::Hint};
         let file = std::fs::File::open(path)?;
         let mut hint = Hint::new();
@@ -136,8 +154,10 @@ impl Track {
             revisions.push(metadata);
         }
         let mut artwork = None;
+        let mut tagged_album = false;
+        let mut tagged_artist = false;
         for revision in revisions {
-            if artwork.is_none() {
+            if playback && artwork.is_none() {
                 artwork = revision
                     .visuals()
                     .iter()
@@ -152,9 +172,15 @@ impl Track {
                 match tag.std_key {
                     Some(StandardTagKey::Lyrics) => self.lyrics = Some(value),
                     Some(StandardTagKey::TrackTitle) => self.title = value,
-                    Some(StandardTagKey::Album) => self.parent_title = Some(value),
+                    Some(StandardTagKey::Album) => {
+                        tagged_album = true;
+                        self.parent_title = Some(value);
+                    }
                     Some(StandardTagKey::Artist) => self.original_title = Some(value),
-                    Some(StandardTagKey::AlbumArtist) => self.grandparent_title = Some(value),
+                    Some(StandardTagKey::AlbumArtist) => {
+                        tagged_artist = true;
+                        self.grandparent_title = Some(value);
+                    }
                     Some(StandardTagKey::Genre) if !self.genres.contains(&value) => {
                         self.genres.push(value);
                     }
@@ -162,10 +188,10 @@ impl Track {
                 }
             }
         }
-        if self.grandparent_title.is_none() {
+        if playback && self.grandparent_title.is_none() {
             self.grandparent_title = self.original_title.clone();
         }
-        Ok(artwork)
+        Ok((artwork, tagged_artist && tagged_album))
     }
 
     /// Get track-level artist (original_title), falling back to album artist.

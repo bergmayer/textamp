@@ -79,9 +79,17 @@ mod tests {
                 .iter()
                 .any(|s| s.key.ends_with("/sonic") || s.key.ends_with("/albumMix"))
         );
-        assert_eq!(
-            crate::library::station::standard_stations("nav", NAVIDROME).len(),
-            11
+        let mix = stations
+            .iter()
+            .find(|s| s.key.ends_with("/artist-picker"))
+            .unwrap();
+        assert!(mix.requires_input());
+        assert!(
+            !stations
+                .iter()
+                .find(|s| s.key.ends_with("/randomArtist"))
+                .unwrap()
+                .requires_input()
         );
     }
 }

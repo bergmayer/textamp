@@ -10,7 +10,7 @@ mod terminal;
 mod text;
 
 pub use lockfile::{LockError, ProcessLock};
-pub use logging::{activity_history_text, activity_error, setup_logging};
+pub use logging::{activity_error, activity_history_text, setup_logging};
 pub use secret::SecretString;
 pub(crate) use terminal::catch_expected_panic;
 pub use terminal::{

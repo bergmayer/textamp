@@ -103,7 +103,7 @@ pub(super) fn requires_provider(action: &Action) -> bool {
                 | SearchAction::AdventureLauncherGenerate
                 | SearchAction::ArtistRadioPickerLaunch
         ),
-        Action::Settings(action) => matches!(action, SettingsAction::SetAdventureLength(_)),
+        Action::Settings(_) => false,
         Action::Playback(_) => false,
         Action::Navigation(_) | Action::Source(_) | Action::PlayerSync(_) => false,
     }

@@ -13,6 +13,68 @@ fn color(value: crate::app::theme_palette::Color) -> Hsla {
         _ => rgb(0x808080).into(),
     }
 }
+/// Fixed material behind window chrome. Kit controls paint and receive input above it.
+pub(super) fn aluminum_surface() -> gpui_kit::Img {
+    use gpui_kit::{Image, ImageFormat, ObjectFit, Styled, StyledImage, img};
+    use std::sync::{Arc, LazyLock};
+    static MATERIAL: LazyLock<Arc<Image>> = LazyLock::new(|| {
+        Arc::new(Image::from_bytes(
+            ImageFormat::Png,
+            include_bytes!(
+                "../../ios/Textamp/Assets.xcassets/BrushedAluminum.imageset/aluminum.png"
+            )
+            .to_vec(),
+        ))
+    });
+    img(MATERIAL.clone())
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .object_fit(ObjectFit::Cover)
+}
+/// Space between the native window edge and the workspace, including the inset lip.
+pub(super) const ALUMINUM_RIM: f32 = 8.;
+
+pub(super) fn aluminum_frame(content: gpui_kit::AnyElement) -> gpui_kit::AnyElement {
+    use gpui_kit::{InteractiveElement, IntoElement, ParentElement, Styled, div, px};
+
+    div()
+        .relative()
+        .size_full()
+        .flex()
+        .px(px(ALUMINUM_RIM - 2.))
+        .py(px(4.))
+        .child(aluminum_surface())
+        .child(
+            div()
+                .debug_selector(|| "aluminum-workspace-rim".into())
+                .size_full()
+                .border_1()
+                .border_color(rgb(0xe6e6e6))
+                .child(
+                    div()
+                        .size_full()
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(rgb(0x717171))
+                        .child(content),
+                ),
+        )
+        .into_any_element()
+}
+pub(super) fn column_header_height(theme: ThemeName) -> gpui_kit::Pixels {
+    gpui_kit::px(if theme == ThemeName::BrushedAluminum {
+        36.
+    } else {
+        32.
+    })
+}
+
+pub(super) fn aluminum_list_stripe(name: ThemeName, display_row: usize) -> Option<Hsla> {
+    (name == ThemeName::BrushedAluminum && display_row % 2 == 1).then(|| rgb(0xf2f6fc).into())
+}
+
 fn luminance(color: Hsla) -> f32 {
     let c = color.to_rgb();
     let linear = |v: f32| {
@@ -96,7 +158,10 @@ pub(super) fn colors(name: ThemeName) -> ThemeColor {
     let p = crate::app::theme_palette::Palette::<crate::app::theme_palette::Color>::for_theme(name);
     let light = matches!(
         name,
-        ThemeName::SolarizedLight | ThemeName::Platinum | ThemeName::BlackAndWhite
+        ThemeName::SolarizedLight
+            | ThemeName::BrushedAluminum
+            | ThemeName::Platinum
+            | ThemeName::BlackAndWhite
     );
     let mut c = if light {
         *ThemeColor::light()
@@ -130,7 +195,11 @@ pub(super) fn colors(name: ThemeName) -> ThemeColor {
         c.muted_foreground,
         c.muted,
     );
-    c.button = c.muted;
+    c.button = if name == ThemeName::BrushedAluminum {
+        rgb(0xe8e8e8).into()
+    } else {
+        c.muted
+    };
     c.button_foreground = c.foreground;
     c.button_hover = c.secondary_hover;
     c.button_active = c.secondary_active;
@@ -144,7 +213,11 @@ pub(super) fn colors(name: ThemeName) -> ThemeColor {
     c.button_primary_active = c.primary_active;
     c.popover = c.muted;
     c.popover_foreground = c.foreground;
-    c.sidebar = c.muted;
+    c.sidebar = if name == ThemeName::BrushedAluminum {
+        c.background
+    } else {
+        c.muted
+    };
     c.sidebar_foreground = c.foreground;
     c.sidebar_border = c.border;
     c.sidebar_accent = c.primary;
@@ -300,6 +373,52 @@ fn system_colors(dark: bool) -> ThemeColor {
     c
 }
 
+fn silver_gradient(top: u32, bottom: u32) -> gpui_kit::Background {
+    use gpui_kit::{linear_color_stop, linear_gradient};
+    linear_gradient(
+        180.,
+        linear_color_stop(rgb(top), 0.),
+        linear_color_stop(rgb(bottom), 1.),
+    )
+}
+
+pub(super) fn playback_button(
+    button: gpui_kit::component::button::Button,
+    glyph: gpui_kit::assets::IconName,
+    name: ThemeName,
+) -> gpui_kit::AnyElement {
+    use gpui_kit::assets::IconName as Glyph;
+    use gpui_kit::component::{Icon, button::ButtonVariants};
+    use gpui_kit::{IntoElement, ParentElement, Styled, div, px};
+
+    let symbol: Option<&[u8]> = match glyph {
+        Glyph::SkipBack => Some(include_bytes!("../../assets/icons/transport/previous.svg")),
+        Glyph::Play => Some(include_bytes!("../../assets/icons/transport/play.svg")),
+        Glyph::Pause => Some(include_bytes!("../../assets/icons/transport/pause.svg")),
+        Glyph::SkipForward => Some(include_bytes!("../../assets/icons/transport/next.svg")),
+        _ => None,
+    };
+    if let (ThemeName::BrushedAluminum, Some(symbol)) = (name, symbol) {
+        return div()
+            .flex_none()
+            .p(px(3.))
+            .rounded_full()
+            .bg(silver_gradient(0x747474, 0xf7f7f7))
+            .child(
+                button
+                    .size(px(30.))
+                    .rounded(px(15.))
+                    .icon(Icon::default().data(symbol).size(px(17.))),
+            )
+            .into_any_element();
+    }
+    button
+        .ghost()
+        .size(px(36.))
+        .icon(Icon::new(glyph).size(px(24.)))
+        .into_any_element()
+}
+
 pub(super) fn apply(name: ThemeName, window: Option<&mut Window>, cx: &mut App) {
     if name == ThemeName::System {
         Theme::sync_system_appearance(window, cx);
@@ -320,7 +439,10 @@ pub(super) fn apply(name: ThemeName, window: Option<&mut Window>, cx: &mut App) 
     super::icon::apply(name, cx);
     let light = matches!(
         name,
-        ThemeName::SolarizedLight | ThemeName::Platinum | ThemeName::BlackAndWhite
+        ThemeName::SolarizedLight
+            | ThemeName::BrushedAluminum
+            | ThemeName::Platinum
+            | ThemeName::BlackAndWhite
     );
     Theme::change(
         if light {
@@ -333,6 +455,19 @@ pub(super) fn apply(name: ThemeName, window: Option<&mut Window>, cx: &mut App) 
     );
     Theme::update(cx, |theme| {
         theme.colors = colors(name);
+        if name == ThemeName::BrushedAluminum {
+            use gpui_kit::component::ThemeToken;
+            theme.tokens.button =
+                ThemeToken::new(theme.colors.button, silver_gradient(0xffffff, 0xb6b6b6));
+            theme.tokens.button_hover = ThemeToken::new(
+                theme.colors.button_hover,
+                silver_gradient(0xffffff, 0xc8c8c8),
+            );
+            theme.tokens.button_active = ThemeToken::new(
+                theme.colors.button_active,
+                silver_gradient(0x929292, 0xdcdcdc),
+            );
+        }
         #[cfg(target_os = "macos")]
         {
             theme.font_family = ".SystemUIFont".into();

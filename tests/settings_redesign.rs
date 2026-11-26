@@ -488,14 +488,9 @@ async fn artwork_choices_follow_each_library_and_settings_show_the_active_one() 
     .await
     .unwrap();
     assert_eq!(state.artwork.mode, ArtworkMode::Halfblocks);
-    use textamp::app::launch::WindowedMode;
     assert_eq!(
-        config.artwork_mode("folder:folder-0", WindowedMode::Text),
+        config.artwork_mode("folder:folder-0"),
         ArtworkMode::Halfblocks
-    );
-    assert_eq!(
-        config.artwork_mode("folder:folder-0", WindowedMode::Gui),
-        ArtworkMode::Auto
     );
 
     state.desktop_frontend = true;
@@ -511,8 +506,7 @@ async fn artwork_choices_follow_each_library_and_settings_show_the_active_one() 
     )
     .await
     .unwrap();
-    assert_eq!(state.artwork.mode, ArtworkMode::Halfblocks);
-    assert_eq!(state.artwork.graphical_mode, ArtworkMode::Braille);
+    assert_eq!(state.artwork_mode(), ArtworkMode::Braille);
     state.desktop_frontend = false;
 
     sources::dispatch(
@@ -551,15 +545,9 @@ async fn artwork_choices_follow_each_library_and_settings_show_the_active_one() 
     )
     .await
     .unwrap();
-    assert_eq!(state.artwork.mode, ArtworkMode::Halfblocks);
-    assert_eq!(
-        config.artwork_mode("folder:folder-0", WindowedMode::Text),
-        ArtworkMode::Halfblocks
-    );
-    assert_eq!(
-        config.artwork_mode("folder:folder-1", WindowedMode::Text),
-        ArtworkMode::Auto
-    );
+    assert_eq!(state.artwork.mode, ArtworkMode::Braille);
+    assert_eq!(config.artwork_mode("folder:folder-0"), ArtworkMode::Braille);
+    assert_eq!(config.artwork_mode("folder:folder-1"), ArtworkMode::Auto);
 }
 
 #[test]
@@ -745,7 +733,7 @@ fn appearance_without_a_library_omits_artwork_and_navigates_to_audio() {
 }
 
 #[tokio::test]
-async fn graphical_mode_choices_update_arrangement_without_changing_the_library() {
+async fn renderer_switch_preserves_library() {
     use textamp::app::{action::SettingsAction, launch::ApplicationMode, state::TextampSetting};
     let profile = std::env::var_os("TEXTAMP_CARGO_TEST_PROFILE").expect(
         "Run persistent-settings checks through cargo test with its isolated profile runner",
@@ -755,14 +743,9 @@ async fn graphical_mode_choices_update_arrangement_without_changing_the_library(
     state.windowed_presentation = textamp::app::windowed_presentation::Presentation::windowed();
     state.active_library = Some("unchanged-library".into());
     let mut config = Config::default();
-    config.ui.desktop_split_view = true;
-    state.desktop_split_view = true;
     let mut audio = textamp::audio::AudioPlayer::new_without_audio();
     let (events, _inbox) = tokio::sync::mpsc::channel(16);
-    for (mode, multiple) in [
-        (ApplicationMode::GuiMultiple, true),
-        (ApplicationMode::GuiSingle, false),
-    ] {
+    for mode in [ApplicationMode::Text, ApplicationMode::Gui] {
         textamp::app::dispatch::dispatch_action(
             SettingsAction::ActivatePreference(TextampSetting::Presentation(mode)).into(),
             &mut state,
@@ -772,10 +755,8 @@ async fn graphical_mode_choices_update_arrangement_without_changing_the_library(
         )
         .await
         .unwrap();
-        assert_eq!(state.gui_multiple_windows, multiple);
-        assert!(!state.desktop_split_view);
-        assert!(!config.ui.desktop_split_view);
-        assert_eq!(config.ui.desktop_separate_player, multiple);
+        assert!(!state.gui_multiple_windows);
+        assert!(!config.ui.desktop_separate_player);
         assert_eq!(state.active_library.as_deref(), Some("unchanged-library"));
     }
 }

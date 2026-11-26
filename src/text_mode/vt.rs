@@ -435,6 +435,17 @@ mod tests {
         assert!(frame.images[0].size[0] > 0);
     }
     #[test]
+    fn skin_tone_emoji_occupies_two_cells_with_grapheme_clustering() {
+        let mut vt = Vt::new(10, 2).unwrap();
+        vt.write("\x1b[?2027h☝🏻x".as_bytes());
+        let frame = vt.frame().unwrap();
+        assert_eq!(frame.cells[0][0].text, "☝🏻");
+        assert_eq!(frame.cells[0][0].wide, 1);
+        assert_eq!(frame.cells[0][1].wide, 2);
+        assert_eq!(frame.cells[0][2].text, "x");
+    }
+
+    #[test]
     fn render_state_preserves_graphemes_wide_cells_colors_and_dirty_rows() {
         let mut vt = Vt::new(20, 4).unwrap();
         vt.write("\x1b[38;2;12;34;56me\u{301}界\x1b[0m\r\n┌──┐".as_bytes());

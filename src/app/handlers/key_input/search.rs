@@ -9,9 +9,6 @@ use crate::app::state::{SearchFocus, SearchTab};
 
 /// Handle search popup keys (Ctrl+F floating dialog).
 pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    if key.code == KeyCode::Right && state.search.focus == SearchFocus::Results {
-        return crate::app::library_details::search_result_actions(state);
-    }
     // Clear mouse scroll pin on any keyboard navigation
     state.scroll.search = None;
     if state.sources.active.folder().is_some()
@@ -47,9 +44,7 @@ pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> 
             match state.search.focus {
                 SearchFocus::Input => {
                     // Move focus to results if we have any
-                    if let Some(ref results) = state.search.results
-                        && !results.is_empty()
-                    {
+                    if search_result_count(state) > 0 {
                         state.search.focus = SearchFocus::Results;
                         state.list_state.search_item_index = 0;
                     }
@@ -70,9 +65,7 @@ pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> 
             match state.search.focus {
                 SearchFocus::Input => {
                     // Move focus to results if we have any
-                    if let Some(ref results) = state.search.results
-                        && !results.is_empty()
-                    {
+                    if search_result_count(state) > 0 {
                         state.search.focus = SearchFocus::Results;
                         state.list_state.search_item_index = 0;
                     }
@@ -146,6 +139,9 @@ pub(super) fn handle_search_keys(key: event::KeyEvent, state: &mut AppState) -> 
 
 /// Count total selectable items in current search results for the active tab.
 fn search_result_count(state: &AppState) -> usize {
+    if state.search.query.is_empty() && !state.search.recent.is_empty() {
+        return state.search.recent.len();
+    }
     let results = match &state.search.results {
         Some(r) => r,
         None => return 0,

@@ -256,6 +256,7 @@ async fn stale_folder_and_media_completions_do_not_change_state() {
             refreshing: false,
         },
         FileAction::Prepared {
+            tagged_album: false,
             generation: 8,
             id: 0,
             track: Box::new(Track::from_folder("one", "a.flac")),

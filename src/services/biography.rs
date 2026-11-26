@@ -20,10 +20,19 @@ pub fn google_search_url(artist: &str) -> String {
 
 #[derive(Debug, Clone, Default)]
 pub struct Biography {
+    pub unavailable: bool,
     pub text: String,
     pub source_url: Option<String>,
     pub images: Vec<BioImage>,
+    /// Catalog cover reference for the artist, independent of biography prose.
+    pub cover_art: Option<String>,
     pub related_artists: Vec<crate::library::models::Artist>,
+}
+
+impl Biography {
+    pub fn has_prose(&self) -> bool {
+        !self.unavailable && !self.text.trim().is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -246,11 +255,6 @@ async fn musicbrainz_wikidata(client: &reqwest::Client, id: uuid::Uuid) -> Resul
     linked_wikidata(&value)
 }
 
-/// Never choose the first search hit or silently rank two same-name musicians.
-fn select_artist<'a>(entities: &'a Value, artist: &str) -> Result<(&'a str, &'a str)> {
-    select_artist_identity(entities, artist, None, None)
-}
-
 fn select_artist_identity<'a>(
     entities: &'a Value,
     artist: &str,
@@ -346,11 +350,8 @@ async fn lookup(
         ],
     )
     .await?;
-    let (id, title) = if mbid.is_none() {
-        select_artist(&entities["entities"], artist)?
-    } else {
-        select_artist_identity(&entities["entities"], artist, mbid, linked_id.as_deref())?
-    };
+    let (id, title) =
+        select_artist_identity(&entities["entities"], artist, mbid, linked_id.as_deref())?;
     let page = api(
         client,
         WIKIPEDIA,
@@ -397,8 +398,10 @@ async fn lookup(
     Ok((
         Biography {
             text,
+            unavailable: false,
             source_url: Some(source_url),
             images: Vec::new(),
+            cover_art: None,
             related_artists: Vec::new(),
         },
         photos,
@@ -453,6 +456,54 @@ fn plain(element: ElementRef<'_>) -> String {
 
 pub fn fragment(html: &str) -> String {
     plain(Html::parse_fragment(html).root_element())
+}
+
+/// Keep provider paragraph boundaries while stripping HTML and normalizing inline whitespace.
+pub fn biography_text(html: &str) -> String {
+    use ego_tree::iter::Edge;
+    let parsed = Html::parse_fragment(html);
+    let mut text = String::new();
+    for edge in parsed.root_element().traverse() {
+        let (node, open) = match edge {
+            Edge::Open(node) => (node, true),
+            Edge::Close(node) => (node, false),
+        };
+        if node.ancestors().filter_map(ElementRef::wrap).any(unwanted) {
+            continue;
+        }
+        match ElementRef::wrap(node).map(|el| el.value().name()) {
+            Some("p" | "div" | "li") => text.push_str("\n\n"),
+            Some("br") if open => text.push('\n'),
+            _ if open => {
+                if let Some(value) = node.value().as_text() {
+                    if node
+                        .ancestors()
+                        .filter_map(ElementRef::wrap)
+                        .any(|e| e.value().name() == "p")
+                    {
+                        text.extend(
+                            value
+                                .chars()
+                                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c }),
+                        );
+                    } else {
+                        text.push_str(value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    text.lines()
+        .map(|line| {
+            crate::util::sanitize_display_text(line)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Retain article prose/headings/lists and meaningful photos, not site chrome.
@@ -679,16 +730,25 @@ mod tests {
         json!({"labels":{"en":{"value":name}},"claims":{"P434":[{"mainsnak":{"datavalue":{"value":"550e8400-e29b-41d4-a716-446655440000"}}}]},"sitelinks":{"enwiki":{"title":title}}})
     }
     #[test]
+    fn biography_popup_separates_provider_paragraphs() {
+        assert_eq!(
+            biography_text("<p>One <em>inline</em>\nphrase.</p><p>Two.</p><br>Credit."),
+            "One inline phrase.\n\nTwo.\n\nCredit."
+        );
+        assert_eq!(biography_text("One.\r\n\r\nTwo."), "One.\n\nTwo.");
+    }
+
+    #[test]
     fn strict_matching_selects_music_not_tools_and_rejects_ambiguity() {
         let mut values = json!({"Q1": {"labels":{"en":{"value":"Tool"}},"sitelinks":{"enwiki":{"title":"Tool"}}}, "Q2": artist("Tool", "Tool (band)")});
         assert_eq!(
-            select_artist(&values, " TOOL ").unwrap(),
+            select_artist_identity(&values, " TOOL ", None, None).unwrap(),
             ("Q2", "Tool (band)")
         );
-        assert!(select_artist(&values, "Tools").is_err());
+        assert!(select_artist_identity(&values, "Tools", None, None).is_err());
         values["Q3"] = artist("Tool", "Another Tool");
         assert!(
-            select_artist(&values, "Tool")
+            select_artist_identity(&values, "Tool", None, None)
                 .unwrap_err()
                 .to_string()
                 .contains("Several")
@@ -698,7 +758,7 @@ mod tests {
     fn aliases_work_but_disambiguation_and_deprecated_claims_do_not() {
         let mut value = artist("Björk", "Björk");
         value["aliases"] = json!({"en":[{"value":"Bjork"}]});
-        assert!(select_artist(&json!({"Q1":value.clone()}), "Bjork").is_ok());
+        assert!(select_artist_identity(&json!({"Q1":value.clone()}), "Bjork", None, None).is_ok());
         value["claims"]["P434"][0]["rank"] = json!("deprecated");
         assert!(!musical_artist(&value));
         value["claims"]["P434"][0]["rank"] = json!("normal");
@@ -735,7 +795,7 @@ mod tests {
         assert!(select_artist_identity(&values, "Tool", Some(id), Some("Q2")).is_err());
         values["Q2"]["sitelinks"] = json!({});
         assert!(
-            select_artist(&values, "Tool")
+            select_artist_identity(&values, "Tool", None, None)
                 .unwrap_err()
                 .is::<AmbiguousArtist>()
         );

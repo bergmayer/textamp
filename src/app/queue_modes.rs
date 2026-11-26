@@ -48,13 +48,8 @@ pub fn choices(state: &AppState) -> Vec<Choice> {
         disabled: None,
     }];
     let mut seen = std::collections::HashSet::new();
-    for station in state.station_nav.columns.iter().flat_map(|c| &c.stations) {
-        if station.is_separator()
-            || station.is_action()
-            || station.is_remix()
-            || station.is_dj_mode()
-            || !seen.insert(&station.key)
-        {
+    for station in state.station_nav.columns.iter().flat_map(|c| c.stations()) {
+        if !seen.insert(&station.key) {
             continue;
         }
         let command = if station.requires_input() {
@@ -153,6 +148,10 @@ pub fn continue_related(state: &mut AppState, tx: &mpsc::Sender<Event>) {
     let tracks = state.playback_tracks().to_vec();
     state.set_playback_mode(PlaybackMode::Radio);
     state.radio.clear();
+    state
+        .radio
+        .introduced_albums
+        .extend(tracks.iter().filter_map(crate::library::radio::album_key));
     state.radio.tracks = tracks;
     state.radio.track_index = index;
     state.radio.active_station = Some(ActiveStation {
@@ -295,6 +294,47 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn shuffle_after_switching_to_radio_keeps_the_station_tracks() {
+        let mut state = queue();
+        let (tx, _rx) = mpsc::channel(16);
+        let mut audio = crate::audio::AudioPlayer::new_without_audio();
+        let mut config = crate::config::Config::default();
+        dispatch_action(
+            QueueAction::ToggleQueueShuffle.into(),
+            &mut state,
+            &mut audio,
+            &mut config,
+            &tx,
+        )
+        .await
+        .unwrap();
+        continue_related(&mut state, &tx);
+        for track in &mut state.radio.tracks {
+            track.rating_key.insert_str(0, "station-");
+        }
+        let playing = state.current_track().unwrap().rating_key.clone();
+        dispatch_action(
+            QueueAction::ToggleQueueShuffle.into(),
+            &mut state,
+            &mut audio,
+            &mut config,
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(current(&state), Mode::Related);
+        assert_eq!(state.current_track().unwrap().rating_key, playing);
+        assert_eq!(state.radio.tracks.len(), 5);
+        assert!(
+            state
+                .radio
+                .tracks
+                .iter()
+                .all(|t| t.rating_key.starts_with("station-"))
+        );
+    }
+
     #[test]
     fn continuation_follows_repeat_and_retains_an_unlisted_active_station() {
         let mut state = queue();

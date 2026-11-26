@@ -86,7 +86,7 @@ fn describe(state: &AppState, id: TextampSetting, defaults: &Config) -> Preferen
         Theme(name) => (
             name.display_name().into(),
             "Theme",
-            "Color theme for the application.",
+            "",
             Scope::Application,
             Value::Choice {
                 selected: state.theme == name,
@@ -96,11 +96,11 @@ fn describe(state: &AppState, id: TextampSetting, defaults: &Config) -> Preferen
         Presentation(mode) => (
             mode.label().into(),
             "Mode",
-            "Text or graphical application layout.",
+            "",
             Scope::Application,
             Value::Choice {
                 selected: state.application_mode() == Some(mode),
-                default: mode == super::launch::ApplicationMode::GuiSingle,
+                default: mode == super::launch::ApplicationMode::Gui,
             },
         ),
         Artwork(mode) => (
@@ -111,7 +111,7 @@ fn describe(state: &AppState, id: TextampSetting, defaults: &Config) -> Preferen
             }
             .into(),
             "Artwork",
-            "Artwork rendering for the current presentation.",
+            "",
             Scope::Library,
             Value::Choice {
                 selected: state.artwork_mode() == mode,
@@ -302,9 +302,9 @@ mod tests {
         assert_eq!(
             modes.len(),
             if cfg!(all(feature = "desktop", target_os = "macos")) {
-                3
-            } else {
                 2
+            } else {
+                1
             }
         );
         assert_eq!(
@@ -314,26 +314,6 @@ mod tests {
                 .count(),
             1
         );
-    }
-    #[test]
-    fn graphical_modes_are_exclusive_and_follow_the_window_arrangement() {
-        let mut state = AppState::new();
-        state.windowed_presentation = super::super::windowed_presentation::Presentation::windowed();
-        for (multiple, expected) in [
-            (false, super::super::launch::ApplicationMode::GuiSingle),
-            (true, super::super::launch::ApplicationMode::GuiMultiple),
-        ] {
-            state.gui_multiple_windows = multiple;
-            let selected: Vec<_> = page(&state, SettingsPage::Themes)
-                .into_iter()
-                .filter(|item| {
-                    matches!(item.id, TextampSetting::Presentation(_))
-                        && item.value.checked() == Some(true)
-                })
-                .map(|item| item.id)
-                .collect();
-            assert_eq!(selected, vec![TextampSetting::Presentation(expected)]);
-        }
     }
     #[test]
     fn identities_values_and_scope_stay_consistent_across_pages() {

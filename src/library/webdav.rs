@@ -41,9 +41,17 @@ fn endpoint(source: &FolderSource, path: &str, directory: bool) -> Result<Url> {
 }
 
 async fn request(source: &FolderSource, method: Method, url: Url) -> Result<RequestBuilder> {
-    let FolderLocation::Webdav { password_env, .. } = &source.location else {
+    let FolderLocation::Webdav {
+        username,
+        password_env,
+        ..
+    } = &source.location
+    else {
         unreachable!()
     };
+    if username.is_none() {
+        return authenticated_request(source, method, url, None);
+    }
     let id = source.id.clone();
     let env = password_env.clone();
     let password = tokio::task::spawn_blocking(move || source_secret(&id, &env)).await??;
@@ -245,6 +253,44 @@ pub(crate) fn parse_listing(
     Ok(entries)
 }
 
+/// Fetch the album sidecar through the same authenticated, root-confined endpoint as audio.
+pub(crate) async fn folder_cover(
+    source: &FolderSource,
+    directory: &str,
+) -> Result<Option<Vec<u8>>> {
+    let path = child_path(directory, "cover.jpg")?;
+    let url = endpoint(source, &path, false)?;
+    let response = send(request(source, Method::GET, url.clone()).await?, &url).await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        response.status().is_success(),
+        "WebDAV artwork returned HTTP {}",
+        response.status()
+    );
+    const LIMIT: usize = 16 * 1024 * 1024;
+    anyhow::ensure!(
+        response.content_length().is_none_or(|n| n <= LIMIT as u64),
+        "WebDAV artwork exceeds 16 MiB"
+    );
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.without_url())?;
+        anyhow::ensure!(
+            chunk.len() <= LIMIT - bytes.len(),
+            "WebDAV artwork exceeds 16 MiB"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    anyhow::ensure!(
+        image::guess_format(&bytes).is_ok(),
+        "Invalid WebDAV cover image"
+    );
+    Ok(Some(bytes))
+}
+
 pub(super) async fn file(source: &FolderSource, path: &str, limit: u64) -> Result<MediaFile> {
     let url = endpoint(source, path, false)?;
     let response = send(request(source, Method::GET, url.clone()).await?, &url).await?;
@@ -380,6 +426,58 @@ mod tests {
         )
     }
     #[tokio::test]
+    async fn folder_cover_handles_encoded_paths_and_missing_sidecars() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = FolderSource {
+            id: "cover-test".into(),
+            name: "Albums".into(),
+            location: FolderLocation::Webdav {
+                url: format!("http://{}/Music/", listener.local_addr().unwrap()),
+                username: None,
+                password_env: None,
+            },
+        };
+        let mut jpg = Vec::new();
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        let expected = jpg.clone();
+        let server = tokio::spawn(async move {
+            for (path, status, body) in [
+                ("LP%20%231/cover.jpg", "200 OK", jpg.as_slice()),
+                ("cover.jpg", "404 Not Found", &[][..]),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(socket.read_u8().await.unwrap());
+                }
+                assert!(headers.starts_with(format!("GET /Music/{path} HTTP/1.1").as_bytes()));
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                socket.write_all(body).await.unwrap();
+            }
+        });
+        assert_eq!(
+            folder_cover(&source, "LP #1").await.unwrap(),
+            Some(expected)
+        );
+        assert_eq!(folder_cover(&source, "").await.unwrap(), None);
+        server.await.unwrap();
+    }
+    #[tokio::test]
     async fn consecutive_listings_reuse_the_http_connection() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -423,15 +521,8 @@ mod tests {
         };
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             for _ in 0..2 {
-                let url = Url::parse(&base).unwrap();
-                let request = authenticated_request(
-                    &source,
-                    Method::from_bytes(b"PROPFIND").unwrap(),
-                    url.clone(),
-                    None,
-                )
-                .unwrap();
-                assert_eq!(list_request(request, url, "").await.unwrap().len(), 1);
+                let entries = source.list("").await.unwrap();
+                assert_eq!(entries[0].name, "a.flac");
             }
             server.await.unwrap();
         })

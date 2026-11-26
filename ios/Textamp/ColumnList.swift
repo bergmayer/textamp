@@ -1,7 +1,38 @@
 import SwiftUI
 import UIKit
 
+/// Center the header in the entire column while leaving the track list and its index beside the scrubber.
+private final class AlbumTableHeader: UIView {
+  init(content: UIView) {
+    super.init(frame: .zero)
+    content.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(content)
+    insetsLayoutMarginsFromSafeArea = false
+    NSLayoutConstraint.activate([
+      content.leadingAnchor.constraint(equalTo: layoutMarginsGuide.leadingAnchor),
+      content.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor),
+      content.topAnchor.constraint(equalTo: topAnchor),
+      content.bottomAnchor.constraint(equalTo: bottomAnchor),
+    ])
+  }
+  required init?(coder: NSCoder) { nil }
+}
 private final class PlaylistTable: UITableView {
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    if let view = tableHeaderView, bounds.width > 0 {
+      let inset = max(0, (superview?.bounds.width ?? bounds.width) - bounds.width)
+      let margins = NSDirectionalEdgeInsets(top: 0, leading: inset, bottom: 0, trailing: 0)
+      if view.directionalLayoutMargins != margins { view.directionalLayoutMargins = margins }
+      let size = view.systemLayoutSizeFitting(CGSize(width: bounds.width, height: 0),
+        withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel)
+      let height = ceil(size.height)
+      if view.frame.height != height || view.frame.width != bounds.width {
+        view.frame.size = CGSize(width: bounds.width, height: height)
+        tableHeaderView = view
+      }
+    }
+  }
   var keyboardTarget = false
   override func didMoveToWindow() {
     super.didMoveToWindow()
@@ -24,11 +55,15 @@ struct ColumnList: UIViewRepresentable {
   @Environment(AppModel.self) var model
   @Environment(\.colorScheme) private var colorScheme
   let column: Column
+  let paneWidth: CGFloat
   let showsSelection: Bool
   let keyboardTarget: Bool
   let selecting: Bool
   let beginSelecting: () -> Void
+  let showAlbumNotes: () -> Void
   var dismissFilterKeyboard: () -> Void
+
+  private var artworkColumns: Int { max(2, Int((paneWidth - ColumnListContainer.scrubberWidth) / 130)) }
 
   func makeCoordinator() -> Coordinator { Coordinator(self) }
   func makeUIView(context: Context) -> ColumnListContainer {
@@ -42,6 +77,7 @@ struct ColumnList: UIViewRepresentable {
     table.dataSource = context.coordinator
     table.delegate = context.coordinator
     table.register(UITableViewCell.self, forCellReuseIdentifier: "music")
+    table.selectionFollowsFocus = false
     table.allowsMultipleSelectionDuringEditing = true
     table.showsVerticalScrollIndicator = true
     table.contentInsetAdjustmentBehavior = .always
@@ -75,8 +111,8 @@ struct ColumnList: UIViewRepresentable {
     private var initialized = false
     private var requestedArtwork: [String: String] = [:]
     private var theme = AppTheme()
+    private var gridColumns = 1
     private var rowHeight: CGFloat = 76
-    private var artworkRowHeight: CGFloat = 330
     private let indexPreview = UILabel()
     private var hideIndexPreview: Task<Void, Never>?
 
@@ -111,19 +147,58 @@ struct ColumnList: UIViewRepresentable {
       let reset = !initialized || old.id != next.column.id || old.filter != next.column.filter
       if old.id != next.column.id { requestedArtwork.removeAll() }
       let height = UIFontMetrics.default.scaledValue(for: 76)
+      let relatedChanged = old.albumPage?.similar != next.column.albumPage?.similar
+        || old.relatedArtists != next.column.relatedArtists
+        || old.albumPage?.message != next.column.albumPage?.message
+      let columns = next.column.gridStart != nil && !next.selecting && next.column.playlistEditing != true
+        ? next.artworkColumns : 1
       let structureChanged =
-        reset || old.count != next.column.count || old.sections != next.column.sections
-        || old.largeArtwork != next.column.largeArtwork
-        || old.artworkStart != next.column.artworkStart || height != rowHeight
+        reset || gridColumns != columns || old.gridStart != next.column.gridStart || old.gridEnd != next.column.gridEnd || old.showsRecommendations != next.column.showsRecommendations || old.count != next.column.count || old.sections != next.column.sections
+        || height != rowHeight
       let editing = next.selecting || next.column.playlistEditing == true
       let contentChanged =
         parent.selecting != next.selecting || old.playlistEditing != next.column.playlistEditing || old.rows != next.column.rows
         || parent.showsSelection != next.showsSelection
         || theme != next.model.theme
         || parent.colorScheme != next.colorScheme
+      let album = next.column.albumArtworkKey
+      let document = next.column.albumPage
+      if reset || (document.map { !$0.hasSameAlbumHeader(as: old.albumPage) } ?? (old.albumPage != nil))
+        || old.artistHeader != next.column.artistHeader || old.playback != next.column.playback || old.albumDetailsArtwork != next.column.albumDetailsArtwork
+        || theme != next.model.theme {
+        if album != nil {
+          table.tableHeaderView = AlbumTableHeader(content: UIHostingConfiguration {
+            AlbumPageHeader(column: next.column, detail: document, showAlbumNotes: next.showAlbumNotes).environment(next.model)
+              .foregroundStyle(next.model.theme.text).tint(next.model.theme.tint)
+          }.margins(.all, 0).makeContentView())
+        } else if let info = next.column.artistHeader {
+          table.tableHeaderView = AlbumTableHeader(content: UIHostingConfiguration {
+            VStack(spacing: 14) {
+              Color.clear.aspectRatio(1, contentMode: .fit)
+                .frame(maxWidth: 220)
+                .overlay { Artwork(id: info.artwork) }
+                .clipShape(Circle())
+                .frame(maxWidth: .infinity, alignment: .center)
+              if let search = info.search { ArtistWebSearchButton(command: search, showsLabel: true) } else {
+              VStack(alignment: .trailing, spacing: 0) {
+                Text(info.text).font(.body).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
+                  .accessibilityIdentifier("artist-bio-preview")
+                Button(info.loading == true ? "Artist Biography" : "…more") { next.model.invoke(info.reader.token) }
+                  .font(.subheadline.weight(.semibold)).accessibilityLabel(info.reader.label)
+              }
+              }
+            }.frame(maxWidth: .infinity).padding().foregroundStyle(next.model.theme.text).tint(next.model.theme.tint).environment(next.model)
+          }.margins(.all, 0).makeContentView())
+        } else { table.tableHeaderView = nil }
+
+      }
+      let reflow = initialized && !reset && columns != gridColumns
+      let anchor = reflow ? table.indexPathsForVisibleRows?.first(where: { $0.section < sections.count }) : nil
+      let anchorPosition = anchor.map { position($0) }
+      let anchorOffset = anchor.map { table.rectForRow(at: $0).minY - table.contentOffset.y }
+      gridColumns = columns
       theme = next.model.theme
       rowHeight = height
-      artworkRowHeight = 268 + UIFontMetrics(forTextStyle: .headline).scaledValue(for: 62)
       if structureChanged { gesture = nil }
       parent = next
       if let list = table as? PlaylistTable {
@@ -137,7 +212,7 @@ struct ColumnList: UIViewRepresentable {
         if editing { table.becomeFirstResponder() }
       }
       table.tintColor = UIColor(next.model.theme.tint)
-      table.backgroundColor = UIColor(next.model.theme.bg)
+      table.backgroundColor = next.model.theme.tableBackground
       table.separatorColor = UIColor(next.model.theme.muted.opacity(0.2))
       table.sectionIndexColor = UIColor(next.model.theme.tint)
       table.sectionIndexBackgroundColor = .clear
@@ -154,23 +229,39 @@ struct ColumnList: UIViewRepresentable {
             .sorted { sections[$0].label < sections[$1].label }
 
           requestedWindow = nil
-          // Detach hosted controls before replacing row identities.
-          for cell in table.visibleCells {
-            cell.contentConfiguration = nil
-            cell.accessibilityIdentifier = nil
+          let reload = {
+            for cell in table.visibleCells {
+              cell.contentConfiguration = nil
+              cell.accessibilityIdentifier = nil
+            }
+            table.reloadData()
+            table.layoutIfNeeded()
+            if let position = anchorPosition, let offset = anchorOffset, position < next.column.count {
+              let y = table.rectForRow(at: self.indexPath(position)).minY - offset
+              let top = -table.adjustedContentInset.top
+              let bottom = max(top, table.contentSize.height - table.bounds.height + table.adjustedContentInset.bottom)
+              table.setContentOffset(CGPoint(x: 0, y: min(bottom, max(top, y))), animated: false)
+            }
           }
-          table.reloadData()
-          table.layoutIfNeeded()
+          if reflow && table.window != nil && !UIAccessibility.isReduceMotionEnabled {
+            UIView.transition(with: table, duration: 0.16, options: [.transitionCrossDissolve, .beginFromCurrentState, .allowUserInteraction], animations: reload)
+          } else { reload() }
           if reset, next.column.count > 0 {
             let target = old.filter != next.column.filter ? 0 : next.column.selectedPosition ?? 0
-            table.scrollToRow(
-              at: indexPath(min(target, next.column.count - 1)), at: .top, animated: false)
+            if (album != nil || next.column.artistHeader != nil) && target == 0 {
+              table.setContentOffset(CGPoint(x: 0, y: -table.adjustedContentInset.top), animated: false)
+            } else {
+              table.scrollToRow(at: indexPath(min(target, next.column.count - 1)), at: .top, animated: false)
+            }
           }
         } else {
           for path in table.indexPathsForVisibleRows ?? [] {
             if let cell = table.cellForRow(at: path) { configure(cell, at: path) }
           }
         }
+      }
+      if relatedChanged && !structureChanged && !contentChanged && parent.column.showsRecommendations {
+        table.reconfigureRows(at: [IndexPath(row: 0, section: sections.count)])
       }
       if editing && gesture == nil {
         for path in table.indexPathsForVisibleRows ?? [] {
@@ -186,22 +277,96 @@ struct ColumnList: UIViewRepresentable {
       scheduleRequest(table)
     }
 
-    func numberOfSections(in tableView: UITableView) -> Int { sections.count }
+    func numberOfSections(in tableView: UITableView) -> Int { sections.count + (parent.column.showsRecommendations ? 1 : 0) }
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+      if section == sections.count { return 1 }
       let end = section + 1 < sections.count ? sections[section + 1].position : parent.column.count
-      return max(0, end - sections[section].position)
+      let grid = gridRange(section)
+      return end - sections[section].position - grid.count + (grid.count + gridColumns - 1) / gridColumns
     }
     func tableView(_ tableView: UITableView, cellForRowAt path: IndexPath) -> UITableViewCell {
       let cell = tableView.dequeueReusableCell(withIdentifier: "music", for: path)
       configure(cell, at: path)
       return cell
     }
-    private func position(_ path: IndexPath) -> Int { sections[path.section].position + path.row }
+    private func gridRange(_ section: Int) -> Range<Int> {
+      let start = sections[section].position
+      let end = section + 1 < sections.count ? sections[section + 1].position : parent.column.count
+      guard gridColumns > 1, let first = parent.column.gridStart, let last = parent.column.gridEnd else { return start..<start }
+      let lower = min(end, max(start, first))
+      return lower..<max(lower, min(last, end))
+    }
+    private func position(_ path: IndexPath) -> Int {
+      guard path.section < sections.count else { return parent.column.count }
+      let raw = sections[path.section].position + path.row
+      let grid = gridRange(path.section)
+      guard raw >= grid.lowerBound else { return raw }
+      let band = raw - grid.lowerBound
+      let bands = (grid.count + gridColumns - 1) / gridColumns
+      return band < bands ? grid.lowerBound + band * gridColumns : grid.upperBound + band - bands
+    }
     private func indexPath(_ position: Int) -> IndexPath {
       let section = sections.lastIndex(where: { $0.position <= position }) ?? 0
-      return IndexPath(row: position - sections[section].position, section: section)
+      let grid = gridRange(section)
+      var row = position - sections[section].position
+      if grid.contains(position) { row -= (position - grid.lowerBound) - (position - grid.lowerBound) / gridColumns }
+      else if position >= grid.upperBound { row -= grid.count - (grid.count + gridColumns - 1) / gridColumns }
+      return IndexPath(row: row, section: section)
     }
     private func configure(_ cell: UITableViewCell, at path: IndexPath) {
+      if path.section == sections.count {
+        cell.contentView.isUserInteractionEnabled = true
+        let columns = parent.artworkColumns
+        cell.contentConfiguration = UIHostingConfiguration {
+          ColumnRecommendations(columns: columns, albums: parent.column.albumPage?.similar ?? [], artists: parent.column.relatedArtists, message: parent.column.albumPage?.message ?? "").environment(parent.model)
+        }.margins(.horizontal, 8).margins(.vertical, 12)
+        cell.backgroundColor = parent.model.theme.isBrushedAluminum ? .clear : UIColor(parent.model.theme.bg)
+        cell.accessoryType = .none
+        cell.editingAccessoryType = .none
+        cell.accessibilityIdentifier = "album-recommendations"
+        cell.accessibilityTraits.remove(.selected)
+        return
+      }
+      let start = position(path)
+      let range = gridRange(path.section)
+      if range.contains(start) {
+        cell.contentView.isUserInteractionEnabled = true
+        cell.backgroundColor = parent.model.theme.isBrushedAluminum ? .clear : UIColor(parent.model.theme.bg)
+        cell.accessoryType = .none
+        cell.editingAccessoryType = .none
+        cell.accessibilityIdentifier = nil
+        cell.accessibilityTraits.remove(.selected)
+        cell.selectionStyle = .none
+        let column = parent.column
+        let model = parent.model
+        let tiles = (0..<gridColumns).map { start + $0 < range.upperBound ? rows[start + $0] : nil }
+        cell.contentConfiguration = UIHostingConfiguration {
+          HStack(alignment: .top, spacing: 10) {
+            ForEach(tiles.indices, id: \.self) { slot in
+              if let row = tiles[slot] {
+                Button {
+                  model.send("select", ["owner": column.id, "index": row.index, "key": row.key])
+                } label: {
+                  VStack(alignment: .leading, spacing: 4) {
+                    Color.clear.aspectRatio(1, contentMode: .fit).overlay { Artwork(id: row.artwork) }.clipShape(RoundedRectangle(cornerRadius: 6))
+                    ViewThatFits(in: .horizontal) {
+                      Text(row.albumCaption).fixedSize()
+                      if let balanced = row.balancedCaption { Text(balanced).fixedSize() }
+                      Text(row.albumCaption).lineLimit(3)
+                    }.font(.subheadline)
+                    if column.artistHeader == nil, !row.subtitle.isEmpty { Text(row.subtitle).font(.caption).lineLimit(1) }
+                  }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel(row.albumCaption).contextMenu {
+                  ForEach(row.context ?? []) { command in
+                    Button(command.label) { model.invoke(command.token) }.disabled(command.disabled != nil)
+                  }
+                }
+              } else { Color.clear.frame(maxWidth: .infinity) }
+            }
+          }.foregroundStyle(model.theme.text).environment(model)
+        }.margins(.horizontal, 8).margins(.vertical, 5)
+        return
+      }
       let editing = parent.selecting || parent.column.playlistEditing == true
       let marked = rows[position(path)]?.batchSelected == true
       cell.tintColor = UIColor(
@@ -231,7 +396,6 @@ struct ColumnList: UIViewRepresentable {
         cell.contentConfiguration = UIHostingConfiguration {
           MusicRowView(
             row: row,
-            large: parent.column.largeArtwork && row.kind == "album" && row.artwork != nil,
             selected: selected
           )
           .environment(parent.model)
@@ -244,12 +408,17 @@ struct ColumnList: UIViewRepresentable {
       }
     }
     func tableView(_ tableView: UITableView, heightForRowAt path: IndexPath) -> CGFloat {
-      let large =
-        parent.column.largeArtwork
-        && parent.column.artworkStart.map { position(path) >= $0 } == true
-      return large ? artworkRowHeight : rowHeight
+      if path.section == sections.count { return UITableView.automaticDimension }
+      if gridRange(path.section).contains(position(path)) {
+        return max(1, tableView.bounds.width / CGFloat(gridColumns)) + UIFontMetrics.default.scaledValue(for: 82)
+      }
+      return rowHeight
     }
     func tableView(_ tableView: UITableView, didSelectRowAt path: IndexPath) {
+      if path.section == sections.count || gridRange(path.section).contains(position(path)) {
+        tableView.deselectRow(at: path, animated: true)
+        return
+      }
       if tableView.isEditing {
         mark(path, selected: true)
         return
@@ -312,9 +481,23 @@ struct ColumnList: UIViewRepresentable {
     }
 
     func tableView(
+      _ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt path: IndexPath
+    ) -> UISwipeActionsConfiguration? {
+      guard path.section < sections.count,
+        let remove = rows[position(path)]?.context?.first(where: { $0.kind == "removeDescription" })
+      else { return nil }
+      let model = parent.model
+      let action = UIContextualAction(style: .destructive, title: remove.label) { _, _, complete in
+        model.invoke(remove.token)
+        complete(true)
+      }
+      action.image = UIImage(systemName: "trash")
+      return UISwipeActionsConfiguration(actions: [action])
+    }
+    func tableView(
       _ tableView: UITableView, contextMenuConfigurationForRowAt path: IndexPath, point: CGPoint
     ) -> UIContextMenuConfiguration? {
-      guard let commands = rows[position(path)]?.context, !commands.isEmpty else { return nil }
+      guard path.section < sections.count, !gridRange(path.section).contains(position(path)), let commands = rows[position(path)]?.context, !commands.isEmpty else { return nil }
       let model = parent.model
       return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
         UIMenu(
@@ -322,7 +505,9 @@ struct ColumnList: UIViewRepresentable {
             UIMenu(
               options: .displayInline,
               children: section.map { command in
-                UIAction(title: command.label, attributes: command.disabled == nil ? [] : .disabled)
+                var attributes: UIMenuElement.Attributes = command.destructive == true ? .destructive : []
+                if command.disabled != nil { attributes.insert(.disabled) }
+                return UIAction(title: command.label, attributes: attributes)
                 {
                   _ in model.invoke(command.token)
                 }
@@ -402,7 +587,11 @@ struct ColumnList: UIViewRepresentable {
     }
     private func requestVisible(_ table: UITableView) {
       let visible = table.indexPathsForVisibleRows ?? []
-      let positions = visible.map(position)
+      let positions = visible.filter { $0.section < sections.count }.flatMap { path -> Range<Int> in
+        let start = position(path)
+        let grid = gridRange(path.section)
+        return start..<(grid.contains(start) ? min(grid.upperBound, start + gridColumns) : start + 1)
+      }
       guard let start = positions.min(), let last = positions.max() else { return }
       if positions.contains(where: { rows[$0] == nil }), requestedWindow != start..<(last + 1) {
         requestedWindow = start..<(last + 1)
@@ -428,6 +617,7 @@ struct ColumnList: UIViewRepresentable {
 
 /// A separate scrubber keeps the table's alphabet index and proportional scrolling independently hittable.
 final class ColumnListContainer: UIView {
+  static let scrubberWidth: CGFloat = 28
   let table: UITableView
   private let scrubber = ListScrubber()
   init(table: UITableView) {
@@ -441,7 +631,7 @@ final class ColumnListContainer: UIView {
   override func layoutSubviews() {
     super.layoutSubviews()
     let show = table.contentSize.height > bounds.height * 1.5 && bounds.height > 0
-    let railWidth: CGFloat = show ? 28 : 0
+    let railWidth = show ? Self.scrubberWidth : 0
     let leading = effectiveUserInterfaceLayoutDirection == .rightToLeft
     table.frame = CGRect(
       x: leading ? railWidth : 0, y: 0, width: max(0, bounds.width - railWidth),

@@ -13,14 +13,15 @@ pub fn album_tracks(state: &AppState, key: &str) -> Vec<Track> {
             .iter()
             .flat_map(|member| indexed_album_tracks(state, member))
             .collect();
-        tracks.sort_by_key(|track| {
+        fn order(track: &Track) -> (u32, u32, &str, &str) {
             (
                 track.parent_index.unwrap_or(1),
                 track.index.unwrap_or(u32::MAX),
-                track.title.clone(),
-                track.rating_key.clone(),
+                &track.title,
+                &track.rating_key,
             )
-        });
+        }
+        tracks.sort_by(|a, b| order(a).cmp(&order(b)));
         let mut seen = std::collections::HashSet::new();
         tracks.retain(|track| seen.insert(track.rating_key.clone()));
         return tracks;

@@ -79,7 +79,7 @@ pub enum SystemAction {
     OpenBrowser(String),
     OpenExternalSearch {
         target: crate::services::external_search::SearchTarget,
-        query: Option<String>,
+        query: Option<crate::services::external_search::MusicQuery>,
     },
 }
 
@@ -342,6 +342,10 @@ pub enum QueueLoadIntent {
 
 #[derive(Debug, Clone)]
 pub enum QueueAction {
+    ShowHistory(bool),
+    SelectHistory(String),
+    HistoryTrack(String, super::track_context::ContextKind),
+    ClearHistory,
     /// Move the selected queue occurrences to a drop boundary.
     ReorderSelection {
         from: usize,
@@ -394,17 +398,25 @@ pub enum QueueAction {
     },
     ClearQueue,
     RemoveFromQueue(usize),
+    RemoveQueueSide {
+        row: usize,
+        above: bool,
+    },
     ToggleQueueShuffle,
     JumpToQueueIndex(usize),
     PromptSavePlaylist,
+    PromptImportPlaylist,
+    ImportPlaylist {
+        generation: u64,
+        path: std::path::PathBuf,
+    },
     PromptExportPlaylist {
         format: crate::services::playlist_export::Format,
         queue: bool,
     },
     ExportPlaylist {
         generation: u64,
-        tracks: Vec<Track>,
-        format: crate::services::playlist_export::Format,
+        contents: std::sync::Arc<Vec<u8>>,
         path: std::path::PathBuf,
     },
     PlaylistExported {
@@ -449,6 +461,7 @@ pub enum SearchAction {
     ExecuteLocalSearch,
     SubmitSearch,
     SelectSearchResult,
+    OpenRecentResult(Box<super::library_details::RecentResult>),
     ActivateListFilter,
     DeactivateListFilter,
     SelectFilteredItem,
@@ -673,7 +686,8 @@ pub enum SettingsAction {
     OpenSettings,
     SetRemixAllowSameArtist(bool),
     SetShowCompilationOnlyArtists(bool),
-    SetLargeArtwork(bool),
+    SetAlbumGrid(bool),
+    RememberSearchResult(Box<super::library_details::RecentResult>),
     SetSinglesTrackLimit(u32),
     SetTranscodeBitrate(u32),
     SettingsSelect,
@@ -698,6 +712,7 @@ pub enum SettingsAction {
         result: Result<usize, String>,
     },
     CacheSizes {
+        catalog_sync_times: std::collections::HashMap<String, u64>,
         request: u64,
         entries: Vec<(crate::app::sources::LibraryChoice, Result<u64, String>)>,
         artwork: Vec<(String, usize, u64)>,
@@ -708,19 +723,9 @@ pub enum SettingsAction {
         choice: crate::app::sources::LibraryChoice,
         removed: usize,
     },
-    AllCachesCleared {
-        library: Result<usize, String>,
-        artwork: usize,
-    },
-
-    /// Recompute on-disk cache stats (library breakdown + artwork +
-    /// waveform sizes) and post the results back via CacheEvent /
-    /// ArtworkEvent. Used by the Settings popup to make sure the
-    /// library-options popover shows current sizes when it opens.
+    /// Measure the metadata and artwork caches shown in library settings.
     RefreshCacheStats,
 
-    SetAdventureLength(usize),
-    CancelAdventure,
     AdventureComplete(Vec<Track>),
 
     AdventureGenerated {
@@ -736,8 +741,6 @@ pub enum SettingsAction {
     /// Toggle whether a top-level browse section is shown in the
     /// leftmost browse column. Persists category and collection preferences.
     ToggleSectionVisibility(crate::app::state::SidebarSection),
-    /// Toggle the desktop Library / Now Playing split layout.
-    ToggleSplitView,
     /// Persist a column's artwork visibility for its browse context.
     SaveColumnArtwork {
         library_key: String,

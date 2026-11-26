@@ -45,13 +45,19 @@ pub struct Column {
     pub title: String,
     pub rows: Arc<Vec<Row>>,
     pub alphabet_ascending: Option<bool>,
+    pub has_view_options: bool,
+    pub named_heading: bool,
     pub header_controls: Vec<super::catalog::Control>,
     pub selected: usize,
     pub selected_set: BTreeSet<usize>,
     pub tracks: Arc<[crate::library::models::Track]>,
     pub artwork_visible: bool,
-    pub large_artwork: bool,
+    pub album_grid: bool,
     pub album_info: bool,
+    pub bio_search: Option<crate::services::web_search::Provider>,
+    pub similar_artists: Vec<crate::library::models::Artist>,
+    pub artist_header: Option<(String, String, String)>,
+    pub album_page: Option<(String, super::catalog::Preview)>,
     pub album_info_selected: bool,
     pub editable_playlist: bool,
     pub partial_albums: BTreeSet<usize>,
@@ -99,10 +105,13 @@ pub enum Origin {
     AlphabetJump,
     LibraryJump,
 }
+pub const GRID_COVER_SIZE: f32 = 72.;
+pub const GRID_ROW_HEIGHT: f32 = 138.;
+
 impl Column {
     pub fn row_height(&self) -> f32 {
-        if self.artwork_visible && self.large_artwork {
-            crate::ui::layout::LARGE_ARTWORK + 36.
+        if self.album_grid {
+            GRID_ROW_HEIGHT
         } else if self.artwork_visible {
             64.
         } else if !self.tracks.is_empty() {
@@ -133,6 +142,9 @@ impl Column {
 /// Count-bearing terminal root titles are represented by the desktop status bar.
 /// Album and artist names retain their original punctuation and parentheses.
 pub fn heading(column: &Column) -> String {
+    if let Some((_, name, _)) = &column.artist_header {
+        return name.clone();
+    }
     for noun in ["artists", "tracks"] {
         if column.title.strip_prefix(noun).is_some_and(|suffix| {
             suffix
@@ -284,6 +296,8 @@ fn column(
         artwork_keys: Default::default(),
         revision: hasher.finish(),
         title,
+        has_view_options: false,
+        named_heading: false,
         header_controls: vec![],
         alphabet_ascending: None,
         rows: Arc::new(rows),
@@ -291,8 +305,12 @@ fn column(
         selected_set,
         tracks: Arc::from([]),
         artwork_visible: false,
-        large_artwork: false,
+        album_grid: false,
         album_info: false,
+        album_page: None,
+        bio_search: None,
+        similar_artists: Vec::new(),
+        artist_header: None,
         album_info_selected: false,
         editable_playlist: false,
         partial_albums: Default::default(),
@@ -383,6 +401,22 @@ pub fn columns(state: &AppState) -> Vec<Column> {
                             c.selected_index,
                             c.selected_set.clone(),
                         );
+                        if let Some(source) = state.sources.active.folder() {
+                            for (row, item) in c.items.iter().enumerate() {
+                                let dir = if item.is_track() {
+                                    item.key.rsplit_once('/').map_or("", |(dir, _)| dir)
+                                } else {
+                                    &item.key
+                                };
+                                let key =
+                                    crate::library::track::Track::folder_cover_key(source, dir);
+                                if state.artwork.grid_cache.contains_key(&key) {
+                                    result.artwork_keys.insert(row, key);
+                                }
+                            }
+                            result.artwork_visible = !result.artwork_keys.is_empty();
+                        }
+                        result.named_heading = index > 0;
                         if c.items.iter().any(|item| item.is_track()) {
                             result.tracks = c
                                 .items
@@ -509,6 +543,16 @@ pub fn columns(state: &AppState) -> Vec<Column> {
                         }
                         _ => None,
                     };
+                    result.named_heading = c.artist_header.is_some()
+                        || matches!(
+                            c.play_all_row,
+                            Some(
+                                crate::app::state::PlayAllRow::Album { .. }
+                                    | crate::app::state::PlayAllRow::Playlist { .. }
+                            )
+                        )
+                        || compact_heading(&c.title) != c.title;
+                    result.has_view_options = state.column_options_type(index).is_some();
                     result.hidden = index < first_content_column(state);
                     result.artwork_keys = c
                         .items
@@ -519,8 +563,25 @@ pub fn columns(state: &AppState) -> Vec<Column> {
                         })
                         .collect();
                     result.tracks = c.tracks.clone().into();
-                    result.artwork_visible = c.artwork_visible;
+                    result.album_grid = crate::app::view_options::album_grid(state, index);
+                    result.artwork_visible = c.artwork_visible || result.album_grid;
                     result.metadata = c.details.is_some();
+                    if let Some(crate::app::state::PlayAllRow::Album { rating_key, .. }) =
+                        &c.play_all_row
+                    {
+                        result.album_page = crate::app::details::album_page(state, c)
+                            .map(|page| (rating_key.clone(), page));
+                    }
+                    result.artist_header = c.artist_header.as_ref().map(|info| {
+                        result.bio_search =
+                            info.needs_web_search().then_some(state.web_search_provider);
+                        result.similar_artists = info.document.related_artists.clone();
+                        (
+                            info.artist_key.clone(),
+                            info.artist_name.clone(),
+                            info.excerpt().to_owned(),
+                        )
+                    });
                     result.album_info = c.has_album_details();
                     result.album_info_selected = result.album_info
                         && c.header_selection
@@ -544,6 +605,9 @@ pub fn columns(state: &AppState) -> Vec<Column> {
                             &c.ready_tracks(),
                         );
                     }
+                    result
+                        .header_controls
+                        .extend(crate::app::column_controls::artist_mix(state, c));
                     if result.playlist_editing {
                         result.header_controls.clear();
                     }
@@ -708,7 +772,7 @@ mod tests {
         }
     }
     #[test]
-    fn large_album_covers_grow_virtual_rows_without_changing_targets() {
+    fn grid_covers_grow_virtual_rows_without_changing_targets() {
         let mut state = crate::app::AppState::new();
         state.artist_nav.columns = vec![crate::app::state::BrowseColumn::new(
             "Albums",
@@ -724,13 +788,15 @@ mod tests {
         let mut column = columns(&state).remove(0);
         let target = column.target(state.library_generation, 0, 0).unwrap();
         column.artwork_visible = true;
+        column.album_grid = false;
         let small = column.row_height();
-        column.large_artwork = true;
+        column.album_grid = true;
         assert!(column.row_height() > small);
         assert_eq!(
             column.target(state.library_generation, 0, 0).unwrap(),
             target
         );
+        column.album_grid = false;
         column.artwork_visible = false;
         assert_eq!(column.row_height(), 33.);
     }

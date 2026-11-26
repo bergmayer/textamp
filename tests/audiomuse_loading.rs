@@ -126,7 +126,9 @@ async fn failed_analysis_refresh_keeps_cache_and_requires_manual_retry() {
     state.sources.audiomuse.snapshot = Some(snapshot());
     Arc::make_mut(state.sources.audiomuse.snapshot.as_mut().unwrap()).updated = 1;
     state.browse_category = textamp::app::BrowseCategory::Library;
-    state.sources.nav_collection = Some(navidrome::commands::CollectionKind::AudioMuse(Feature::Labels));
+    state.sources.nav_collection = Some(navidrome::commands::CollectionKind::AudioMuse(
+        Feature::Labels,
+    ));
     let task = pending(&mut state);
     let (tx, _rx) = mpsc::channel(8);
     let generation = state.library_generation;
@@ -910,6 +912,26 @@ async fn description_search_preserves_history_and_results_until_its_matching_com
     );
     assert_eq!(state.artist_nav.columns[1].title, "Warm acoustic music");
     state.sources.nav_tasks.remove("audiomuse");
+}
+
+#[tokio::test]
+async fn deleting_from_description_history_keeps_a_closed_result_column_closed() {
+    let mut state = state();
+    let mut config = textamp::config::Config::default();
+    results(&mut state, &mut config, "Quiet piano", &["one"]).await;
+    results(&mut state, &mut config, "Bright strings", &["two"]).await;
+    audiomuse::browse_descriptions(&mut state, true);
+    assert_eq!(state.artist_nav.columns.len(), 1);
+    act(
+        &mut state,
+        &mut config,
+        audiomuse::Command::RemoveDescription {
+            query: "Bright strings".into(),
+        },
+    )
+    .await;
+    assert_eq!(state.artist_nav.columns.len(), 1);
+    assert_eq!(state.artist_nav.columns[0].items[0].key(), "Quiet piano");
 }
 
 #[tokio::test]

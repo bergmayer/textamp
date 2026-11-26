@@ -105,17 +105,21 @@ pub(super) async fn tracks(
     load_revision(
         session,
         key,
-        false,
-        true,
+        PlaylistLoad::Browse,
         playlist.map(PlaylistRevision::from),
     )
     .await
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlaylistLoad {
+    Browse,
+    Warm,
+    Refresh,
+}
 async fn load_revision(
     session: &Session,
     key: &str,
-    force: bool,
-    fallback_to_cache: bool,
+    mode: PlaylistLoad,
     revision: Option<PlaylistRevision>,
 ) -> Result<Vec<Track>> {
     let id = session.id(key)?;
@@ -127,25 +131,32 @@ async fn load_revision(
             .is_some_and(|rev| rev.updated.is_some() && hit.value.revision.as_ref() == Some(rev));
         (!hit.stale || confirmed) && revision_matches(hit, revision.as_ref())
     };
-    let read = ticket.clone();
-    let previous = match cached(read).await? {
-        Some(hit) if !force && usable(&hit) => return Ok(hit.value.tracks),
-        previous => previous,
-    };
     let gate = gate(&store, &id);
-    let _guard = gate.lock().await;
-    // A foreground request can join a background fill already fetching this playlist.
-    if !force {
-        let read = ticket.clone();
-        if let Some(hit) = cached(read).await?
-            && usable(&hit)
-        {
-            return Ok(hit.value.tracks);
+    // A fresh snapshot stays readable during a slow refresh or edit.
+    let _guard = match gate.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            if mode != PlaylistLoad::Refresh
+                && let Some(hit) = cached(ticket.clone()).await?
+                && usable(&hit)
+            {
+                return Ok(hit.value.tracks);
+            }
+            gate.lock().await
         }
-    }
+    };
+    let previous = if mode == PlaylistLoad::Refresh {
+        None
+    } else {
+        match cached(ticket.clone()).await? {
+            Some(hit) if usable(&hit) => return Ok(hit.value.tracks),
+            hit if mode == PlaylistLoad::Browse => hit,
+            _ => None,
+        }
+    };
     let playlist = match session.client.playlist(&id).await {
         Ok(playlist) => playlist,
-        Err(error) => match previous.filter(|_| fallback_to_cache) {
+        Err(error) => match previous {
             Some(hit) => {
                 tracing::warn!(%error, "Playlist refresh failed; using cached contents");
                 return Ok(hit.value.tracks);
@@ -170,7 +181,7 @@ async fn load_revision(
     };
     let snapshot = crate::app::tasks::spawn_blocking(move || {
         if let Err(error) = ticket.write(&snapshot) {
-            if !fallback_to_cache {
+            if mode != PlaylistLoad::Browse {
                 return Err(error.context("Save playlist cache"));
             }
             tracing::warn!("Save playlist cache: {error:#}");
@@ -258,7 +269,12 @@ pub(crate) async fn warm(
         let mut lists = stream::iter(playlists.iter().cloned())
             .map(|p| async move {
                 let revision = PlaylistRevision::from(&p);
-                load_revision(session, &p.rating_key, force, false, Some(revision)).await
+                let mode = if force {
+                    PlaylistLoad::Refresh
+                } else {
+                    PlaylistLoad::Warm
+                };
+                load_revision(session, &p.rating_key, mode, Some(revision)).await
             })
             .buffer_unordered(8);
         while let Some(result) = lists.next().await {

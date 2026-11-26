@@ -75,7 +75,6 @@ fn apply_library_cache_clear(count: usize, event_tx: &mpsc::Sender<Event>, state
             state.set_browse_category(crate::app::state::BrowseCategory::Library, true);
         }
         // Keep the visible catalog if reload fails. Clear invalidates old disk writes.
-        state.library_cache_stats = Some((0, vec![]));
         if state.sources.active.navidrome().is_some() {
             crate::app::sources::navidrome::reload(state, event_tx);
         } else if state.sources.active.folder().is_some() {
@@ -101,11 +100,9 @@ fn apply_library_cache_clear(count: usize, event_tx: &mpsc::Sender<Event>, state
 
 fn apply_artwork_cache_clear(count: usize, state: &mut AppState) {
     state.artwork.clear_grid_art();
-    state.artwork.grid_pending.clear();
     state.artwork.current_data = None;
     state.artwork.current_thumb = None;
     state.artwork.fetch = crate::app::state::ArtworkFetch::Idle;
-    state.artwork.cache_stats = Some((0, 0));
     state.set_status(format!("Cleared {} artwork cache files", count));
 }
 
@@ -182,10 +179,26 @@ pub fn dispatch(
             }
             save_config_in_background(event_tx, config, "save singles track limit");
         }
-        SettingsAction::SetLargeArtwork(large) => {
-            state.large_artwork = large;
-            config.ui.desktop_large_album_covers = large;
-            save_config_in_background(event_tx, config, "save artwork view options");
+        SettingsAction::RememberSearchResult(result) => {
+            if let Some(key) = &state.active_library {
+                let recent = config.recent_search_results.entry(key.clone()).or_default();
+                if !recent.first().is_some_and(|item| item.same_item(&result)) {
+                    recent.retain(|old| !old.same_item(&result));
+                    recent.insert(0, *result);
+                    recent.truncate(12);
+                    state.search.recent.clone_from(recent);
+                    save_config_in_background(event_tx, config, "save recent search results");
+                }
+            }
+        }
+        SettingsAction::SetAlbumGrid(grid) => {
+            state.album_grid = grid;
+            config.ui.album_layout = if grid {
+                crate::config::AlbumLayout::Grid
+            } else {
+                crate::config::AlbumLayout::List
+            };
+            save_config_in_background(event_tx, config, "save album grid preference");
         }
         SettingsAction::SetShowCompilationOnlyArtists(show) => {
             config.ui.show_compilation_only_artists = show;
@@ -291,6 +304,14 @@ pub fn dispatch(
             if !crate::app::sources::cache::completed(&choice, request, &result, state) {
                 return Ok(vec![]);
             }
+            if let Ok(scan) = &result
+                && let Some(radio) = &scan.folder_radio
+                && crate::app::sources::cache::active(&choice, state)
+            {
+                state.library.folder_radio = radio.clone();
+                state.library.missing_folder_covers.clear();
+                crate::app::sources::radio::load_folder_stations(state);
+            }
             if result.is_ok() && manual && crate::app::sources::cache::active(&choice, state) {
                 state.sources.listing = None;
                 state.sources.list_id = state.sources.list_id.wrapping_add(1);
@@ -346,12 +367,14 @@ pub fn dispatch(
             follow_ups.push(SettingsAction::RefreshCacheStats.into());
         }
         SettingsAction::CacheSizes {
+            catalog_sync_times,
             request,
             entries,
             artwork,
         } => {
             if request == state.settings_state.cache_request {
                 state.settings_state.cache_task = None;
+                state.settings_state.catalog_sync_times = catalog_sync_times;
                 state.settings_state.cache_entries = entries;
                 state.settings_state.artwork_cache_entries = artwork
                     .into_iter()
@@ -385,7 +408,6 @@ pub fn dispatch(
                 state.sources.nav_tasks.remove("artwork");
                 state.sources.nav_tasks.remove("art-grid");
                 state.artwork.clear_grid_art();
-                state.artwork.grid_pending.clear();
                 state.artwork.current_data = None;
                 state.artwork.current_thumb = None;
                 state.artwork.fetch = crate::app::state::ArtworkFetch::Idle;
@@ -415,17 +437,6 @@ pub fn dispatch(
             }
             follow_ups.push(SettingsAction::RefreshCacheStats.into());
         }
-        SettingsAction::AllCachesCleared { library, artwork } => {
-            match library {
-                Ok(count) => apply_library_cache_clear(count, event_tx, state),
-                Err(error) => {
-                    state.set_error(format!("Failed to clear library cache: {error}"));
-                }
-            }
-            apply_artwork_cache_clear(artwork, state);
-            follow_ups.push(SettingsAction::RefreshCacheStats.into());
-        }
-
         SettingsAction::RefreshCacheStats => {
             state.settings_state.cache_request = state.settings_state.cache_request.wrapping_add(1);
             let request = state.settings_state.cache_request;
@@ -442,49 +453,48 @@ pub fn dispatch(
                         })
                     })
                     .collect();
+                let mut catalog_sync_times = std::collections::HashMap::new();
                 let entries = choices
                     .into_iter()
                     .map(|choice| {
                         let bytes = choice
                             .cache_store()
-                            .and_then(|s| s.bytes())
+                            .and_then(|s| {
+                                if matches!(
+                                    &choice,
+                                    crate::app::sources::LibraryChoice::Navidrome { .. }
+                                ) && let Some(key) = choice.artwork_key()
+                                    && let Some(time) = s.ticket("catalog").stored_timestamp()
+                                {
+                                    catalog_sync_times.insert(key, time);
+                                }
+                                s.bytes()
+                            })
                             .map_err(|e| e.to_string());
                         (choice, bytes)
                     })
                     .collect();
                 let _ = event_tx.blocking_send(Event::Effect(
                     SettingsAction::CacheSizes {
+                        catalog_sync_times,
                         request,
                         entries,
                         artwork,
                     }
                     .into(),
                 ));
-                let (count, total_bytes) = crate::media::WaveformCache::default().stats();
-                let _ = event_tx.blocking_send(
-                    crate::app::event::CacheEvent::WaveformCacheStats { count, total_bytes }.into(),
-                );
             });
             state.settings_state.cache_task = Some(crate::app::tasks::TaskLease::new(&task));
         }
 
-        SettingsAction::CancelAdventure => {
-            state.sources.sonic_tasks.remove("adventure");
-            state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
-            state.adventure = crate::app::state::AdventureState::default();
-            state.popups.set_input_dialog(None);
-            state.clear_status();
-        }
         SettingsAction::AdventureComplete(tracks) => {
             let tracks = match crate::services::sonic_adventure::unique_artists(tracks) {
                 Ok(tracks) => tracks,
                 Err(error) => {
-                    state.adventure = crate::app::state::AdventureState::default();
                     state.set_error(error.to_string());
                     return Ok(vec![]);
                 }
             };
-            state.adventure = crate::app::state::AdventureState::default();
             // Clear radio state if switching from radio mode
             if state.playback_mode == PlaybackMode::Radio {
                 state.radio.clear();
@@ -499,7 +509,12 @@ pub fn dispatch(
         }
 
         SettingsAction::AdventureGenerated { request_id, result } => {
-            if state.adventure_request_id != request_id || !state.adventure.generating {
+            use crate::app::state::JourneyStage;
+            let Some(launcher) = state.popups.adventure_launcher_mut() else {
+                return Ok(vec![]);
+            };
+            if !matches!(launcher.stage, JourneyStage::Generating { request_id: active } if active == request_id)
+            {
                 return Ok(vec![]);
             }
             let result = result.and_then(|tracks| {
@@ -509,49 +524,15 @@ pub fn dispatch(
                     }
                 })
             });
-            if let Some(launcher) = state.popups.adventure_launcher_mut() {
-                launcher.stage = match result {
-                    Ok(tracks) if tracks.len() > 2 => {
-                        crate::app::state::JourneyStage::Ready(tracks)
-                    }
-                    Ok(_) => crate::app::state::JourneyStage::Failed(
-                        "No route found. Try tracks with more sonic analysis data.".into(),
-                    ),
-                    Err(error) => crate::app::state::JourneyStage::Failed(error.message),
-                };
-                launcher.loading = false;
-                launcher.item_index = 0;
-                state.adventure = Default::default();
-                return Ok(vec![]);
-            }
-            match result {
-                Ok(tracks) if tracks.len() > 2 => {
-                    state.adventure = crate::app::state::AdventureState::default();
-                    if state.playback_mode == PlaybackMode::Radio {
-                        state.radio.clear();
-                    }
-                    state.queue.tracks = tracks;
-                    state.queue.index = Some(0);
-                    state.queue.original.clear();
-                    state.queue.sort_mode = QueueSortMode::QueueOrder;
-                    state.set_playback_mode(PlaybackMode::Queue);
-                    state.set_view(View::Queue);
-                    helpers::play_current_track(event_tx, state, audio);
-                    state.set_status(format!(
-                        "Adventure: {} tracks ready!",
-                        state.queue.tracks.len()
-                    ));
-                }
-                Ok(_) => {
-                    state.adventure = crate::app::state::AdventureState::default();
-                    state.set_error("Adventure: no similar tracks found for these songs. Try different tracks with sonic analysis data.".to_string());
-                }
-                Err(error) => {
-                    state.adventure = crate::app::state::AdventureState::default();
-
-                    state.set_error(error.message);
-                }
-            }
+            launcher.stage = match result {
+                Ok(tracks) if tracks.len() > 2 => JourneyStage::Ready(tracks),
+                Ok(_) => JourneyStage::Failed(
+                    "No route found. Try tracks with more sonic analysis data.".into(),
+                ),
+                Err(error) => JourneyStage::Failed(error.message),
+            };
+            launcher.loading = false;
+            launcher.item_index = 0;
         }
         SettingsAction::ToggleExternalSearchService(target) => {
             use crate::services::external_search::SearchTarget;
@@ -569,19 +550,6 @@ pub fn dispatch(
                     state.external_search.youtube = config.ui.enable_youtube_search;
                 }
             }
-            follow_ups.push(SettingsAction::SaveSettings.into());
-        }
-        SettingsAction::ToggleSplitView => {
-            state.desktop_split_view = !state.desktop_split_view;
-            config.ui.desktop_split_view = state.desktop_split_view;
-            state.set_status(format!(
-                "split view: {}",
-                if state.desktop_split_view {
-                    "on"
-                } else {
-                    "off"
-                }
-            ));
             follow_ups.push(SettingsAction::SaveSettings.into());
         }
         SettingsAction::ToggleSectionVisibility(section) => {
@@ -708,7 +676,6 @@ pub fn dispatch(
             }
             helpers::play_current_track(event_tx, state, audio);
         }
-        _ => anyhow::bail!("Unsupported library operation reached shared handler"),
     }
     Ok(follow_ups)
 }
@@ -723,29 +690,10 @@ fn apply_preference(
     let mut follow_ups = Vec::new();
     match item {
         TextampSetting::Presentation(mode) => {
-            if !state
-                .windowed_presentation
-                .can_activate(mode.presentation())
-            {
+            if !state.windowed_presentation.can_activate(mode) {
                 return follow_ups;
             }
-            if let Some(multiple) = mode.gui_multiple_windows() {
-                state.gui_multiple_windows = multiple;
-                let changed = config.ui.desktop_separate_player != multiple
-                    || multiple && (state.desktop_split_view || config.ui.desktop_split_view);
-                config.ui.desktop_separate_player = multiple;
-                if multiple {
-                    state.desktop_split_view = false;
-                    config.ui.desktop_split_view = false;
-                }
-                if changed {
-                    save_config_in_background(event_tx, config, "save window arrangement");
-                }
-            }
-            follow_ups.push(
-                crate::app::action::NavigationAction::SwitchPresentation(mode.presentation())
-                    .into(),
-            );
+            follow_ups.push(crate::app::action::NavigationAction::SwitchPresentation(mode).into());
         }
         TextampSetting::LibraryRootVisible(root) => follow_ups.push(
             SettingsAction::SetLibraryRootVisible {
@@ -775,13 +723,9 @@ fn apply_preference(
             save_config_in_background(event_tx, config, "save theme preference");
         }
         TextampSetting::Artwork(mode) => {
+            state.artwork.mode = mode;
             if let Some(key) = state.active_library.as_deref() {
-                let presentation = state.artwork_presentation();
-                match presentation {
-                    crate::app::launch::WindowedMode::Gui => state.artwork.graphical_mode = mode,
-                    crate::app::launch::WindowedMode::Text => state.artwork.mode = mode,
-                }
-                config.set_artwork_mode(key, presentation, mode);
+                config.set_artwork_mode(key, mode);
                 state.set_status(format!("Artwork rendering: {}", mode.name()));
                 save_config_in_background(event_tx, config, "save artwork preference");
             }

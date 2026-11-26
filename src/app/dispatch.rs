@@ -94,7 +94,17 @@ async fn dispatch_pending_actions(
                     handlers::dispatch_playback::dispatch(event_tx, a, state, audio)
                 }
                 Action::Queue(a) => handlers::dispatch_queue::dispatch(event_tx, a, state, audio),
-                Action::Search(a) => handlers::dispatch_search::dispatch(event_tx, a, state),
+                Action::Search(a) => {
+                    if matches!(a, crate::app::action::SearchAction::OpenSearchPopup) {
+                        state.search.recent = state
+                            .active_library
+                            .as_ref()
+                            .and_then(|key| config.recent_search_results.get(key))
+                            .cloned()
+                            .unwrap_or_default();
+                    }
+                    handlers::dispatch_search::dispatch(event_tx, a, state)
+                }
                 Action::Browse(a) => handlers::dispatch_browse::dispatch(event_tx, a, state),
                 Action::Folders(_) => Ok(vec![
                     SystemAction::ShowError("Unsupported folder operation".into()).into(),
@@ -122,6 +132,7 @@ async fn dispatch_pending_actions(
 
     crate::app::sources::sonic::reconcile(state);
     super::sources::navidrome::album_notes::reconcile(state, event_tx);
+    super::sources::navidrome::album_artists::reconcile(state, event_tx);
     crate::app::sources::dialogs::restore_parent(state);
     Ok(())
 }
@@ -216,6 +227,7 @@ pub fn handle_core_event(
     super::queue_edit::cancel_changed(previous, state);
     crate::app::sources::sonic::reconcile(state);
     super::sources::navidrome::album_notes::reconcile(state, event_tx);
+    super::sources::navidrome::album_artists::reconcile(state, event_tx);
     actions
 }
 

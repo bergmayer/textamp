@@ -3,6 +3,7 @@ mod commands;
 mod projection;
 
 use crate::{app::runtime::Session, audio::AudioPlayer};
+use futures::{StreamExt, stream::FuturesUnordered};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -169,8 +170,13 @@ async fn run(
         publish.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut dirty = true;
         let mut last_position = None;
+        let mut searches = FuturesUnordered::new();
         loop {
             let mut actions = tokio::select! {
+                Some(destination) = searches.next(), if !searches.is_empty() => {
+                    if let Ok(mut updates) = output.lock() { updates.external_search = Some(destination); }
+                    vec![]
+                }
                 input = inputs.recv() => {
                     let Some(input) = input else { break; };
                     if matches!(input, commands::Command::Shutdown) { break; }
@@ -238,9 +244,8 @@ async fn run(
                 if let crate::app::Action::System(crate::app::action::SystemAction::OpenExternalSearch { target, query }) = action {
                     match crate::app::external_search::request(&session.state, target, query) {
                         Ok(request) => {
-                            if let Ok(mut updates) = output.lock() {
-                                updates.external_search = Some(crate::services::external_search::search_destination(request.target, &request.query));
-                            }
+                            searches.clear();
+                            searches.push(crate::services::external_search::resolve(request.target, request.query));
                         }
                         Err(error) => session.state.set_status(error.to_string()),
                     }

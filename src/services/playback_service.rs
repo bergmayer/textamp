@@ -3,23 +3,19 @@
 use crate::library::models::Track;
 use rand::seq::SliceRandom;
 
-/// Shuffle every queue entry while retaining the playing occurrence's identity.
-pub fn shuffle_queue(queue: Vec<Track>, queue_index: Option<usize>) -> (Vec<Track>, Option<usize>) {
-    shuffle(queue, queue_index, &mut rand::rng())
-}
-fn shuffle(
-    queue: Vec<Track>,
+/// Keep the playing occurrence (or the first pending entry) at the head.
+pub fn shuffle_queue(
+    mut queue: Vec<Track>,
     queue_index: Option<usize>,
-    rng: &mut impl rand::Rng,
 ) -> (Vec<Track>, Option<usize>) {
-    let mut entries: Vec<_> = queue.into_iter().enumerate().collect();
-    entries.shuffle(rng);
-    let current =
-        queue_index.and_then(|index| entries.iter().position(|(original, _)| *original == index));
-    (
-        entries.into_iter().map(|(_, track)| track).collect(),
-        current,
-    )
+    let current = queue_index.filter(|&index| index < queue.len());
+    if let Some(index) = current {
+        queue.swap(0, index);
+    }
+    if let Some((_, upcoming)) = queue.split_first_mut() {
+        upcoming.shuffle(&mut rand::rng());
+    }
+    (queue, current.map(|_| 0))
 }
 
 #[cfg(test)]
@@ -40,28 +36,16 @@ mod tests {
         for index in [None, Some(0), Some(3), Some(5), Some(99)] {
             let (shuffled, current) = shuffle_queue(tracks(), index);
             if let Some(index) = index.filter(|&i| i < 6) {
-                assert_eq!(shuffled[current.unwrap()].rating_key, index.to_string());
+                assert_eq!(current, Some(0));
+                assert_eq!(shuffled[0].rating_key, index.to_string());
             } else {
                 assert!(current.is_none());
+                assert_eq!(shuffled[0].rating_key, "0");
             }
             let mut keys: Vec<_> = shuffled.iter().map(|t| t.rating_key.as_str()).collect();
             keys.sort_unstable();
             assert_eq!(keys, ["0", "1", "2", "3", "4", "5"]);
         }
-    }
-
-    #[test]
-    fn playing_track_participates_in_shuffle_without_being_pinned() {
-        use rand::SeedableRng;
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let positions: std::collections::BTreeSet<_> = (0..12)
-            .map(|_| {
-                let (queue, index) = shuffle(tracks(), Some(3), &mut rng);
-                assert_eq!(queue[index.unwrap()].rating_key, "3");
-                index.unwrap()
-            })
-            .collect();
-        assert!(positions.len() > 1);
     }
 
     #[test]

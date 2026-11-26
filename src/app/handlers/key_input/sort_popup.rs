@@ -46,9 +46,8 @@ pub fn apply_selected_option(state: &mut AppState) -> Vec<Action> {
         SortPopupOption::SortMode(mode) => apply_sort_mode(state, col_idx, mode),
         SortPopupOption::Direction => toggle_sort_direction(state, col_idx),
         SortPopupOption::Artwork => toggle_artwork(state, col_idx),
-        SortPopupOption::LargeArtwork => {
-            vec![SettingsAction::SetLargeArtwork(!state.large_artwork).into()]
-        }
+        SortPopupOption::AlbumGrid => vec![SettingsAction::SetAlbumGrid(true).into()],
+        SortPopupOption::AlbumList => vec![SettingsAction::SetAlbumGrid(false).into()],
         SortPopupOption::GroupByAlbum => toggle_group_by_album(state, col_idx),
         SortPopupOption::CompilationOnlyArtists => {
             vec![
@@ -72,7 +71,9 @@ pub fn apply_sort_mode(state: &mut AppState, col_idx: usize, mode: ColumnSortMod
         None => return vec![],
     };
 
-    if mode == ColumnSortMode::ByDateAdded && col.date_added_order.is_none() {
+    if col.has_album_details()
+        || (mode == ColumnSortMode::ByDateAdded && col.date_added_order.is_none())
+    {
         return vec![];
     }
 
@@ -136,6 +137,9 @@ pub fn toggle_sort_direction(state: &mut AppState, col_idx: usize) -> Vec<Action
     };
 
     if let Some(col) = nav.columns.get_mut(col_idx) {
+        if col.has_album_details() {
+            return vec![];
+        }
         col.end_playlist_editing();
         let regroup = downloads && col.grouped_by_album;
         if regroup {
@@ -177,7 +181,13 @@ pub fn toggle_group_by_album(state: &mut AppState, col_idx: usize) -> Vec<Action
     use crate::app::state::SortColumnType;
 
     if crate::app::downloads::is_root_column(state, col_idx) {
-        return crate::app::downloads::toggle_grouping(state);
+        let actions = crate::app::downloads::toggle_grouping(state);
+        if state.popups.sort().is_some()
+            && let Some(popup) = crate::app::view_options::for_column(state, col_idx)
+        {
+            state.popups.set_sort(Some(popup));
+        }
+        return actions;
     }
 
     let nav = match state.browse_nav_mut() {

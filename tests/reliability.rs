@@ -83,14 +83,14 @@ async fn changing_library_cancels_owned_work_and_discards_old_progress() {
         .cache_mgmt
         .background_refresh
         .insert(RefreshCategory::Moods);
-    state.sources.sonic_tasks.insert("test", pending_lease());
+    let task = tokio::spawn(std::future::pending::<()>());
+    state
+        .sources
+        .nav_tasks
+        .insert("remix", (1, textamp::app::tasks::TaskLease::new(&task)));
     state.advance_library_generation();
-    assert!(state.sources.sonic_tasks.is_empty());
+    assert!(task.await.unwrap_err().is_cancelled());
     assert!(state.cache_mgmt.background_refresh.is_empty());
-}
-
-fn pending_lease() -> textamp::app::tasks::TaskLease {
-    textamp::app::tasks::TaskLease::new(&tokio::spawn(std::future::pending::<()>()))
 }
 
 #[tokio::test]

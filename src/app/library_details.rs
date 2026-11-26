@@ -2,11 +2,71 @@
 use super::{Action, AppState, action::*, state::*};
 use crate::library::models::Track;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Destination {
     Track,
     Album,
     Artist,
+}
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RecentResult {
+    pub label: String,
+    pub key: String,
+    pub target: RecentTarget,
+}
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum RecentTarget {
+    Details {
+        track: Box<Track>,
+        destination: Destination,
+    },
+    Playlist,
+    Genre,
+}
+impl RecentResult {
+    pub fn kind_label(&self) -> &'static str {
+        let tab = match self.target {
+            RecentTarget::Details {
+                destination: Destination::Track,
+                ..
+            } => SearchTab::Tracks,
+            RecentTarget::Details {
+                destination: Destination::Album,
+                ..
+            } => SearchTab::Albums,
+            RecentTarget::Details {
+                destination: Destination::Artist,
+                ..
+            } => SearchTab::Artists,
+            RecentTarget::Playlist => SearchTab::Playlists,
+            RecentTarget::Genre => SearchTab::Genres,
+        };
+        tab.result_kind()
+    }
+
+    pub fn same_item(&self, other: &Self) -> bool {
+        self.key == other.key
+            && match (&self.target, &other.target) {
+                (
+                    RecentTarget::Details { destination: a, .. },
+                    RecentTarget::Details { destination: b, .. },
+                ) => a == b,
+                (RecentTarget::Playlist, RecentTarget::Playlist)
+                | (RecentTarget::Genre, RecentTarget::Genre) => true,
+                _ => false,
+            }
+    }
+
+    pub fn open(&self) -> Action {
+        match &self.target {
+            RecentTarget::Details { track, destination } => BrowseAction::OpenDetailsInLibrary {
+                track: track.clone(),
+                destination: *destination,
+            }
+            .into(),
+            _ => SearchAction::OpenRecentResult(Box::new(self.clone())).into(),
+        }
+    }
 }
 #[derive(Debug)]
 pub struct Pending {
@@ -117,6 +177,14 @@ fn search_destination(
 }
 /// Build library navigation for the selected search result, retaining its detail type.
 pub fn search_result_actions(state: &AppState) -> Vec<Action> {
+    if state.search.query.is_empty() && !state.search.recent.is_empty() {
+        return state
+            .search
+            .recent
+            .get(state.list_state.search_item_index)
+            .map(|result| vec![result.open()])
+            .unwrap_or_default();
+    }
     let Some((section, index)) = search_selection(state) else {
         return vec![];
     };
@@ -128,12 +196,28 @@ pub fn search_result_actions(state: &AppState) -> Vec<Action> {
     }
     search_destination(state, section, index)
         .map(|(track, destination)| {
-            vec![
-                BrowseAction::OpenDetailsInLibrary {
+            let (key, title) = match destination {
+                Destination::Track => (track.rating_key.as_str(), Some(track.title.as_str())),
+                Destination::Album => (
+                    track.parent_rating_key.as_deref().unwrap_or_default(),
+                    track.parent_title.as_deref(),
+                ),
+                Destination::Artist => (
+                    track.grandparent_rating_key.as_deref().unwrap_or_default(),
+                    track.grandparent_title.as_deref(),
+                ),
+            };
+            let result = RecentResult {
+                label: title.unwrap_or(key).to_owned(),
+                key: key.to_owned(),
+                target: RecentTarget::Details {
                     track: Box::new(track),
                     destination,
-                }
-                .into(),
+                },
+            };
+            vec![
+                SettingsAction::RememberSearchResult(Box::new(result.clone())).into(),
+                result.open(),
             ]
         })
         .unwrap_or_default()
@@ -274,32 +358,14 @@ pub fn finish(state: &mut AppState) -> Vec<Action> {
     let nav = &mut state.artist_nav;
     let action = match pending.destination {
         Destination::Artist => {
-            let Some((column, row, key, name)) =
-                nav.columns.iter().enumerate().find_map(|(column, data)| {
-                    data.items
-                        .iter()
-                        .enumerate()
-                        .find_map(|(row, item)| match item {
-                            BrowseItem::ArtistInfo {
-                                artist_key,
-                                artist_name,
-                                ..
-                            } => Some((column, row, artist_key.clone(), artist_name.clone())),
-                            _ => None,
-                        })
-                })
-            else {
+            if nav.columns.len() < 2 {
                 return vec![];
-            };
-            nav.focused_column = column;
-            nav.columns.truncate(column + 1);
-            nav.columns[column].selected_index = row;
-            nav.columns[column].header_selection = ColumnHeaderSelection::Items;
-            SearchAction::ShowArtistInfo {
-                artist_key: key,
-                artist_name: name,
             }
-            .into()
+            state.popups.close_all();
+            nav.columns.truncate(2);
+            nav.focused_column = 1;
+            state.pending_library_details = None;
+            return vec![];
         }
         Destination::Album | Destination::Track => {
             let Some(column) = nav.columns.iter().position(|column| matches!(&column.play_all_row, Some(PlayAllRow::Album { rating_key, .. }) if Some(rating_key) == pending.track.parent_rating_key.as_ref())) else { return vec![]; };
@@ -349,7 +415,7 @@ mod tests {
             state.search.tab = tab;
             let actions = search_result_actions(&state);
             assert!(
-                matches!(actions.as_slice(), [Action::Browse(BrowseAction::OpenDetailsInLibrary {destination,..})] if *destination == expected)
+                matches!(actions.as_slice(), [Action::Settings(SettingsAction::RememberSearchResult(result)), Action::Browse(BrowseAction::OpenDetailsInLibrary {destination,..})] if *destination == expected && matches!(result.target, RecentTarget::Details { destination, .. } if destination == expected))
             );
         }
     }
@@ -426,9 +492,9 @@ mod tests {
                 "artist"
             );
             match destination {
-                Destination::Artist => assert!(
-                    matches!(actions.as_slice(), [Action::Search(SearchAction::ShowArtistInfo { artist_key, .. })] if artist_key == "artist")
-                ),
+                Destination::Artist => {
+                    assert!(actions.is_empty() && state.artist_nav.focused_column == 1)
+                }
                 Destination::Album => assert!(matches!(
                     actions.as_slice(),
                     [Action::Miller(MillerAction::OpenAlbumDetails)]
@@ -493,16 +559,14 @@ mod tests {
             )
             .unwrap();
             let actions = finish(&mut state);
-            assert!(
-                matches!(actions.as_slice(), [Action::Search(SearchAction::ShowArtistInfo {artist_key,..})] if artist_key == "artist")
-            );
+            assert!(actions.is_empty() && state.artist_nav.focused_column == 1);
             assert_eq!(
                 state.artist_nav.columns[0].selected_item().unwrap().key(),
                 "artist"
             );
             assert!(matches!(
                 state.artist_nav.columns[1].selected_item(),
-                Some(BrowseItem::ArtistInfo { .. })
+                Some(BrowseItem::AllTracks { .. })
             ));
             assert_eq!(state.view, View::Browse);
             assert_eq!(audio.playback_id(), 0);

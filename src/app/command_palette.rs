@@ -40,23 +40,15 @@ fn static_entries() -> Vec<StaticEntry> {
             label: "Cycle Application Mode",
             hint: "⌘⌥T",
             command: PaletteCommandKind::CycleApplicationMode,
-            aliases: &["gui single multiple window text tui cycle"],
+            aliases: &["gui text tui cycle"],
         },
         StaticEntry {
-            label: crate::app::launch::ApplicationMode::GuiMultiple.label(),
+            label: crate::app::launch::ApplicationMode::Gui.label(),
             hint: "",
             command: PaletteCommandKind::SetApplicationMode(
-                crate::app::launch::ApplicationMode::GuiMultiple,
+                crate::app::launch::ApplicationMode::Gui,
             ),
-            aliases: &["multi graphical windows"],
-        },
-        StaticEntry {
-            label: crate::app::launch::ApplicationMode::GuiSingle.label(),
-            hint: "",
-            command: PaletteCommandKind::SetApplicationMode(
-                crate::app::launch::ApplicationMode::GuiSingle,
-            ),
-            aliases: &["single graphical window"],
+            aliases: &["graphical window"],
         },
         StaticEntry {
             label: crate::app::launch::ApplicationMode::Text.label(),
@@ -124,13 +116,6 @@ fn static_entries() -> Vec<StaticEntry> {
             command: PaletteCommandKind::SwitchLibrary,
             aliases: &["change library", "library picker", "server"],
         },
-        // Layout toggles.
-        StaticEntry {
-            label: "Split View",
-            hint: "",
-            command: PaletteCommandKind::ToggleSplitView,
-            aliases: &["split", "stacked"],
-        },
         // Catalogue actions.
         StaticEntry {
             label: "Refresh",
@@ -158,6 +143,12 @@ fn static_entries() -> Vec<StaticEntry> {
             hint: "^S",
             command: PaletteCommandKind::SaveQueue,
             aliases: &["save", "export queue", "make playlist"],
+        },
+        StaticEntry {
+            label: "Import Playlist…",
+            hint: "",
+            command: PaletteCommandKind::ImportPlaylist,
+            aliases: &["open playlist file", "m3u", "csv"],
         },
         StaticEntry {
             label: "Export Playlist as M3U8…",
@@ -316,21 +307,23 @@ fn static_entries() -> Vec<StaticEntry> {
             command: PaletteCommandKind::SonicAdventure,
             aliases: &["journey", "trip", "path", "build adventure"],
         },
-        // Sort cluster — typing "sort" in the palette surfaces all
-        // of these together: the umbrella popup entry plus each
-        // individual sort mode and the toggles. Labels share the
-        // "Sort: …" prefix so fuzzy matching keeps them grouped.
-        StaticEntry {
-            label: "View Options",
-            hint: "F6",
-            command: PaletteCommandKind::OpenSort,
-            aliases: &["sort", "sort popup", "arrange"],
-        },
         StaticEntry {
             label: "Close Column",
             hint: "^W",
             command: PaletteCommandKind::CloseColumn,
             aliases: &["dismiss column", "close pane"],
+        },
+        StaticEntry {
+            label: "Grid",
+            hint: "",
+            command: PaletteCommandKind::SetAlbumLayout(true),
+            aliases: &["album covers"],
+        },
+        StaticEntry {
+            label: "List",
+            hint: "",
+            command: PaletteCommandKind::SetAlbumLayout(false),
+            aliases: &["album list"],
         },
         StaticEntry {
             label: "Sort: Default",
@@ -592,7 +585,6 @@ pub fn global_entries() -> Vec<PaletteEntry> {
             super::player_sync::Menu::Refresh,
             super::player_sync::Menu::Sync,
             super::player_sync::Menu::Cancel,
-            super::player_sync::Menu::Eject,
         ]
         .into_iter()
         .map(|menu| PaletteEntry {
@@ -702,7 +694,19 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
         // identical to the GUI right-click context menu. Adding /
         // reordering happens in
         // `crate::app::track_context::track_context_entries`.
-        let entries = if state.view == View::NowPlaying {
+        let history = state.view == View::Queue
+            && state.showing_queue_history
+            && !state.palette.player_context;
+        let entries = if history {
+            crate::app::track_context::track_context_with_policy(
+                crate::app::track_context::ContextPolicy {
+                    queued: false,
+                    ..crate::app::track_context::ContextPolicy::for_state(state)
+                },
+                &track,
+                true,
+            )
+        } else if state.view == View::NowPlaying {
             crate::app::track_context::now_playing_context(
                 crate::app::track_context::ContextPolicy::for_state(state),
                 &track,
@@ -721,7 +725,8 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
             ) {
                 continue;
             }
-            if matches!(ce.kind, ContextKind::AddToPlaylist)
+            if !history
+                && matches!(ce.kind, ContextKind::AddToPlaylist)
                 && let Some(addition) =
                     super::sources::navidrome::playlist_edit::palette_addition(state)
             {
@@ -787,9 +792,6 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
         if download_label == Some(e.label) {
             return None;
         }
-        if !state.desktop_frontend && matches!(e.command, PaletteCommandKind::ToggleSplitView) {
-            return None;
-        }
         let is_remix = matches!(
             e.command,
             PaletteCommandKind::RemixGemini
@@ -835,8 +837,6 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
         });
     }
 
-    // 4. Radio navigation. Utility rows already have native commands above;
-    // never send their synthetic keys to server as station URLs.
     if state.station_nav.can_go_left() {
         out.push(PaletteEntry {
             label: "Radio: Back".into(),
@@ -859,11 +859,11 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
             aliases: vec!["station".into()],
         });
     }
+    out.extend(global_entries());
     out.retain(|entry| {
         super::command_catalog::analysis_command(&entry.command)
             || crate::app::sources::command_visible(state, &entry.command)
     });
-    out.extend(global_entries());
     out.extend(
         super::queue_controls::definitions(state)
             .into_iter()
@@ -883,7 +883,7 @@ pub fn materialize_entries(state: &AppState) -> Vec<PaletteEntry> {
     out
 }
 
-/// Translate a palette command into application actions.
+/// Record an available command in recent history.
 pub fn remember(command: &PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
     if super::command_catalog::disabled_reason(state, command).is_some() {
         return vec![];
@@ -1000,13 +1000,13 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
         PaletteCommandKind::SaveDescriptionPlaylist => {
             vec![crate::app::sources::audiomuse::Command::PromptSavePlaylist.into()]
         }
+        PaletteCommandKind::ImportPlaylist => vec![QueueAction::PromptImportPlaylist.into()],
         PaletteCommandKind::ExportPlaylist { format, queue } => {
             vec![QueueAction::PromptExportPlaylist { format, queue }.into()]
         }
         PaletteCommandKind::SaveQueue => vec![QueueAction::PromptSavePlaylist.into()],
         PaletteCommandKind::ClearQueue => vec![QueueAction::ClearQueue.into()],
         PaletteCommandKind::ToggleFilter => vec![SearchAction::ActivateListFilter.into()],
-        PaletteCommandKind::ToggleSplitView => vec![SettingsAction::ToggleSplitView.into()],
         PaletteCommandKind::Refresh => crate::app::handlers::helpers::refresh_current_view(state),
         PaletteCommandKind::ArtistDetail(command) => {
             if super::details::focused_artist(state)
@@ -1142,6 +1142,7 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
                 ]
             }),
         PaletteCommandKind::OpenSort => vec![SearchAction::OpenSortPopup.into()],
+        PaletteCommandKind::SetAlbumLayout(grid) => vec![SettingsAction::SetAlbumGrid(grid).into()],
         PaletteCommandKind::ToggleCompilationArtists => {
             vec![
                 SettingsAction::SetShowCompilationOnlyArtists(!state.show_compilation_only_artists)
@@ -1176,7 +1177,7 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
             vec![
                 SystemAction::OpenExternalSearch {
                     target: crate::services::external_search::SearchTarget::AppleMusic,
-                    query: super::external_search::query(state),
+                    query: super::external_search::selected_query(state),
                 }
                 .into(),
             ]
@@ -1185,7 +1186,7 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
             vec![
                 SystemAction::OpenExternalSearch {
                     target: crate::services::external_search::SearchTarget::Spotify,
-                    query: super::external_search::query(state),
+                    query: super::external_search::selected_query(state),
                 }
                 .into(),
             ]
@@ -1194,7 +1195,7 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
             vec![
                 SystemAction::OpenExternalSearch {
                     target: crate::services::external_search::SearchTarget::YouTube,
-                    query: super::external_search::query(state),
+                    query: super::external_search::selected_query(state),
                 }
                 .into(),
             ]
@@ -1210,23 +1211,10 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
         },
         PaletteCommandKind::ShowArtistBio => {
             match crate::app::handlers::helpers::get_artist_for_bio(state) {
-                Some((artist_key, artist_name)) if state.sources.active.folder().is_some() => {
-                    vec![
-                        SearchAction::ShowArtistBio {
-                            artist_key,
-                            artist_name,
-                        }
-                        .into(),
-                    ]
-                }
                 Some((artist_key, artist_name)) => vec![
-                    BrowseAction::OpenDetailsInLibrary {
-                        track: Box::new(crate::library::models::Track {
-                            grandparent_rating_key: Some(artist_key),
-                            grandparent_title: Some(artist_name),
-                            ..Default::default()
-                        }),
-                        destination: crate::app::library_details::Destination::Artist,
+                    SearchAction::ShowArtistBio {
+                        artist_key,
+                        artist_name,
                     }
                     .into(),
                 ],
@@ -1242,6 +1230,7 @@ pub fn run(cmd: PaletteCommandKind, state: &mut AppState) -> Vec<Action> {
         PaletteCommandKind::ReverseSort => vec![SearchAction::ReverseFocusedSortDirection.into()],
         PaletteCommandKind::CloseColumn => {
             crate::app::handlers::key_input::close_focused_browse_column(state);
+            crate::app::tui_navigation::focus_root_after_close(state);
             vec![]
         }
         PaletteCommandKind::SonicAdventureFromFocusedTrack => match state.palette_target_track() {
@@ -1390,6 +1379,27 @@ pub fn refresh_matches(state: &mut AppState) {
     for entry in &mut entries {
         super::command_catalog::prepare(entry);
     }
+    if state
+        .palette
+        .path
+        .iter()
+        .map(String::as_str)
+        .eq(["View", "View Options"])
+        && let Some(nav) = state.browse_nav()
+        && let Some(popup) = super::view_options::for_column(state, nav.focused_column)
+    {
+        let choices = super::view_options::choices(state, &popup);
+        for entry in &mut entries {
+            if let Some(option) = super::view_options::command_option(&entry.command)
+                && choices
+                    .iter()
+                    .any(|choice| choice.id == option && choice.checked)
+                && super::command_catalog::disabled_reason(state, &entry.command).is_none()
+            {
+                entry.hint = "✓".into();
+            }
+        }
+    }
     let groups = super::command_catalog::groups(
         entries
             .iter()
@@ -1399,8 +1409,8 @@ pub fn refresh_matches(state: &mut AppState) {
         entries.push(PaletteEntry {
             label: path.last().unwrap().clone(),
             hint: "›".into(),
+            aliases: super::command_catalog::group_aliases(&path),
             command: PaletteCommandKind::OpenCommandGroup(path),
-            aliases: vec![],
         });
     }
     if !state.palette.path.is_empty() {
@@ -1585,11 +1595,9 @@ mod presentation_tests {
         let (events, _inbox) = tokio::sync::mpsc::channel(32);
         for expected in [
             ApplicationMode::Text,
-            ApplicationMode::GuiMultiple,
-            ApplicationMode::GuiSingle,
+            ApplicationMode::Gui,
             ApplicationMode::Text,
-            ApplicationMode::GuiMultiple,
-            ApplicationMode::GuiSingle,
+            ApplicationMode::Gui,
         ] {
             for action in run(PaletteCommandKind::CycleApplicationMode, &mut state) {
                 crate::app::dispatch::dispatch_action(

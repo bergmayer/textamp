@@ -7,7 +7,6 @@ use crate::app::{Action, AppState, Event};
 
 use anyhow::Result;
 
-use super::helpers;
 use tokio::sync::mpsc;
 
 /// Dispatch browse-related actions. Returns follow-up actions.
@@ -74,16 +73,12 @@ pub fn dispatch(
             }
             state.station_nav.loading = false;
             match result {
-                Ok(mut stations) => {
-                    helpers::append_station_action_items(
-                        &mut stations,
-                        state.queue.shuffle_undo_queue.is_some(),
-                    );
+                Ok(stations) => {
                     state.station_nav.columns.clear();
                     state.station_nav.columns.push(StationColumn::new(
                         None,
                         "stations".to_string(),
-                        stations.clone(),
+                        stations,
                     ));
                     state.station_nav.focused_column = 0;
                 }
@@ -142,7 +137,6 @@ pub fn dispatch(
             {
                 return Ok(follow_ups);
             }
-            state.library.right_panel_loading = false;
             match result {
                 Ok(mut albums) => {
                     albums.sort_by_cached_key(|album| {
@@ -237,12 +231,14 @@ pub fn dispatch(
                 }
             }
             if let Some(track) = state.focused_track()
-                && let Some(album_key) = track.parent_rating_key.clone()
-                && !state.artwork.grid_cache.contains_key(&album_key)
-                && !state.artwork.grid_pending.contains(&album_key)
-                && let Some(thumb) = track.parent_thumb.clone()
+                && let Some(thumb) = crate::app::details::track_cover(state, track)
+                && !state.artwork.grid_cache.contains_key(&track.rating_key)
+                && !state.artwork.grid_pending.contains(&track.rating_key)
             {
-                follow_ups.push(SystemAction::LoadAlbumArt(vec![(album_key, thumb)]).into());
+                follow_ups.push(
+                    SystemAction::LoadAlbumArt(vec![(track.rating_key.clone(), thumb.to_owned())])
+                        .into(),
+                );
             }
             if let Some(column) = state.browse_nav_mut().and_then(|nav| nav.focused_mut()) {
                 column.header_selection = crate::app::state::ColumnHeaderSelection::Items;

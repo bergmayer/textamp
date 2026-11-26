@@ -7,13 +7,6 @@ use ratatui::{Frame, layout::Rect, style::Style, widgets::Paragraph};
 pub fn has_content_row(column: &crate::app::state::BrowseColumn) -> bool {
     column.has_album_details() || (column.details.is_some() && column.play_all_row.is_some())
 }
-fn in_content(control: ColumnControl) -> bool {
-    matches!(
-        control,
-        ColumnControl::Details | ColumnControl::Play | ColumnControl::Next | ColumnControl::Add
-    )
-}
-
 /// Paint controls over the column's top border and register their exact targets.
 pub fn render(frame: &mut Frame, state: &RenderState<'_>) {
     let regions = state.hit_regions.borrow().miller_columns.clone();
@@ -26,6 +19,19 @@ pub fn render(frame: &mut Frame, state: &RenderState<'_>) {
             continue;
         }
         let controls = column_controls::controls(state, region.col_idx);
+        let album = state
+            .browse_nav()
+            .and_then(|nav| nav.columns.get(region.col_idx))
+            .is_some_and(|column| column.has_album_details());
+        let artist_page = state
+            .browse_nav()
+            .and_then(|nav| nav.columns.get(region.col_idx))
+            .is_some_and(|c| c.artist_header.is_some());
+        let in_content = |control| match control {
+            ColumnControl::ArtistBio | ColumnControl::Details | ColumnControl::Play => true,
+            ColumnControl::Next | ColumnControl::Add => !album,
+            _ => false,
+        };
         let buttons = controls
             .iter()
             .filter(|control| **control != ColumnControl::Filter && !in_content(**control))
@@ -94,7 +100,12 @@ pub fn render(frame: &mut Frame, state: &RenderState<'_>) {
             let title = state
                 .browse_nav()
                 .and_then(|nav| nav.columns.get(region.col_idx))
-                .map(|column| column.title.as_str())
+                .map(|column| {
+                    column
+                        .artist_header
+                        .as_ref()
+                        .map_or(column.title.as_str(), |i| i.artist_name.as_str())
+                })
                 .or_else(|| {
                     state
                         .folder_state
@@ -131,10 +142,11 @@ pub fn render(frame: &mut Frame, state: &RenderState<'_>) {
                 crate::util::column_heading::cells(&display, width, elapsed)
             )
         };
-        frame.render_widget(
-            Paragraph::new(title).style(style(ColumnControl::Filter)),
-            title_area,
-        );
+        let mut title_style = style(ColumnControl::Filter);
+        if artist_page && !filtering {
+            title_style = title_style.add_modifier(ratatui::style::Modifier::BOLD);
+        }
+        frame.render_widget(Paragraph::new(title).style(title_style), title_area);
         if filtering {
             super::text_input::render(
                 frame,
@@ -173,7 +185,23 @@ pub fn render(frame: &mut Frame, state: &RenderState<'_>) {
             .map(|id| super::control_bar::Button {
                 id,
                 text: match id {
-                    ColumnControl::Details => "Album Details ›",
+                    ColumnControl::ArtistBio
+                        if state
+                            .browse_nav()
+                            .and_then(|nav| nav.columns.get(region.col_idx))
+                            .is_some_and(|c| {
+                                c.artist_header
+                                    .as_ref()
+                                    .is_some_and(|i| i.needs_web_search())
+                                    || crate::app::details::album_bio(state, c)
+                                        .is_some_and(|bio| bio.search_provider.is_some())
+                            }) =>
+                    {
+                        state.web_search_provider.mark()
+                    }
+                    ColumnControl::ArtistBio if artist_page => "…more",
+                    ColumnControl::ArtistBio => "Artist Bio",
+                    ColumnControl::Details => "Album Info",
                     ColumnControl::Play => {
                         if state
                             .browse_nav()
@@ -198,8 +226,18 @@ pub fn render(frame: &mut Frame, state: &RenderState<'_>) {
                 active: false,
             })
             .collect();
-        if !content.is_empty() {
-            let row = Rect::new(area.x, region.area.y + 1, area.width, 1).intersection(region.area);
+        if !content.is_empty() && (!artist_page || region.inner.y > region.area.y + 1) {
+            let row = if artist_page {
+                Rect::new(
+                    area.right().saturating_sub(8).max(area.x),
+                    region.inner.y.saturating_sub(1).max(region.area.y + 1),
+                    area.width.min(8),
+                    1,
+                )
+            } else {
+                Rect::new(area.x, region.area.y + 1, area.width, 1)
+            }
+            .intersection(region.area);
             targets.extend(super::control_bar::render(
                 frame,
                 row,
@@ -223,7 +261,7 @@ pub fn render(frame: &mut Frame, state: &RenderState<'_>) {
                 1,
             );
             let icon = match control {
-                ColumnControl::Details => "",
+                ColumnControl::ArtistBio | ColumnControl::Details => "",
                 ColumnControl::Next => "▹ ",
                 ColumnControl::Play => "▷ ",
                 ColumnControl::Add => "+ ",
@@ -238,6 +276,8 @@ pub fn render(frame: &mut Frame, state: &RenderState<'_>) {
                         "✎ "
                     }
                 }
+                ColumnControl::ArtistMix => "◉ ",
+                ColumnControl::DownloadAlbum => "↓ ",
                 ColumnControl::Options => "≡ ",
                 ColumnControl::Close => "× ",
                 ColumnControl::Filter => "",
@@ -281,14 +321,6 @@ pub(crate) fn compact_title(title: &str, width: usize) -> String {
 
 fn display_title(title: &str, width: usize) -> String {
     use unicode_width::UnicodeWidthStr;
-    let title = match title {
-        "artists" => "Artists",
-        "albums" => "Albums",
-        "tracks" => "Tracks",
-        "folders" => "Folders",
-        "playlists" => "Playlists",
-        title => title,
-    };
     let title = [
         ("artist information", "Artist Details"),
         ("artist info", "Artist Details"),
@@ -307,8 +339,20 @@ fn display_title(title: &str, width: usize) -> String {
         || title.to_owned(),
         |(label, replacement)| format!("{replacement}{}", &title[label.len()..]),
     );
+    let title = crate::util::column_heading::capitalized(&title);
     if UnicodeWidthStr::width(title.as_str()) <= width {
         return title;
     }
     crate::util::column_heading::destination(&title).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compact_title;
+
+    #[test]
+    fn column_heading_preserves_catalog_case_before_compaction() {
+        assert_eq!(compact_title("album — DÉJÀ VU", 30), "Album — DÉJÀ VU");
+        assert_eq!(compact_title("Album — DÉJÀ VU", 7), "DÉJÀ VU");
+    }
 }

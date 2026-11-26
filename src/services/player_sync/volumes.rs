@@ -11,7 +11,18 @@ pub struct Volume {
     pub available: u64,
     pub capacity: u64,
 }
+impl Volume {
+    pub fn is_mtp(&self) -> bool {
+        self.identifier.starts_with("mtp:")
+    }
+}
+struct MtpTarget {
+    session: std::sync::Mutex<super::mtp::session::Session>,
+    volume: Volume,
+    source: Option<String>,
+}
 pub struct Target {
+    mtp: Option<std::sync::Arc<MtpTarget>>,
     pub path: PathBuf,
     #[cfg(unix)]
     device: u64,
@@ -26,6 +37,7 @@ impl Target {
         let metadata = tokio::fs::metadata(&path).await?;
         ensure!(metadata.is_dir(), "The player is not mounted");
         Ok(Self {
+            mtp: None,
             path,
             #[cfg(unix)]
             device: {
@@ -33,6 +45,84 @@ impl Target {
                 metadata.dev()
             },
         })
+    }
+    pub async fn for_volume(volume: &Volume, source: Option<&str>) -> Result<Self> {
+        if !volume.is_mtp() {
+            return Self::open(&volume.mount).await;
+        }
+        let volume = volume.clone();
+        let source = source.map(str::to_owned);
+        let (session, volume, source) = crate::app::tasks::spawn_blocking(move || {
+            let mut s = super::mtp::session::Session::open(&volume)?;
+            s.snapshot(source.as_deref())?;
+            Ok::<_, anyhow::Error>((s, volume, source))
+        })
+        .await??;
+        let mut target = Self::open(session.work.path()).await?;
+        target.mtp = Some(std::sync::Arc::new(MtpTarget {
+            session: std::sync::Mutex::new(session),
+            volume,
+            source,
+        }));
+        Ok(target)
+    }
+    async fn object_io(
+        &self,
+        op: impl Fn(&mut super::mtp::session::Session) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        let Some(target) = &self.mtp else {
+            return Ok(());
+        };
+        let op = std::sync::Arc::new(op);
+        let run = || {
+            let target = target.clone();
+            let op = op.clone();
+            crate::app::tasks::spawn_blocking(move || {
+                let mut session = target
+                    .session
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("MTP session stopped"))?;
+                op(&mut session)
+            })
+        };
+        let mut result = run().await?;
+        for delay in [1, 2, 4] {
+            let Err(error) = &result else { break };
+            if !super::mtp::session::reconnectable(error) {
+                break;
+            }
+            tracing::warn!(%error, delay, "Reconnecting MTP player");
+            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+            let target = target.clone();
+            result = crate::app::tasks::spawn_blocking(move || {
+                target
+                    .session
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("MTP session stopped"))?
+                    .reconnect(&target.volume, target.source.as_deref())
+            })
+            .await?;
+            if result.is_ok() {
+                result = run().await?;
+            }
+        }
+        result
+    }
+    pub(super) async fn hydrate(&self, path: &Path) -> Result<()> {
+        let p = path.to_owned();
+        self.object_io(move |s| s.hydrate(&p)).await
+    }
+    pub(super) async fn publish(&self, file: &Path, dest: &Path) -> Result<()> {
+        let (f, d) = (file.to_owned(), dest.to_owned());
+        self.object_io(move |s| s.put(&d, &f)).await
+    }
+    pub(super) async fn remove(&self, path: &Path) -> Result<()> {
+        let p = path.to_owned();
+        self.object_io(move |s| s.remove(&p)).await?;
+        match tokio::fs::remove_file(path).await {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            r => Ok(r?),
+        }
     }
     pub async fn check(&self) -> Result<()> {
         let metadata = tokio::fs::metadata(&self.path)
@@ -118,61 +208,6 @@ fn volume(value: &serde_json::Value) -> Option<Volume> {
             .unwrap_or(0),
     })
 }
-#[cfg(target_os = "macos")]
-pub async fn discover() -> Result<Vec<Volume>> {
-    // A volume can disappear between enumeration and inspection.
-    match discover_once().await {
-        Ok(volumes) => Ok(volumes),
-        Err(_) => discover_once().await,
-    }
-}
-
-#[cfg(target_os = "macos")]
-async fn discover_once() -> Result<Vec<Volume>> {
-    use futures::{StreamExt, stream};
-    let list = plist(&["list", "-plist", "external", "physical"]).await?;
-    fn visit(value: &serde_json::Value, ids: &mut Vec<String>) {
-        if value
-            .get("VolumeName")
-            .and_then(|value| value.as_str())
-            .is_some()
-            && let Some(id) = value["DeviceIdentifier"].as_str()
-        {
-            ids.push(id.into());
-        }
-        for key in ["AllDisksAndPartitions", "Partitions", "APFSVolumes"] {
-            if let Some(children) = value[key].as_array() {
-                for child in children {
-                    visit(child, ids);
-                }
-            }
-        }
-    }
-    let mut ids = vec![];
-    visit(&list, &mut ids);
-    ids.sort();
-    ids.dedup();
-    let results = stream::iter(ids)
-        .map(|id| async move {
-            let value = plist(&["info", "-plist", &id]).await?;
-            Ok::<_, anyhow::Error>(volume(&value))
-        })
-        .buffered(4)
-        .collect::<Vec<_>>()
-        .await;
-    let mut volumes = vec![];
-    for result in results {
-        if let Some(volume) = result? {
-            volumes.push(volume);
-        }
-    }
-    volumes.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(volumes)
-}
-#[cfg(not(target_os = "macos"))]
-pub async fn discover() -> Result<Vec<Volume>> {
-    anyhow::bail!("USB player syncing is available on the Mac")
-}
 /// Inspect one OS-reported mount or device identifier without mounting or changing it.
 #[cfg(target_os = "macos")]
 pub async fn inspect(identifier: &str) -> Result<Volume> {
@@ -182,6 +217,9 @@ pub async fn inspect(identifier: &str) -> Result<Volume> {
 /// Recheck the OS identity, rather than trusting a saved mount path after reconnection.
 #[cfg(target_os = "macos")]
 pub async fn verify(expected: &Volume) -> Result<()> {
+    if expected.is_mtp() {
+        return Ok(());
+    } // The object session verifies the on-player identity when it opens.
     let actual = volume(&plist(&["info", "-plist", &expected.identifier]).await?)
         .context("The player is no longer mounted")?;
     ensure!(
@@ -194,24 +232,103 @@ pub async fn verify(expected: &Volume) -> Result<()> {
 pub async fn verify(_expected: &Volume) -> Result<()> {
     anyhow::bail!("USB player syncing is available on the Mac")
 }
-#[cfg(target_os = "macos")]
-pub async fn eject(volume: &Volume) -> Result<()> {
-    verify(volume).await?;
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        tokio::process::Command::new("/usr/sbin/diskutil")
-            .args(["eject", &volume.identifier])
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await??;
-    ensure!(
-        output.status.success(),
-        "The player is still in use; close its files and try again"
-    );
-    Ok(())
-}
-#[cfg(not(target_os = "macos"))]
-pub async fn eject(_volume: &Volume) -> Result<()> {
-    anyhow::bail!("USB player syncing is available on the Mac")
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn reconnects_and_resumes_publication_after_partial_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = dir.path().join("worker");
+        let storage = dir.path().join("storage");
+        std::fs::create_dir(&storage).unwrap();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        std::fs::write(
+            storage.join(".textamp-player.json"),
+            serde_json::json!({"volume_uuid":uuid}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &worker,
+            r#"#!/usr/bin/python3
+import json, sys
+from pathlib import Path
+root = Path(__file__).parent
+store = root / "storage"
+opens = root / "opens"
+generation = int(opens.read_text()) + 1 if opens.exists() else 1
+opens.write_text(str(generation))
+def handle(path):
+    return generation * 100000 + path.stat().st_ino % 100000
+for line in sys.stdin:
+    q = json.loads(line)
+    op = q["op"]
+    entries = list(store.iterdir())
+    obj = next((p for p in entries if handle(p) == q.get("id")), None)
+    if op == "storage":
+        reply = dict(device="player",name="card",capacity=1000000,available=900000)
+    elif op == "stores":
+        reply = [1]
+    elif op == "list":
+        reply = [dict(id=handle(p),name=p.name,folder=False,size=p.stat().st_size) for p in entries]
+    elif op == "read":
+        Path(q["path"]).write_bytes(obj.read_bytes())
+        reply = True
+    elif op == "create":
+        path = store / q["name"]
+        data = Path(q["path"]).read_bytes()
+        if generation == 1 and path.suffix == ".new":
+            path.write_bytes(data[:1])
+            print(json.dumps(dict(error="Incomplete transfer",reconnect=True)),flush=True)
+            sys.exit(2)
+        path.write_bytes(data)
+        reply = handle(path)
+    elif op == "delete":
+        obj.unlink()
+        reply = True
+    elif op == "rename":
+        obj.rename(store / q["name"])
+        reply = True
+    else:
+        raise ValueError(op)
+    print(json.dumps(reply),flush=True)
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let volume = Volume {
+            uuid,
+            identifier: "mtp:1:1".into(),
+            mount: dir.path().into(),
+            name: "Player".into(),
+            available: 900000,
+            capacity: 1000000,
+        };
+        std::fs::write(storage.join("track.mp3"), b"old audio").unwrap();
+        let session =
+            super::super::mtp::session::Session::open_verified(&volume, None, &worker).unwrap();
+        let mut target = Target::open(session.work.path()).await.unwrap();
+        target.mtp = Some(std::sync::Arc::new(MtpTarget {
+            session: std::sync::Mutex::new(session),
+            volume,
+            source: None,
+        }));
+        let input = dir.path().join("input");
+        std::fs::write(&input, b"complete audio").unwrap();
+        target
+            .publish(&input, &target.path.join("track.mp3"))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(storage.join("track.mp3")).unwrap(),
+            b"complete audio"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("opens")).unwrap(),
+            "2"
+        );
+        assert_eq!(std::fs::read_dir(storage).unwrap().count(), 2);
+    }
 }

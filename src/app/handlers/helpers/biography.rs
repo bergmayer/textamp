@@ -1,4 +1,4 @@
-//! Navidrome-first biography loading, owned by the popup that requested it.
+//! Artist metadata loading for browse columns and biography readers.
 use crate::app::event::UiEvent;
 use crate::app::state::ArtistBioPopup;
 use crate::app::tasks::{self, TaskLease};
@@ -19,8 +19,12 @@ fn request(
     name: &str,
     destination: Destination,
 ) -> (u64, TaskLease) {
-    state.artist_bio_request_id = state.artist_bio_request_id.wrapping_add(1);
-    let request_id = state.artist_bio_request_id;
+    let counter = match destination {
+        Destination::Window => &mut state.artist_bio_request_id,
+        Destination::Column => &mut state.artist_info_request_id,
+    };
+    *counter = counter.wrapping_add(1);
+    let request_id = *counter;
     let generation = state.library_generation;
     let navidrome = state.sources.active.navidrome().cloned();
     let mbid = state
@@ -35,7 +39,7 @@ fn request(
     let name = name.to_owned();
     let task = tasks::spawn(async move {
         let result = if let Some(session) = navidrome {
-            load_navidrome(&session, &key, &name, mbid).await
+            load_navidrome(&session, &key, &name, mbid, generation, &tx).await
         } else {
             biography::wikipedia(&name)
                 .await
@@ -58,23 +62,141 @@ fn request(
     });
     (request_id, TaskLease::new(&task))
 }
+/// Completed artist lookups for the active library, including misses.
+#[derive(Debug, Default)]
+pub(crate) struct Cache(std::collections::VecDeque<(String, std::time::Instant, Biography)>);
+
+impl Cache {
+    pub(crate) fn get(&self, key: &str) -> Option<&Biography> {
+        self.0.iter().find_map(|(artist, fetched, document)| {
+            let ttl = if document.has_prose() {
+                24 * 60 * 60
+            } else {
+                60 * 60
+            };
+            (artist == key && fetched.elapsed() < std::time::Duration::from_secs(ttl))
+                .then_some(document)
+        })
+    }
+
+    pub(crate) fn insert(&mut self, key: &str, document: &Biography) {
+        self.0.retain(|(artist, _, _)| artist != key);
+        self.0
+            .push_front((key.to_owned(), std::time::Instant::now(), document.clone()));
+        self.0.truncate(32);
+    }
+
+    pub(crate) fn documents_mut(&mut self) -> impl Iterator<Item = &mut Biography> {
+        self.0.iter_mut().map(|(_, _, document)| document)
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+/// Resolve a button and its reader from the same artist document. A pending
+/// column or an empty result must not hide prose already loaded for this artist.
+pub(crate) fn known<'a>(state: &'a AppState, key: &str) -> Option<&'a Biography> {
+    let album = state
+        .sources
+        .album_artists
+        .as_ref()
+        .filter(|r| r.generation == state.library_generation && r.artist == key)
+        .and_then(|r| r.document.as_ref());
+    let headers = state
+        .browse_nav()
+        .into_iter()
+        .flat_map(|nav| &nav.columns)
+        .filter_map(|column| column.artist_header.as_ref())
+        .filter(|info| info.artist_key == key && (info.task.is_none() || info.document.has_prose()))
+        .map(|info| &info.document);
+    let mut documents = state
+        .artist_bios
+        .get(key)
+        .into_iter()
+        .chain(album)
+        .chain(headers);
+    documents
+        .clone()
+        .find(|doc| doc.has_prose())
+        .or_else(|| documents.next())
+}
+
 pub fn show(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, name: String) {
     state.popups.close_all();
-    let (_, task) = request(state, tx, &key, &name, Destination::Window);
+    let existing = known(state, &key);
+    let (document, task) = if let Some(document) = existing {
+        (document.clone(), None)
+    } else if state.downloads.is_offline() {
+        (
+            crate::app::downloads::offline_artist(state, &key, &name, None).unwrap_or_else(|| {
+                Biography {
+                    unavailable: true,
+                    text: "Biography unavailable offline".into(),
+                    ..Default::default()
+                }
+            }),
+            None,
+        )
+    } else {
+        (
+            Biography::default(),
+            Some(request(state, tx, &key, &name, Destination::Window).1),
+        )
+    };
+    if task.is_none() {
+        state.artist_bio_request_id = state.artist_bio_request_id.wrapping_add(1);
+    }
     state.popups.set_artist_bio(Some(ArtistBioPopup {
         artist_key: key,
         artist_name: name,
-        document: Biography::default(),
+        document,
         scroll: 0,
         google_focused: false,
         image_index: 0,
-        task: Some(task),
+        task,
     }));
 }
-pub fn show_info(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, name: String) {
-    use crate::app::state::{
-        ArtistInfoDetails, BrowseColumn, BrowseDetails, BrowseItem, PlayAllRow,
+pub fn column_info(
+    state: &mut AppState,
+    tx: &mpsc::Sender<Event>,
+    key: String,
+    name: String,
+) -> crate::app::state::ArtistInfoDetails {
+    let (request_id, task, document) = if let Some(document) = state.artist_bios.get(&key) {
+        (0, None, document.clone())
+    } else if state.downloads.is_offline() {
+        let document = crate::app::downloads::offline_artist(state, &key, &name, None)
+            .unwrap_or_else(|| Biography {
+                unavailable: true,
+                text: "Biography unavailable offline".into(),
+                ..Default::default()
+            });
+        (0, None, document)
+    } else {
+        let (id, task) = request(state, tx, &key, &name, Destination::Column);
+        (id, Some(task), Biography::default())
     };
+    if document.cover_art.is_none()
+        && !state.artwork.grid_cache.contains_key(&key)
+        && let Some(image) = document.images.first()
+    {
+        state
+            .artwork
+            .insert_grid_art(key.clone(), image.data.clone());
+    }
+    crate::app::state::ArtistInfoDetails {
+        artist_key: key,
+        artist_name: name,
+        request_id,
+        document,
+        image_index: 0,
+        task,
+    }
+}
+pub fn show_info(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, name: String) {
+    use crate::app::state::{BrowseColumn, BrowseDetails, BrowseItem, PlayAllRow};
     let Some(nav) = state.browse_nav() else {
         return;
     };
@@ -89,17 +211,6 @@ pub fn show_info(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, na
         return;
     }
     state.popups.close_all();
-    let (request_id, task, document) = if state.downloads.is_offline() {
-        let document = crate::app::downloads::offline_artist(state, &key, &name, None)
-            .unwrap_or_else(|| Biography {
-                text: "Biography unavailable offline".into(),
-                ..Default::default()
-            });
-        (0, None, document)
-    } else {
-        let (id, task) = request(state, tx, &key, &name, Destination::Column);
-        (id, Some(task), Biography::default())
-    };
     let mut column = BrowseColumn::new(format!("Artist Details — {name}"), vec![]);
     column.artwork_visible = true;
     if !state.downloads.is_offline()
@@ -114,14 +225,7 @@ pub fn show_info(state: &mut AppState, tx: &mpsc::Sender<Event>, key: String, na
             artist_name: name.clone(),
         });
     }
-    column.details = Some(BrowseDetails::Artist(ArtistInfoDetails {
-        artist_key: key,
-        artist_name: name,
-        request_id,
-        document,
-        image_index: 0,
-        task,
-    }));
+    column.details = Some(BrowseDetails::Artist(column_info(state, tx, key, name)));
     state.initialize_column_artwork(&mut column);
     if let Some(nav) = state.browse_nav_mut() {
         nav.drill_column(column, false);
@@ -151,16 +255,53 @@ pub fn cycle_info_photo(state: &mut AppState, delta: i8) {
     state.artwork.insert_grid_art(key, data);
 }
 
-async fn load_navidrome(
+pub(crate) async fn load_navidrome(
     session: &crate::app::sources::navidrome::Session,
     key: &str,
     name: &str,
     cached_mbid: Option<String>,
+    generation: u64,
+    events: &mpsc::Sender<Event>,
 ) -> Result<Biography, String> {
-    load_navidrome_with(session, key, cached_mbid, |mbid| async move {
+    let performer = if key.starts_with("track_artist:") {
+        match session.client.performer(name).await {
+            Ok(artist) => artist.map(|a| session.artist(a)),
+            Err(error) => {
+                tracing::debug!(%error, "Navidrome performer lookup failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let cover = performer.as_ref().and_then(|a| a.thumb.clone());
+    if let Some(thumb) = &cover {
+        let request =
+            crate::app::action::SystemAction::LoadAlbumArt(vec![(key.to_owned(), thumb.clone())]);
+        let _ = events
+            .send(Event::for_library(
+                generation,
+                Event::Effect(request.into()),
+            ))
+            .await;
+    }
+    let provider_key = performer.as_ref().map_or(key, |a| a.rating_key.as_str());
+    let mbid = cached_mbid.or_else(|| performer.as_ref()?.music_brainz_id.clone());
+    let result = load_navidrome_with(session, provider_key, mbid, |mbid| async move {
         biography::wikipedia_for_artist(name, mbid.as_deref()).await
     })
-    .await
+    .await;
+    let mut document = match result {
+        Ok(document) => document,
+        Err(text) if cover.is_some() => Biography {
+            unavailable: true,
+            text,
+            ..Default::default()
+        },
+        Err(error) => return Err(error),
+    };
+    document.cover_art = cover;
+    Ok(document)
 }
 
 async fn load_navidrome_with<F, Fut>(
@@ -178,6 +319,7 @@ where
         .and_then(biography::valid_mbid)
         .map(|id| id.to_string());
     let mut related_artists = Vec::new();
+    let mut photo_url = None;
     let provider = async {
         let id = session.id(key)?;
         let params = [
@@ -202,26 +344,10 @@ where
         if expected.is_none() {
             fallback_mbid = supplied.map(|id| id.to_string());
         }
-        let mut seen = std::collections::HashSet::new();
-        related_artists = info["similarArtist"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|value| {
-                serde_json::from_value::<crate::navidrome::Artist>(value.clone()).ok()
-            })
-            .filter(|artist| {
-                !artist.id.is_empty()
-                    && artist.id != "-1"
-                    && session.key(&artist.id) != key
-                    && !artist.name.trim().is_empty()
-                    && seen.insert(artist.id.clone())
-            })
-            .take(20)
-            .map(|artist| session.artist(artist))
-            .collect();
+        related_artists = crate::app::sources::navidrome::album_artists::parse(session, key, info);
+        photo_url = artist_info_url(&info["largeImageUrl"]);
         let raw = info["biography"].as_str().unwrap_or_default();
-        let text = biography::fragment(raw);
+        let text = biography::biography_text(raw);
         let (prose, source) = text
             .rsplit_once("Source:")
             .map_or((text.as_str(), None), |(body, credit)| {
@@ -237,69 +363,72 @@ where
             }
             _ => text,
         };
-        let mut document = Biography {
+        Ok::<_, anyhow::Error>(Biography {
             text,
-            related_artists: related_artists.clone(),
+            source_url: artist_info_url(&info["lastFmUrl"]).map(|url| url.to_string()),
             ..Default::default()
-        };
-        if let Some(url) = info["lastFmUrl"]
-            .as_str()
-            .and_then(|s| reqwest::Url::parse(s).ok())
-            .filter(|u| {
-                matches!(u.scheme(), "https" | "http")
-                    && u.username().is_empty()
-                    && u.password().is_none()
-            })
-        {
-            document.source_url = Some(url.to_string());
+        })
+    }
+    .await;
+    let prose = async {
+        match provider {
+            Ok(document) => Ok(document),
+            Err(issue) => wikipedia(fallback_mbid).await.map_err(|error| {
+                unavailable_message(Some(&format!("{issue:#}")), &format!("{error:#}"))
+            }),
         }
-        if let Some(url) = info["largeImageUrl"]
-            .as_str()
-            .and_then(|s| reqwest::Url::parse(s).ok())
-            .filter(|u| {
-                matches!(u.scheme(), "https" | "http")
-                    && u.username().is_empty()
-                    && u.password().is_none()
-            })
-        {
-            // This client has no default Authorization header; never append server credentials to agent URLs.
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                session.client.bytes(url.clone(), 8 * 1024 * 1024),
-            )
-            .await
-            {
-                Ok(Ok(data)) => document.images.push(BioImage {
-                    key: url.to_string(),
-                    data,
-                    caption: "Artist image supplied by Navidrome".into(),
-                }),
-                Ok(Err(error)) => tracing::warn!("Navidrome biography image: {error}"),
-                Err(_) => tracing::warn!("Navidrome biography image timed out"),
-            }
-        }
-        Ok::<_, anyhow::Error>(document)
     };
-    let provider_issue = match provider.await {
-        Ok(document) if !document.text.trim().is_empty() => return Ok(document),
-        Err(error) => format!("{error:#}"),
-        _ => "No biography supplied".into(),
-    };
-    tracing::debug!("Navidrome biography unavailable: {provider_issue}");
-    match wikipedia(fallback_mbid).await {
-        Ok(mut document) => {
-            document.related_artists = related_artists;
-            Ok(document)
-        }
-        Err(error) if !related_artists.is_empty() => Ok(Biography {
-            text: unavailable_message(Some(&provider_issue), &format!("{error:#}")),
-            related_artists,
+    let (document, photo) = tokio::join!(prose, artist_photo(session, photo_url));
+    let mut document = match document {
+        Ok(document) => document,
+        Err(text) if photo.is_some() || !related_artists.is_empty() => Biography {
+            unavailable: true,
+            text,
             ..Default::default()
+        },
+        Err(error) => return Err(error),
+    };
+    document.related_artists = related_artists;
+    if let Some(photo) = photo {
+        document.images.push(photo);
+    }
+    Ok(document)
+}
+
+fn artist_info_url(value: &serde_json::Value) -> Option<reqwest::Url> {
+    reqwest::Url::parse(value.as_str()?).ok().filter(|url| {
+        matches!(url.scheme(), "https" | "http")
+            && url.username().is_empty()
+            && url.password().is_none()
+    })
+}
+
+async fn artist_photo(
+    session: &crate::app::sources::navidrome::Session,
+    url: Option<reqwest::Url>,
+) -> Option<BioImage> {
+    let url = url?;
+    // Provider image URLs are fetched without Navidrome credentials.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        session.client.bytes(url.clone(), 8 * 1024 * 1024),
+    )
+    .await
+    {
+        Ok(Ok(data)) if !data.is_empty() => Some(BioImage {
+            key: url.to_string(),
+            data,
+            caption: "Artist image supplied by Navidrome".into(),
         }),
-        Err(error) => Err(unavailable_message(
-            Some(&provider_issue),
-            &format!("{error:#}"),
-        )),
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "Navidrome artist image unavailable");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("Navidrome artist image timed out");
+            None
+        }
+        Ok(Ok(_)) => None,
     }
 }
 
@@ -311,6 +440,30 @@ fn unavailable_message(navidrome: Option<&str>, wikipedia: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artist_column_reuses_a_completed_miss_and_shows_search_until_prose_arrives() {
+        let mut state = AppState::new();
+        let (events, _receiver) = mpsc::channel(1);
+        state.artist_bios.insert(
+            "artist",
+            &Biography {
+                unavailable: true,
+                ..Default::default()
+            },
+        );
+        let mut column = column_info(&mut state, &events, "artist".into(), "Artist".into());
+        assert!(column.task.is_none());
+        assert!(column.needs_web_search());
+        assert!(column.excerpt().is_empty());
+        column.document = Biography {
+            text: "Artist biography".into(),
+            ..Default::default()
+        };
+        assert!(!column.needs_web_search());
+        assert_eq!(column.excerpt(), "Artist biography");
+    }
+
     use serde_json::json;
     use std::sync::{
         Arc,
@@ -340,7 +493,8 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        if info["largeImageUrl"] == "fixture-image" {
+        let photo_available = info["largeImageUrl"] == "available-image";
+        if photo_available || info["largeImageUrl"] == "fixture-image" {
             info["largeImageUrl"] = json!(format!("http://{address}/image"));
         }
         let requests = Arc::new(AtomicUsize::new(0));
@@ -357,9 +511,18 @@ mod tests {
                 if !image {
                     tokio::time::sleep(delay).await;
                 }
-                let status = if image { 503 } else { status };
+                let status = if image && !photo_available {
+                    503
+                } else {
+                    status
+                };
                 let body =
                     json!({"subsonic-response":{"status":"ok","artistInfo2":info}}).to_string();
+                let body = if image {
+                    "P3\n1 1\n255\n255 0 0"
+                } else {
+                    &body
+                };
                 socket.write_all(format!("HTTP/1.1 {status} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
             }
         });
@@ -539,15 +702,19 @@ mod tests {
         task.abort();
     }
 
-    #[test]
-    fn unavailable_biography_has_one_concise_message_for_all_sources() {
-        assert_eq!(
-            unavailable_message(Some("Authentication failed"), "No matching musical artist"),
-            "No biography available"
-        );
-        assert_eq!(
-            unavailable_message(None, "Lookup timed out"),
-            "No biography available"
-        );
+    #[tokio::test]
+    async fn portrait_survives_missing_provider_and_wikipedia_prose() {
+        let (session, _, task) = server(json!({"largeImageUrl":"available-image"}), 200).await;
+        let document = load_navidrome_with(&session, &session.key("artist"), None, |_| async {
+            anyhow::bail!("No matching biography")
+        })
+        .await
+        .unwrap();
+        assert!(!document.has_prose());
+        let image = image::load_from_memory(&document.images[0].data)
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(image.get_pixel(0, 0).0, [255, 0, 0]);
+        task.abort();
     }
 }

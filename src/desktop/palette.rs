@@ -22,15 +22,17 @@ pub(super) fn append_groups(items: &mut Vec<Item>, current: &[String]) {
     let groups = crate::app::command_catalog::groups(items.iter().map(path));
     for group in groups {
         items.push(Item {
+            glyph: None,
             key: format!("group:{}", group.join("/")),
             label: group.last().unwrap().clone(),
-            aliases: vec![],
+            aliases: crate::app::command_catalog::group_aliases(&group),
             selected: false,
             operation: Operation::Palette(PaletteCommandKind::OpenCommandGroup(group)),
         });
     }
     if !current.is_empty() {
         items.push(Item {
+            glyph: None,
             key: "palette-back".into(),
             label: "Back".into(),
             aliases: vec![],
@@ -169,6 +171,7 @@ mod tests {
     use super::*;
     fn item(label: &str, aliases: &[&str]) -> Item {
         Item {
+            glyph: None,
             key: label.into(),
             label: label.into(),
             aliases: aliases.iter().map(|alias| (*alias).into()).collect(),
@@ -189,6 +192,7 @@ mod tests {
         ]
         .into_iter()
         .map(|(key, label, command)| Item {
+            glyph: None,
             key: key.into(),
             label: label.into(),
             aliases: vec![],
@@ -294,6 +298,7 @@ mod hierarchy_tests {
     fn recent_menu_groups_never_displace_selection_actions() {
         let mut rows = vec![
             Item {
+                glyph: None,
                 key: "album-play".into(),
                 label: "Play Album".into(),
                 aliases: vec![],
@@ -301,6 +306,7 @@ mod hierarchy_tests {
                 operation: Operation::Palette(PaletteCommandKind::PlayFocusedAlbum),
             },
             Item {
+                glyph: None,
                 key: "queue".into(),
                 label: "Play Queue".into(),
                 aliases: vec![],
@@ -335,6 +341,7 @@ mod hierarchy_tests {
         };
         crate::app::command_catalog::prepare(&mut entry);
         let mut rows = vec![Item {
+            glyph: None,
             key: "twins".into(),
             label: entry.label,
             selected: false,

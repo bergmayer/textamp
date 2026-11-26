@@ -1,11 +1,10 @@
-//! ANSI artwork. About uses the embedded colors; the Search
-//! landing panel and theme preview map its luminance into a theme's colors.
+//! Shared ANSI wordmark and theme color mapping.
 use crate::ui::theme::ThemeColors;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 /// Keep both foreground and background shading: the block characters alone
-/// do not carry the artwork. About deliberately does not use this palette.
+/// do not carry the artwork.
 pub(crate) fn themed(colors: &ThemeColors) -> Vec<Line<'static>> {
     let mut lines = original(Color::Rgb(0, 0, 0));
     for span in lines.iter_mut().flat_map(|line| &mut line.spans) {
@@ -33,19 +32,13 @@ fn tint(color: Color, colors: &ThemeColors) -> Color {
     Color::Rgb(blended[0], blended[1], blended[2])
 }
 
-/// Center the artwork, reducing it proportionally when the terminal is narrow.
-/// Rendering through a buffer prevents ANSI spans from wrapping outside a pane.
+/// Choose a wordmark that fits without dropping cells from the artwork.
 pub fn render_themed(frame: &mut Frame, area: Rect, colors: &ThemeColors) {
     frame.render_widget(Block::new().bg(colors.bg_primary), area);
     if area.is_empty() {
         return;
     }
     render_lines(frame, area, themed(colors), colors);
-}
-
-/// Render the original colored ANSI logo, fitted to the available terminal cells.
-pub fn render_original(frame: &mut Frame, area: Rect, colors: &ThemeColors) {
-    render_lines(frame, area, original(colors.bg_primary), colors);
 }
 
 fn render_lines(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>, colors: &ThemeColors) {
@@ -57,25 +50,41 @@ fn render_lines(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>, colors
     if width == 0 || height == 0 {
         return;
     }
-    let scale = (f64::from(area.width) / f64::from(width))
-        .min(f64::from(area.height) / f64::from(height))
-        .min(1.0);
-    let fitted_width = (f64::from(width) * scale).round().max(1.0) as u16;
-    let fitted_height = (f64::from(height) * scale).round().max(1.0) as u16;
-    let mut source = Buffer::empty(Rect::new(0, 0, width, height));
-    Paragraph::new(lines)
-        .style(Style::new().fg(colors.fg_accent).bg(colors.bg_primary))
-        .render(source.area, &mut source);
-    let x = area.x + (area.width - fitted_width) / 2;
-    let y = area.y + (area.height - fitted_height) / 2;
-    for row in 0..fitted_height {
-        for col in 0..fitted_width {
-            let source_x = u32::from(col) * u32::from(width) / u32::from(fitted_width);
-            let source_y = u32::from(row) * u32::from(height) / u32::from(fitted_height);
-            frame.buffer_mut()[(x + col, y + row)] =
-                source[(source_x as u16, source_y as u16)].clone();
-        }
+    if width <= area.width && height <= area.height {
+        let target = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        Paragraph::new(lines)
+            .style(Style::new().fg(colors.fg_accent).bg(colors.bg_primary))
+            .render(target, frame.buffer_mut());
+        return;
     }
+    let compact = [
+        "▀█▀ █▀▀ ▀▄▀ ▀█▀ ▄▀█ █▀▄▀█ █▀█",
+        " █  ██▄ █ █  █  █▀█ █ ▀ █ █▀▀",
+    ];
+    let rows = if area.width >= compact[0].chars().count() as u16 && area.height >= 2 {
+        compact.as_slice()
+    } else if area.width >= 7 {
+        &["textamp"]
+    } else {
+        return;
+    };
+    let target = Rect::new(
+        area.x,
+        area.y + (area.height - rows.len() as u16) / 2,
+        area.width,
+        rows.len() as u16,
+    );
+    frame.render_widget(
+        Paragraph::new(rows.join("\n"))
+            .centered()
+            .style(Style::new().fg(colors.fg_accent).bg(colors.bg_primary)),
+        target,
+    );
 }
 
 pub fn render_search(frame: &mut Frame, area: Rect, colors: &ThemeColors) {

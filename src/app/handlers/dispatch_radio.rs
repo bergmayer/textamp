@@ -41,11 +41,9 @@ pub fn dispatch(
             crate::app::sources::radio::start(event_tx, state, station);
         }
         RadioAction::JumpToRadioTrack(idx) => {
-            // Report stop for current track before jumping
-            // continuing=true because we're jumping to another track
-
             // Jump to track in radio queue without clearing radio state
             if idx < state.radio.tracks.len() {
+                let idx = crate::app::queue_edit::before_jump(state, idx);
                 state.radio.track_index = Some(idx);
                 state.list_state.queue_index = idx;
                 helpers::play_current_track(event_tx, state, audio);
@@ -62,21 +60,11 @@ pub fn dispatch(
             );
         }
         RadioAction::PlayStation(station_key) => {
-            if state
+            if let Some(picker) = state
                 .station_by_key(&station_key)
-                .is_some_and(|station| station.identifier.as_deref() == Some("stayClose"))
+                .and_then(crate::app::radio_navigation::seed_picker)
             {
-                return Ok(vec![
-                    crate::app::action::SearchAction::OpenStayCloseRadioPicker.into(),
-                ]);
-            }
-            if state
-                .station_by_key(&station_key)
-                .is_some_and(|station| station.identifier.as_deref() == Some("sonic"))
-            {
-                return Ok(vec![
-                    crate::app::action::SearchAction::OpenTrackRadioPicker.into(),
-                ]);
+                return Ok(vec![picker.into()]);
             }
             let station_title = state
                 .station_by_key(&station_key)

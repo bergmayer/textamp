@@ -6,6 +6,15 @@ use unicode_width::UnicodeWidthStr;
 pub const DELAY: Duration = Duration::from_secs(10);
 const END_HOLD: Duration = Duration::from_secs(2);
 
+/// Capitalize the heading without changing the spelling of catalog names inside it.
+pub fn capitalized(title: &str) -> String {
+    let mut chars = title.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 pub fn destination(title: &str) -> &str {
     [" — ", " – ", " - ", ": "]
         .into_iter()

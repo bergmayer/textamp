@@ -4,34 +4,12 @@ use gpui_kit::base::motion::{Transition, transition};
 use std::time::Duration;
 
 pub const SIDEBAR_WIDTH: f32 = crate::ui::layout::SIDEBAR_WIDTH;
+pub const SIDEBAR_RAIL_WIDTH: f32 = 52.;
 pub const SIDEBAR_DURATION: Duration = Duration::from_millis(320);
 pub const COLUMN_DURATION: Duration = Duration::from_millis(180);
-pub const PLAYER_DURATION: Duration = Duration::from_millis(240);
-pub const TRANSPORT_HEIGHT: f32 = crate::ui::layout::TRANSPORT_HEIGHT;
-#[cfg(test)]
-pub const HERO_SIDE: f32 = 190.;
-
-#[derive(Clone, Copy)]
-pub struct SheetGeometry {
-    pub height: f32,
-    pub artwork_side: f32,
-    pub artwork_x: f32,
-    pub artwork_y: f32,
-    pub controls_y: f32,
-}
-impl SheetGeometry {
-    pub fn at(progress: f32, height: f32, hero_side: f32) -> Self {
-        let p = progress.clamp(0., 1.);
-        Self {
-            height: TRANSPORT_HEIGHT + (height - TRANSPORT_HEIGHT) * p,
-            artwork_side: 32. + (hero_side - 32.) * p,
-            artwork_x: 172. - 156. * p,
-            artwork_y: 16.,
-            controls_y: (hero_side + 32.) * p,
-        }
-    }
-}
-
+pub const PLAYER_DURATION: Duration = Duration::from_millis(360);
+pub const TRANSPORT_HEIGHT: f32 = 72.;
+pub const FOOTER_HEIGHT: f32 = 20.;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PaneKey {
     Column(usize),
@@ -67,7 +45,7 @@ impl Desktop {
                     .columns
                     .get(*index)
                     .is_some_and(|column| !column.hidden && !column.metadata),
-                PaneKey::Inspector => self.snapshot.preview.is_some(),
+                PaneKey::Inspector => self.snapshot.has_inspector(),
             };
             let id = SharedString::from(format!(
                 "column-motion-{}-{key:?}",
@@ -168,21 +146,4 @@ pub fn pane(
             .size_full(),
         )
         .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[::core::prelude::v1::test]
-    fn player_sheet_keeps_utility_footer_outside_its_moving_transport() {
-        let collapsed = SheetGeometry::at(0., 740., HERO_SIDE);
-        assert_eq!(collapsed.height, TRANSPORT_HEIGHT);
-        let expanded = SheetGeometry::at(1., 740., HERO_SIDE);
-        assert_eq!(expanded.height, 740.);
-        assert_eq!(expanded.artwork_side, HERO_SIDE);
-        for step in 0..=20 {
-            let next = SheetGeometry::at(step as f32 / 20., 740., HERO_SIDE);
-            assert!((0. ..=740.).contains(&next.height));
-        }
-    }
 }

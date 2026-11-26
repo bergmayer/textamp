@@ -49,11 +49,7 @@ pub fn project(state: &crate::app::AppState, projection: &mut Projection) -> Pla
             .unwrap_or_default(),
         ..Default::default()
     };
-    if !active
-        && !state.desktop_split_view
-        && !state.desktop_player_visible
-        && !state.gui_multiple_windows
-    {
+    if !active && !state.desktop_player_visible && !state.gui_multiple_windows {
         return model;
     }
     model.meters = projection.meters.update(

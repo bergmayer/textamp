@@ -12,7 +12,7 @@ pub(in crate::app::handlers) fn activate(control: Control, state: &mut AppState)
     let Some(launcher) = state.popups.adventure_launcher_mut() else {
         return vec![];
     };
-    if matches!(launcher.stage, JourneyStage::Generating) && control != Control::Cancel {
+    if matches!(launcher.stage, JourneyStage::Generating { .. }) && control != Control::Cancel {
         return vec![];
     }
     launcher.terminal_focus = control;
@@ -86,7 +86,7 @@ pub(super) fn handle_adventure_launcher_keys(key: KeyEvent, state: &mut AppState
             .into(),
         ];
     }
-    if matches!(launcher.stage, JourneyStage::Generating) {
+    if matches!(launcher.stage, JourneyStage::Generating { .. }) {
         return vec![];
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Enter {

@@ -60,6 +60,11 @@ final class AppModel {
   func open(_ sheet: String) {
     send("sheet", ["sheet": sheet])
   }
+  func utilitySheetDismissed() {
+    // UIKit dismisses a document picker before its delegate delivers the selected URL.
+    if sheet == "input", snapshot?.input?.fileMode != nil { return }
+    if sheet != nil { closeSheet() }
+  }
   func closeSheet() {
     guard let destination = sheet ?? (settings ? "settings" : nil) else { return }
     send("dismiss", ["sheet": destination])
@@ -76,7 +81,7 @@ final class AppModel {
   func dismissNowPlaying() { selectTab(libraryTab) }
   func setPath(_ next: [String]) {
     if next.count < path.count { send("pop", ["depth": next.count]) }
-    path = next
+    withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .default) { path = next }
   }
   func setNativePath(_ next: [String], from rendered: [String]) {
     guard !settings, sheet == nil, tab == "library", path == rendered,
@@ -114,8 +119,8 @@ final class AppModel {
       if model.trackDetail, let detail = model.detail { next.append("track:\(detail.id)") }
       if next != path {
         withAnimation(
-          sameNavigationRoot && !UIAccessibility.isReduceMotionEnabled
-            ? .easeInOut(duration: 0.22) : nil
+          (sameNavigationRoot || path.isEmpty) && !UIAccessibility.isReduceMotionEnabled
+            ? .default : nil
         ) {
           path = next
         }

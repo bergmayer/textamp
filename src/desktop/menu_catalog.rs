@@ -142,11 +142,6 @@ pub fn menus(commands: &[Command]) -> Vec<Menu> {
     let view = &mut menus[3].items;
     view.insert(0, MenuItem::action("Command Palette", super::Palette));
     view.insert(0, MenuItem::action("Reset View", super::ResetView));
-    insert(
-        view,
-        &["View Options".into()],
-        MenuItem::action("Large Artwork", super::LargeAlbumCovers),
-    );
     #[cfg(target_os = "macos")]
     menus[7].items.push(MenuItem::action(
         "Audio Player…",
@@ -183,6 +178,7 @@ pub fn native_entries(menus: &[Menu]) -> Vec<super::surface::Item> {
                         action_name: action.name().into(),
                     };
                     out.push(super::surface::Item {
+                        glyph: None,
                         key: native.key(),
                         label: native.label.clone(),
                         aliases: vec![format!("{} {}", path.join(" "), native.label)],

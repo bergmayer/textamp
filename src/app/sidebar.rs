@@ -409,9 +409,8 @@ pub fn sidebar(state: &AppState) -> Vec<SidebarRow> {
         && let Some(root) = state.station_nav.columns.first()
     {
         let children: Vec<_> = root
-            .stations
+            .stations()
             .iter()
-            .filter(|station| station.is_browsable())
             .map(|station| SidebarRow {
                 parent: Some(SidebarGroup::Radio),
                 label: station.title.clone(),
@@ -420,7 +419,7 @@ pub fn sidebar(state: &AppState) -> Vec<SidebarRow> {
                 library_root: None,
                 active: rows[at].active
                     && root
-                        .stations
+                        .stations()
                         .get(root.selected_index)
                         .is_some_and(|selected| selected.key == station.key)
                     && (state.station_detail.is_some() || state.station_nav.columns.len() > 1),
@@ -456,7 +455,7 @@ pub fn station_actions(state: &AppState, index: usize) -> Vec<Action> {
         .station_nav
         .columns
         .first()
-        .and_then(|root| root.stations.get(index))
+        .and_then(|root| root.stations().get(index))
         .map(|s| vec![NavigationAction::OpenRadioStation(s.key.clone()).into()])
         .unwrap_or_default()
 }
@@ -477,6 +476,18 @@ pub fn allows_disclosure(rows: &[SidebarRow], title: &str) -> bool {
 }
 
 pub fn visible_indices(rows: &[SidebarRow], collapsed: &[String]) -> Vec<usize> {
+    rail_indices(rows, collapsed, false)
+}
+
+pub fn rail_indices(rows: &[SidebarRow], collapsed: &[String], compact: bool) -> Vec<usize> {
+    if compact {
+        return rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.parent.is_none() && is_visible(row, &[]))
+            .map(|(index, _)| index)
+            .collect();
+    }
     let mut collapsed = collapsed.to_vec();
     collapsed.extend(
         rows.iter()
@@ -491,10 +502,14 @@ pub fn visible_indices(rows: &[SidebarRow], collapsed: &[String]) -> Vec<usize> 
 
 pub fn visible_rows(state: &AppState) -> Vec<SidebarRow> {
     let rows = sidebar(state);
-    visible_indices(&rows, &state.desktop_collapsed_sections)
-        .into_iter()
-        .map(|index| rows[index].clone())
-        .collect()
+    rail_indices(
+        &rows,
+        &state.desktop_collapsed_sections,
+        cfg!(target_os = "macos") && !state.tui_sidebar_visible,
+    )
+    .into_iter()
+    .map(|index| rows[index].clone())
+    .collect()
 }
 
 /// Open a library destination through the same source commands in every frontend.
@@ -557,7 +572,9 @@ pub fn open_root(root: LibraryRoot, state: &mut AppState) -> Vec<Action> {
         LibraryRoot::Radio => {
             if state.station_nav.columns.is_empty() && !state.station_nav.loading {
                 vec![BrowseAction::LoadStations.into()]
-            } else { vec![] }
+            } else {
+                vec![]
+            }
         }
     };
     state.category_column_index = state.row_index_for_category(state.browse_category);

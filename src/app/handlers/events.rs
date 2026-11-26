@@ -38,17 +38,14 @@ pub(crate) fn reset_account_scoped_state(state: &mut AppState) {
     let old_similar = std::mem::take(&mut state.similar);
     let old_related = std::mem::take(&mut state.related);
     let old_search = std::mem::take(&mut state.search);
-    let old_adventure = std::mem::take(&mut state.adventure);
     let old_track_pane_similar = std::mem::take(&mut state.track_pane_similar);
     let old_track_pane_loading = std::mem::take(&mut state.track_pane_similar_loading);
     let old_image_loaded = std::mem::take(&mut state.image_loaded);
     let old_waveform = std::mem::take(&mut state.waveform);
     let old_spectrogram = std::mem::take(&mut state.spectrogram);
 
-    let graphical_mode = state.artwork.graphical_mode;
     let artwork_mode = state.artwork.mode;
     let old_artwork = std::mem::take(&mut state.artwork);
-    state.artwork.graphical_mode = graphical_mode;
     state.artwork.mode = artwork_mode;
     state.artwork.grid_generation = artwork_generation;
 
@@ -58,8 +55,6 @@ pub(crate) fn reset_account_scoped_state(state: &mut AppState) {
     state.station_nav.loading = false;
     state.library_loading = false;
     state.cache_mgmt = crate::app::state::CacheManagement::default();
-    state.library_cache_stats = None;
-    state.waveform_cache_stats = None;
 
     state.list_filter.deactivate();
     state.list_state.reset();
@@ -84,7 +79,6 @@ pub(crate) fn reset_account_scoped_state(state: &mut AppState) {
         drop(old_similar);
         drop(old_related);
         drop(old_search);
-        drop(old_adventure);
         drop(old_track_pane_similar);
         drop(old_track_pane_loading);
         drop(old_image_loaded);
@@ -111,17 +105,8 @@ pub fn handle_app_event(
             request_key,
             message,
         }) => {
-            let mut current = false;
-            if state.library.right_panel_request_key.as_deref() == Some(&request_key) {
-                state.library.right_panel_request_key = None;
-                state.library.right_panel_loading = false;
-                current = true;
-            }
             if state.related.source_key == request_key {
                 state.related.loading = false;
-                current = true;
-            }
-            if current {
                 state.set_error(message);
             } else {
                 tracing::debug!("Ignoring stale scoped load error: {}", request_key);
@@ -249,8 +234,6 @@ pub fn handle_app_event(
                     state.playback.scrobble = crate::app::state::ScrobbleState::Queued;
                     crate::app::sources::navidrome::scrobble(state, event_tx, &track);
                 }
-                // Use track duration as position (track finished)
-                let _position = track.duration_ms();
             }
             if state
                 .station_starting
@@ -431,11 +414,6 @@ pub fn handle_app_event(
             vec![]
         }
 
-        Event::Cache(CacheEvent::WaveformCacheStats { count, total_bytes }) => {
-            state.waveform_cache_stats = Some((count, total_bytes));
-            vec![]
-        }
-
         Event::Tick => {
             // Clear expired modifier bars
             if let Some(deadline) = state.alt_bar_until
@@ -461,6 +439,18 @@ pub fn handle_app_event(
 
             // Periodic playback progress report to server (~10 seconds)
             if state.playback.status == PlayStatus::Playing {
+                if !state.play_recorded
+                    && state.playback.position_ms > 0
+                    && let Some(play) = state
+                        .current_track()
+                        .map(crate::app::listening_history::Play::from_track)
+                {
+                    state.play_recorded = true;
+                    match crate::app::listening_history::save(Some(play)) {
+                        Ok(rows) => state.listening_history = rows,
+                        Err(e) => state.set_error(format!("Could not save listening history: {e}")),
+                    }
+                }
                 let reached_scrobble_threshold = state.playback.duration_ms > 0
                     && state.playback.position_ms.saturating_mul(10)
                         >= state.playback.duration_ms.saturating_mul(9);
@@ -516,9 +506,7 @@ pub fn handle_app_event(
                 return actions;
             }
 
-            if state.view == crate::app::state::View::Browse
-                && let Some((track, _)) = crate::app::details::similar_seed(state)
-            {
+            if let Some((track, _)) = crate::app::details::similar_seed(state) {
                 let key = track.rating_key;
                 if crate::app::sources::sonic::enabled(state)
                     && !key.is_empty()
@@ -541,7 +529,10 @@ pub fn handle_app_event(
             // already-open art columns to its right all get a turn.
             // Cap concurrent in-flight requests to avoid overwhelming
             // the server transcoder.
-            if state.view == crate::app::state::View::Browse && state.artwork.grid_pending.len() < 4
+            if (state.view == crate::app::state::View::Browse
+                || (state.view == crate::app::state::View::Queue
+                    && state.tui_queue_workspace == crate::app::state::TuiWorkspace::Library))
+                && state.artwork.grid_pending.len() < 4
             {
                 let nav = match state.browse_category {
                     crate::app::state::BrowseCategory::Library => &state.artist_nav,
@@ -551,6 +542,14 @@ pub fn handle_app_event(
                 };
                 let max_batch = 4usize.saturating_sub(state.artwork.grid_pending.len());
                 let mut to_load: Vec<(String, String)> = Vec::new();
+                if let Some(track) =
+                    crate::app::sonic_details::selected_track(state).or_else(|| state.pane_track())
+                    && let Some(cover) = crate::app::details::track_cover(state, track)
+                    && !state.artwork.grid_cache.contains_key(&track.rating_key)
+                    && !state.artwork.grid_pending.contains(&track.rating_key)
+                {
+                    to_load.push((track.rating_key.clone(), cover.to_owned()));
+                }
                 // Iterate art-visible columns starting from the
                 // focused one and walking outward, so the column the
                 // user is staring at gets first claim on the budget.
@@ -566,33 +565,128 @@ pub fn handle_app_event(
                     }
                 }
                 'cols: for ci in col_order {
+                    if to_load.len() >= max_batch {
+                        break;
+                    }
                     let col = match nav.columns.get(ci) {
                         Some(c) => c,
                         None => continue,
                     };
-                    if !col.artwork_visible {
+                    if let Some(cover) = crate::app::details::album_cover(state, col)
+                        && !state.artwork.grid_cache.contains_key(&cover.0)
+                        && !state.artwork.grid_pending.contains(&cover.0)
+                    {
+                        to_load.push(cover);
+                        if to_load.len() >= max_batch {
+                            break;
+                        }
+                    }
+                    let album_key = match &col.play_all_row {
+                        Some(crate::app::state::PlayAllRow::Album { rating_key, .. }) => {
+                            Some(rating_key)
+                        }
+                        _ => None,
+                    };
+                    let albums = album_key
+                        .and_then(|_| col.tracks.first())
+                        .into_iter()
+                        .flat_map(|seed| {
+                            let tracks = state
+                                .track_pane_similar
+                                .get(&seed.rating_key)
+                                .and_then(|r| r.as_ref().ok())
+                                .map(Vec::as_slice)
+                                .unwrap_or_default();
+                            crate::app::details::recommendation_tracks(seed, tracks, true)
+                        })
+                        .filter_map(|t| {
+                            let key = t.parent_rating_key.as_ref()?;
+                            if state.artwork.grid_cache.contains_key(key)
+                                || state.artwork.grid_pending.contains(key)
+                            {
+                                return None;
+                            }
+                            let thumb = t
+                                .parent_thumb
+                                .as_ref()
+                                .or_else(|| {
+                                    state
+                                        .library
+                                        .albums
+                                        .iter()
+                                        .find(|a| a.rating_key == *key)
+                                        .and_then(|a| a.thumb.as_ref())
+                                })
+                                .or(t.thumb.as_ref())?;
+                            Some((key, thumb))
+                        });
+                    let related = col
+                        .artist_header
+                        .as_ref()
+                        .map(|info| info.document.related_artists.as_slice())
+                        .or_else(|| {
+                            let rating_key = album_key?;
+                            state
+                                .sources
+                                .album_artists
+                                .as_ref()
+                                .filter(|r| {
+                                    r.generation == state.library_generation
+                                        && r.album == *rating_key
+                                })?
+                                .document
+                                .as_ref()
+                                .map(|doc| doc.related_artists.as_slice())
+                        });
+                    let artists = related.into_iter().flatten().filter_map(|a| {
+                        let thumb = a.thumb.as_ref().or_else(|| {
+                            state
+                                .library
+                                .artists
+                                .iter()
+                                .find(|known| known.rating_key == a.rating_key)?
+                                .thumb
+                                .as_ref()
+                        })?;
+                        Some((&a.rating_key, thumb))
+                    });
+                    for (key, thumb) in albums.chain(artists) {
+                        if !state.artwork.grid_cache.contains_key(key)
+                            && !state.artwork.grid_pending.contains(key)
+                            && !to_load.iter().any(|(queued, _)| queued == key)
+                        {
+                            to_load.push((key.clone(), thumb.clone()));
+                            if to_load.len() >= max_batch {
+                                break 'cols;
+                            }
+                        }
+                    }
+                    if !col.artwork_visible && !crate::app::view_options::album_grid(state, ci) {
                         continue;
                     }
                     let total_items = col.items.len();
                     if total_items == 0 {
                         continue;
                     }
-                    // Same visible-window math as the renderer, used
-                    // here as a heuristic for "what the user is most
-                    // likely about to see". Keeping it consistent with
-                    // the TUI's `render_album_art_grid` formula avoids
-                    // wasted prefetches on rows that are off-screen.
-                    let inner_height = state.terminal_height.saturating_sub(4) as usize;
-                    let target_visible = 3usize.max((total_items).min(5));
-                    let row_height = (inner_height / target_visible).max(3);
-                    let visible_rows = (inner_height / row_height).max(1);
-                    let scroll_offset = crate::services::NavigationService::calc_scroll_offset(
-                        col.selected_index,
-                        visible_rows,
-                        total_items,
-                    );
-                    let end = (scroll_offset + visible_rows).min(total_items);
-                    for item in &col.items[scroll_offset..end] {
+                    let rendered = state
+                        .hit_regions
+                        .miller_item_rows
+                        .iter()
+                        .filter(|(column, _, _)| *column == ci)
+                        .filter_map(|(_, _, row)| col.items.get(*row));
+                    // Desktop does not produce terminal viewport feedback.
+                    let rows = if state.desktop_frontend {
+                        let count = 5.min(total_items);
+                        let start = crate::services::NavigationService::calc_scroll_offset(
+                            col.selected_index,
+                            count,
+                            total_items,
+                        );
+                        &col.items[start..(start + count).min(total_items)]
+                    } else {
+                        &[]
+                    };
+                    for item in rendered.chain(rows.iter()) {
                         if to_load.len() >= max_batch {
                             break 'cols;
                         }
@@ -795,9 +889,6 @@ pub fn handle_app_event(
         Event::Radio(event) => super::events_radio::handle(event, state),
         Event::Playlist(event) => super::events_playlist::handle(event, state),
 
-        // Queue remix batch ready
-
-        // Multi-artist radio complete
         Event::Ui(UiEvent::ArtistInfoLoaded {
             generation,
             request_id,
@@ -815,30 +906,46 @@ pub fn handle_app_event(
                 &mut state.tag_nav,
             ] {
                 for column in &mut nav.columns {
-                    if let Some(crate::app::state::BrowseDetails::Artist(info)) =
-                        &mut column.details
-                    {
+                    let standalone = matches!(
+                        column.details,
+                        Some(crate::app::state::BrowseDetails::Artist(_))
+                    );
+                    let owner = match &mut column.details {
+                        Some(crate::app::state::BrowseDetails::Artist(info)) => Some(info),
+                        _ => column.artist_header.as_mut(),
+                    };
+                    if let Some(info) = owner {
                         if info.request_id != request_id || info.artist_key != artist_key {
                             continue;
                         }
                         info.task = None;
                         info.document = result.take().unwrap().unwrap_or_else(|error| {
                             crate::services::biography::Biography {
+                                unavailable: true,
                                 text: error,
                                 ..Default::default()
                             }
                         });
+                        crate::app::sources::navidrome::album_artists::filter_recommendations(
+                            &state.library,
+                            &mut info.document,
+                        );
+                        state.artist_bios.insert(&info.artist_key, &info.document);
                         picture = info
                             .document
                             .images
                             .get(info.image_index)
                             .map(|image| (info.artist_key.clone(), image.data.clone()));
-                        column.selected_index = 0;
+                        if standalone {
+                            column.selected_index = 0;
+                        }
                         break 'owners;
                     }
                 }
             }
-            if let Some((key, data)) = picture {
+            if let Some((key, data)) = picture
+                && !state.artwork.grid_cache.contains_key(&key)
+            {
                 state.artwork.insert_grid_art(key, data);
             }
             vec![]
@@ -855,9 +962,15 @@ pub fn handle_app_event(
                 popup.task = None;
                 popup.document =
                     result.unwrap_or_else(|error| crate::services::biography::Biography {
+                        unavailable: true,
                         text: error,
                         ..Default::default()
                     });
+                crate::app::sources::navidrome::album_artists::filter_recommendations(
+                    &state.library,
+                    &mut popup.document,
+                );
+                state.artist_bios.insert(&popup.artist_key, &popup.document);
                 popup.scroll = 0;
             }
             vec![]

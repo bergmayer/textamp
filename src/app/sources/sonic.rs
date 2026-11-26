@@ -65,7 +65,7 @@ fn station_blocked(state: &AppState, key: &str) -> bool {
             .station_nav
             .columns
             .iter()
-            .flat_map(|c| &c.stations)
+            .flat_map(|c| c.stations())
             .any(|s| s.key == key && station_requires_sonic(s))
 }
 pub fn action_blocked(state: &AppState, action: &Action) -> bool {
@@ -103,9 +103,7 @@ pub fn action_blocked(state: &AppState, action: &Action) -> bool {
         ) => !state.desktop_frontend,
         Action::Search(SearchAction::AdventureLauncherGenerate) => true,
         Action::Settings(
-            SettingsAction::SetAdventureLength(_)
-            | SettingsAction::AdventureComplete(_)
-            | SettingsAction::AdventureGenerated { .. },
+            SettingsAction::AdventureComplete(_) | SettingsAction::AdventureGenerated { .. },
         ) => true,
         Action::Queue(
             QueueAction::RemixGemini | QueueAction::RemixStretch | QueueAction::RemixDoppelganger,
@@ -179,20 +177,14 @@ pub fn reconcile(state: &mut AppState) {
         state.convert_radio_to_queue("Sonic features disabled");
     }
     for column in &mut state.station_nav.columns {
-        column.stations.retain(|s| !station_requires_sonic(s));
-        column.selected_index = column
-            .selected_index
-            .min(column.stations.len().saturating_sub(1));
+        column.retain_stations(|s| !station_requires_sonic(s));
     }
     state.track_pane_similar.clear();
     state.track_pane_similar_loading.clear();
     state.track_pane_index = 0;
 }
 pub fn cancel_pending(state: &mut AppState) {
-    state.sources.sonic_tasks.clear();
-    state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
     state.adventure_launcher_request_id = state.adventure_launcher_request_id.wrapping_add(1);
-    state.adventure = Default::default();
     state.popups.set_adventure_launcher(None);
     state.similar = Default::default();
     if state.view == View::Similar {

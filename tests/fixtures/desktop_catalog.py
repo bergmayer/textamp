@@ -101,6 +101,9 @@ def response(endpoint, query):
                                  'album': page(ALBUMS, 'album', 'name'),
                                  'song': page(SONGS, 'song', 'title')}}
     if endpoint == 'getLyrics': return {'lyrics': {'artist': 'Fixture', 'title': 'Fixture Song', 'value': 'Synthetic fixture lyrics.\nSecond fixture line.'}}
+    if endpoint == 'getLyricsBySongId' and key == 'song-1-0-0':
+        lines = [{'start': i * 2000, 'value': f'Fixture lyric {i + 1}'} for i in range(30)]
+        return {'lyricsList': {'structuredLyrics': [{'lang': 'en', 'synced': True, 'line': lines}]}}
     if endpoint == 'getLyricsBySongId': return {'lyricsList': {'structuredLyrics': [
         {'lang': 'en', 'synced': True, 'line': [{'start': 0, 'value': 'Synthetic fixture lyrics.'}, {'start': 30000, 'value': 'Second fixture line.'}]},
         {'lang': 'fr', 'synced': False, 'line': [{'value': 'Paroles de test.'}]}]}}

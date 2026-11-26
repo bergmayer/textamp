@@ -29,7 +29,7 @@ impl Desktop {
                 .filter(|column| !column.hidden && !column.metadata)
                 .map(|column| column.identity.clone())
                 .collect(),
-            inspector: self.snapshot.preview.is_some(),
+            inspector: self.snapshot.has_inspector(),
         };
         if self.column_layout.as_ref() == Some(&layout) {
             return;

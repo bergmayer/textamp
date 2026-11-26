@@ -225,6 +225,33 @@ impl Client {
         let value = self.call("getMusicFolders", &[]).await?;
         array(&value["musicFolders"], "musicFolder")
     }
+    /// A track credit can identify a performer omitted from the album-artist index.
+    /// Only a unique exact name in a complete result set can identify that performer.
+    pub(crate) async fn performer(&self, name: &str) -> Result<Option<Artist>> {
+        const LIMIT: usize = 100;
+        let mut params = self.scope();
+        params.extend([
+            ("query", name.to_owned()),
+            ("artistCount", LIMIT.to_string()),
+            ("albumCount", "0".into()),
+            ("songCount", "0".into()),
+        ]);
+        let response = self.call("search3", &params).await?;
+        let rows = array::<Artist>(&response["searchResult3"], "artist")?;
+        if rows.len() >= LIMIT {
+            return Ok(None);
+        }
+        let name = name.trim().to_lowercase();
+        let mut matches = rows.into_iter().filter(|artist| {
+            !artist.id.is_empty() && artist.id != "-1" && artist.name.trim().to_lowercase() == name
+        });
+        let first = matches.next();
+        Ok(if matches.next().is_none() {
+            first
+        } else {
+            None
+        })
+    }
     pub async fn artists(&self) -> Result<Vec<Artist>> {
         let value = self.call("getArtists", &self.scope()).await?;
         let groups: Vec<Value> = array(&value["artists"], "index")?;

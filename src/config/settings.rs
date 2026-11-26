@@ -3,13 +3,32 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlbumLayout {
+    #[default]
+    Grid,
+    List,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceSync {
+    pub name: String,
+    pub completed_at: i64,
+}
+
 /// Root configuration structure.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub players: Vec<crate::services::player_sync::Player>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub player_sync_history: std::collections::BTreeMap<String, DeviceSync>,
+
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub webdav_player_sync: crate::app::player_sync::WebdavPlayers,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub recent_search_results: HashMap<String, Vec<crate::app::library_details::RecentResult>>,
     /// Recent successful descriptions and ranked result IDs, keyed by exact library identity.
     #[serde(default)]
     pub description_history: HashMap<String, Vec<crate::audiomuse::DescriptionHistory>>,
@@ -57,40 +76,27 @@ impl Config {
         }
     }
 
-    /// Resolve rendering for one library and presentation; terminal image choices
-    /// are retained even when the current terminal uses a character fallback.
-    pub fn artwork_mode(
-        &self,
-        lib_key: &str,
-        presentation: crate::app::launch::WindowedMode,
-    ) -> crate::app::state::ArtworkMode {
+    /// Resolve the library's encoding, preferring an explicit legacy GUI choice.
+    pub fn artwork_mode(&self, lib_key: &str) -> crate::app::state::ArtworkMode {
         let library = self.ui.library_view_settings.get(lib_key);
-        let value = match presentation {
-            crate::app::launch::WindowedMode::Text => library
-                .and_then(|view| view.artwork_mode.as_deref())
-                .unwrap_or(&self.ui.artwork_mode),
-            crate::app::launch::WindowedMode::Gui => library
-                .and_then(|view| view.graphical_artwork_mode.as_deref())
-                .unwrap_or("auto"),
-        };
+        let value = library
+            .and_then(|view| {
+                view.graphical_artwork_mode
+                    .as_deref()
+                    .or(view.artwork_mode.as_deref())
+            })
+            .unwrap_or(&self.ui.artwork_mode);
         crate::app::state::ArtworkMode::from_config(value)
     }
-    pub fn set_artwork_mode(
-        &mut self,
-        lib_key: &str,
-        presentation: crate::app::launch::WindowedMode,
-        mode: crate::app::state::ArtworkMode,
-    ) {
+
+    pub fn set_artwork_mode(&mut self, lib_key: &str, mode: crate::app::state::ArtworkMode) {
         let library = self
             .ui
             .library_view_settings
             .entry(lib_key.to_owned())
             .or_default();
-        let value = match presentation {
-            crate::app::launch::WindowedMode::Text => &mut library.artwork_mode,
-            crate::app::launch::WindowedMode::Gui => &mut library.graphical_artwork_mode,
-        };
-        *value = Some(mode.name().to_owned());
+        library.artwork_mode = Some(mode.name().to_owned());
+        library.graphical_artwork_mode = None;
     }
 
     pub fn set_column_artwork(&mut self, lib_key: &str, column_key: &str, visible: bool) {
@@ -169,6 +175,8 @@ fn default_buffer_size() -> u32 {
 /// UI settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiConfig {
+    #[serde(default)]
+    pub library_radio_station: Option<String>,
     /// Most recently activated windowed presentation; external terminals do not change it.
     #[serde(default)]
     pub last_windowed_mode: crate::app::launch::WindowedMode,
@@ -230,8 +238,7 @@ pub struct UiConfig {
     pub hidden_sections: Vec<crate::app::state::BrowseCategory>,
     #[serde(default)]
     pub desktop_hidden_library_roots: Vec<crate::app::state::LibraryRoot>,
-    /// Multiple persistent desktop windows; false uses temporary in-window dialogs.
-    #[serde(default)]
+    #[serde(skip)]
     pub desktop_separate_player: bool,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub last_playlist_destinations: std::collections::HashMap<String, String>,
@@ -240,7 +247,7 @@ pub struct UiConfig {
     #[serde(default)]
     pub command_history: crate::app::command_history::History,
     #[serde(default)]
-    pub desktop_large_album_covers: bool,
+    pub album_layout: AlbumLayout,
     #[serde(default)]
     pub remix_allow_same_artist: bool,
     #[serde(default)]
@@ -253,9 +260,6 @@ pub struct UiConfig {
     /// retain their original configuration format.
     #[serde(default)]
     pub hidden_collections: Vec<crate::app::sources::navidrome::commands::CollectionKind>,
-    /// Keep the desktop player visible alongside the library.
-    #[serde(default, alias = "tall_mode")]
-    pub desktop_split_view: bool,
 }
 
 fn default_hidden_sections() -> Vec<crate::app::state::BrowseCategory> {
@@ -314,6 +318,7 @@ pub struct WindowConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
+            library_radio_station: None,
             last_windowed_mode: Default::default(),
             show_album_art: default_show_album_art(),
             album_art_size: default_album_art_size(),
@@ -332,13 +337,12 @@ impl Default for UiConfig {
             last_playlist_destinations: Default::default(),
             desktop_command_history: vec![],
             command_history: Default::default(),
-            desktop_large_album_covers: false,
+            album_layout: AlbumLayout::Grid,
             remix_allow_same_artist: false,
             show_compilation_only_artists: false,
             singles_track_limit: crate::services::singles::DEFAULT_LIMIT,
             desktop_collapsed_sections: vec![],
             hidden_collections: Vec::new(),
-            desktop_split_view: false,
         }
     }
 }
@@ -407,42 +411,43 @@ fn default_window_height() -> u32 {
 mod desktop_layout_tests {
     use super::*;
     #[test]
-    fn artwork_rendering_is_independent_and_legacy_terminal_choice_survives() {
-        use crate::app::{launch::WindowedMode, state::ArtworkMode};
+    fn legacy_artwork_choice_migrates_to_one_library_setting() {
+        use crate::app::state::ArtworkMode;
         let mut config: Config =
             toml::from_str("[ui]\nartwork_mode = \"braille\"\ncover_art_view = false\n").unwrap();
-        assert_eq!(
-            config.artwork_mode("library", WindowedMode::Text),
-            ArtworkMode::Braille
-        );
-        assert_eq!(
-            config.artwork_mode("library", WindowedMode::Gui),
-            ArtworkMode::Auto
-        );
-        config.set_artwork_mode("library", WindowedMode::Gui, ArtworkMode::Halfblocks);
+        assert_eq!(config.artwork_mode("library"), ArtworkMode::Braille);
+        let library = config
+            .ui
+            .library_view_settings
+            .entry("library".into())
+            .or_default();
+        library.artwork_mode = Some("braille".into());
+        library.graphical_artwork_mode = Some("halfblocks".into());
+        assert_eq!(config.artwork_mode("library"), ArtworkMode::Halfblocks);
+        config.set_artwork_mode("library", ArtworkMode::Auto);
         let saved = toml::to_string(&config).unwrap();
         assert!(!saved.contains("cover_art_view"));
+        assert!(!saved.contains("graphical_artwork_mode"));
         let restored: Config = toml::from_str(&saved).unwrap();
-        assert_eq!(
-            restored.artwork_mode("library", WindowedMode::Text),
-            ArtworkMode::Braille
-        );
-        assert_eq!(
-            restored.artwork_mode("library", WindowedMode::Gui),
-            ArtworkMode::Halfblocks
-        );
+        assert_eq!(restored.artwork_mode("library"), ArtworkMode::Auto);
     }
     #[test]
     fn obsolete_column_sizing_is_ignored_and_not_reserialized() {
-        let mut config: Config =
-            toml::from_str("[ui]\ndesktop_column_sizing = \"fit_content\"\n").unwrap();
-        config.ui.desktop_separate_player = true;
+        let config: Config = toml::from_str(
+            "[ui]\ndesktop_column_sizing = \"fit_content\"\ndesktop_separate_player = true\n",
+        )
+        .unwrap();
+        assert!(!config.ui.desktop_separate_player);
         let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
         assert!(
             !toml::to_string(&restored)
                 .unwrap()
                 .contains("desktop_column_sizing")
         );
-        assert!(restored.ui.desktop_separate_player);
+        assert!(
+            !toml::to_string(&restored)
+                .unwrap()
+                .contains("desktop_separate_player")
+        );
     }
 }

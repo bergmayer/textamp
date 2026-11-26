@@ -135,12 +135,12 @@ pub fn key(key: KeyEvent, app: &mut AppState) -> Option<Vec<Action>> {
         KeyCode::Right if index < 2 => c.details.action_index += 1,
         KeyCode::Left if index > 0 && index < 3 => c.details.action_index -= 1,
         KeyCode::Left | KeyCode::Esc | KeyCode::Backspace => c.details.focused = false,
-        KeyCode::Up => {
-            c.details.action_index = index.saturating_sub(1);
-            c.details.scroll = 0;
-        }
-        KeyCode::Down => {
-            c.details.action_index = (index + 1).min(max_index);
+        KeyCode::Up | KeyCode::Down => {
+            c.details.action_index = crate::app::result_details::vertical_selection(
+                index,
+                max_index,
+                key.code == KeyCode::Down,
+            );
             c.details.scroll = 0;
         }
         KeyCode::Home => {

@@ -180,9 +180,6 @@ pub async fn initialize(
     // Restore artwork mode preference
     state.artwork.mode = crate::app::state::ArtworkMode::from_config(&config.ui.artwork_mode);
 
-    // Restore the desktop split-view preference.
-    state.desktop_split_view = config.ui.desktop_split_view;
-
     // Mirror the per-service "external search enabled" toggles
     // from config onto AppState so the palette / context menus /
     // menu bar can gate their entries without threading Config
@@ -197,7 +194,11 @@ pub async fn initialize(
     state.desktop_hidden_library_roots = config.ui.desktop_hidden_library_roots.clone();
     state.remix_allow_same_artist = config.ui.remix_allow_same_artist;
     state.show_compilation_only_artists = config.ui.show_compilation_only_artists;
-    state.large_artwork = config.ui.desktop_large_album_covers;
+    state
+        .player_sync
+        .history
+        .clone_from(&config.player_sync_history);
+    state.album_grid = config.ui.album_layout == crate::config::AlbumLayout::Grid;
     state.singles_track_limit = config
         .ui
         .singles_track_limit

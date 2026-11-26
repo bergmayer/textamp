@@ -22,12 +22,13 @@ pub(crate) fn reset_current_track(state: &mut AppState) {
     state.consecutive_playback_errors = 0;
 }
 
-/// Look up artist artwork as a fallback when a track has no thumb.
+/// Play the downloaded copy when available, otherwise use the active library.
 pub fn play_current_track(
     event_tx: &mpsc::Sender<Event>,
     state: &mut AppState,
     audio: &mut AudioPlayer,
 ) {
+    state.play_recorded = false;
     if crate::app::downloads::play(state, audio) {
         crate::app::queue_modes::prefetch(state, event_tx);
         return;
@@ -48,28 +49,15 @@ pub fn play_current_track(
 
 /// Compute the list of upcoming tracks to pre-fetch from current state.
 pub fn get_upcoming_tracks(state: &AppState) -> Vec<Track> {
-    match state.playback_mode {
-        PlaybackMode::Queue | PlaybackMode::None => {
-            if let Some(idx) = state.queue.index {
-                let start = idx + 1;
-                let end = (start + 10).min(state.queue.tracks.len());
-                if start < state.queue.tracks.len() {
-                    return state.queue.tracks[start..end].to_vec();
-                }
-            }
-            vec![]
-        }
-        PlaybackMode::Radio => {
-            if let Some(idx) = state.radio.track_index {
-                let start = idx + 1;
-                let end = (start + 10).min(state.radio.tracks.len());
-                if start < state.radio.tracks.len() {
-                    return state.radio.tracks[start..end].to_vec();
-                }
-            }
-            vec![]
-        }
-    }
+    let index = match state.playback_mode {
+        PlaybackMode::Queue | PlaybackMode::None => state.queue.index,
+        PlaybackMode::Radio => state.radio.track_index,
+    };
+    let tracks = state.playback_tracks();
+    index
+        .and_then(|index| tracks.get(index.saturating_add(1)..))
+        .map(|upcoming| upcoming[..upcoming.len().min(10)].to_vec())
+        .unwrap_or_default()
 }
 
 /// Create an adapter channel that converts `AudioEvent` to app `Event`.
@@ -81,7 +69,9 @@ pub(crate) fn audio_event_adapter(event_tx: &mpsc::Sender<Event>) -> mpsc::Sende
     let event_tx = event_tx.clone();
     crate::app::tasks::spawn(async move {
         while let Some(ev) = audio_rx.recv().await {
-            let _ = event_tx.send(ev.into()).await;
+            if event_tx.send(ev.into()).await.is_err() {
+                break;
+            }
         }
     });
     audio_tx
@@ -95,10 +85,6 @@ pub fn play_track(
 
     audio: &mut AudioPlayer,
 ) {
-    // Report stop for currently playing track before switching
-
-    // Generate new session ID for this playback context
-
     crate::app::queue_edit::record(state, "Play track");
     // Migrate radio tracks to queue before clearing radio mode
     if state.playback_mode == PlaybackMode::Radio {
@@ -120,18 +106,7 @@ pub fn play_track(
     play_current_track(event_tx, state, audio);
 }
 
-/// Replace the active queue with `tracks`, start playback at `play_idx`,
-/// and switch to the Queue view.
-///
-/// This consolidates the common queue-management sequence shared by all
-/// "play tracks" handlers (Miller columns, folders, album groups, etc.):
-///   1. Clear radio mode if active
-///   2. Drain played tracks to history
-///   3. Flush the audio pre-fetch cache
-///   4. Splice new tracks into the queue
-///   5. Set queue index, playback mode, list state
-///   6. Switch to Now Playing
-///   7. Start playback
+/// Replace the queue, open its view, and start playback at the selected index.
 pub fn queue_and_play(
     event_tx: &mpsc::Sender<Event>,
     state: &mut AppState,
@@ -206,9 +181,9 @@ pub fn advance_radio(
         return false;
     };
     if index + 1 < state.radio.tracks.len() {
-        state.radio.track_index = Some(index + 1);
+        crate::app::queue_edit::consume(state, index);
         play_current_track(event_tx, state, audio);
-        if state.radio.tracks.len().saturating_sub(index + 2) <= 1 {
+        if state.radio.tracks.len().saturating_sub(index + 1) <= 1 {
             crate::app::sources::radio::refill(event_tx, state);
         }
         true

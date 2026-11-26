@@ -58,6 +58,38 @@ async fn server(stall: bool) -> Server {
             let text = String::from_utf8(request).unwrap();
             let path = text.split_whitespace().nth(1).unwrap();
             let parsed = reqwest::Url::parse(&format!("http://localhost{path}")).unwrap();
+            if parsed.path() == "/rest/scrobble" {
+                let (headers, initial) = text.split_once("\r\n\r\n").unwrap();
+                assert!(headers.starts_with("POST "));
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (k, v) = line.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                let mut body = initial.as_bytes().to_vec();
+                let received = body.len();
+                body.resize(length, 0);
+                connection.read_exact(&mut body[received..]).await.unwrap();
+                let params: HashMap<String, String> = reqwest::Url::parse(&format!(
+                    "http://localhost/?{}",
+                    String::from_utf8(body).unwrap()
+                ))
+                .unwrap()
+                .query_pairs()
+                .into_owned()
+                .collect();
+                assert_eq!(params["submission"], "true");
+                seen.lock()
+                    .unwrap()
+                    .push(format!("listen/{}/{}", params["id"], params["time"]));
+                let ok = br#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#;
+                connection.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",ok.len()).as_bytes()).await.unwrap();
+                connection.write_all(ok).await.unwrap();
+                continue;
+            }
             assert_eq!(parsed.path(), "/rest/download");
             let fields: HashMap<_, _> = parsed.query_pairs().into_owned().collect();
             let id = fields["id"].clone();
@@ -936,6 +968,8 @@ async fn webdav_folders_keep_original_names_and_own_only_their_media_marker() {
     let fresh_target = Target::open(folder.path()).await.unwrap();
     let mut other_computer = source.clone();
     other_computer.id = "second-computer-account".into();
+    let pending_index_path = index_path.clone();
+    let pending_index = interrupted.clone();
     let recovered = player_sync::review_webdav(
         &other_computer,
         &source.id,
@@ -945,6 +979,13 @@ async fn webdav_folders_keep_original_names_and_own_only_their_media_marker() {
         &fresh_downloads,
         |_| {},
         |plan| async move {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(
+                    &std::fs::read(pending_index_path).unwrap()
+                )
+                .unwrap(),
+                pending_index
+            );
             assert_eq!(plan[player_sync::KEEP], [rel]);
             assert!(plan[player_sync::ADD].is_empty());
             Ok(())
@@ -1111,4 +1152,58 @@ async fn webdav_folders_keep_original_names_and_own_only_their_media_marker() {
         );
     }
     server.abort();
+}
+
+#[tokio::test]
+async fn inventory_recognizes_optional_scrobbler_log_and_ignores_skips() {
+    let temp = tempfile::tempdir().unwrap();
+    let volume = Volume {
+        uuid: "card".into(),
+        name: "Player".into(),
+        mount: temp.path().to_owned(),
+        identifier: "card".into(),
+        available: 0,
+        capacity: 0,
+    };
+    let names = Default::default();
+    assert!(
+        player_sync::inventory(&volume, &names)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::write(temp.path().join(".scrobbler.log"),
+        "#AUDIOSCROBBLER/1.1\n#TZ/UTC\nArtist\tAlbum\tPlayed\t1\t200\tL\t1700000000\t\nArtist\tAlbum\tSkipped\t2\t200\tS\t1700000123\t\n").unwrap();
+    let report = player_sync::inventory(&volume, &names).await.unwrap();
+    assert_eq!(
+        report["Player listening history"],
+        ["Artist · Played · Album · 2023-11-14 22:13 UTC"]
+    );
+}
+
+#[tokio::test]
+async fn imports_only_indexed_completed_listens_at_the_logged_time_once() {
+    let server = server(false).await;
+    let client = client(&server);
+    let dir = tempfile::tempdir().unwrap();
+    let volume = mounted_volume(dir.path());
+    let target = Target::open(dir.path()).await.unwrap();
+    player_sync::sync(&client, &target, &volume, &player(), &songs(), |_| {})
+        .await
+        .unwrap();
+    std::fs::write(dir.path().join(".scrobbler.log"),"#AUDIOSCROBBLER/1.1\n#TZ/UTC\nArtist\t\tSong a\t1\t60\tL\t1710000000\t\nArtist\t\tSong b\t2\t60\tS\t1710000001\t\nOther\tBook\tChapter 1\t1\t100\tL\t1710000002\t\n").unwrap();
+    for n in [1, 0] {
+        let result = player_sync::sync(&client, &target, &volume, &player(), &songs(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!((result.listens, result.copied), (n, 0));
+    }
+    let calls = server.calls.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|s| s.starts_with("listen/"))
+            .collect::<Vec<_>>(),
+        ["listen/a/1710000000000"]
+    );
 }

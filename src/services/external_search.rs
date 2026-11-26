@@ -25,6 +25,132 @@ impl SearchTarget {
     }
 }
 
+/// Catalog identity captured when a user invokes an external search.
+#[derive(Debug, Clone)]
+pub enum MusicQuery {
+    Text(String),
+    Artist(String),
+    Album {
+        artist: String,
+        title: String,
+    },
+    Song {
+        artist: String,
+        title: String,
+        album: Option<String>,
+    },
+}
+
+impl From<&str> for MusicQuery {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_owned())
+    }
+}
+
+impl MusicQuery {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(text) | Self::Artist(text) => text.clone(),
+            Self::Album { artist, title } | Self::Song { artist, title, .. } => {
+                if artist.trim().is_empty() {
+                    title.trim().into()
+                } else {
+                    format!("{} - {}", artist.trim(), title.trim())
+                }
+            }
+        }
+    }
+
+    fn catalog_term(&self) -> Option<(&'static str, String)> {
+        match self {
+            Self::Text(_) => None,
+            Self::Artist(name) => Some(("musicArtist", name.clone())),
+            Self::Song { artist, title, .. } => Some(("song", format!("{artist} {title}"))),
+            Self::Album { artist, title } => Some(("album", format!("{artist} {title}"))),
+        }
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct CatalogItem {
+    artist_name: String,
+    collection_name: String,
+    track_name: String,
+    artist_link_url: Option<String>,
+    collection_view_url: Option<String>,
+    track_view_url: Option<String>,
+}
+
+fn catalog_link(query: &MusicQuery, items: &[CatalogItem]) -> Option<String> {
+    let same = |a: &str, b: &str| {
+        !a.trim().is_empty() && a.trim().to_lowercase() == b.trim().to_lowercase()
+    };
+    let mut matches = items.iter().filter_map(|item| {
+        let (link, kind) = match query {
+            MusicQuery::Artist(name) if same(name, &item.artist_name) => {
+                (item.artist_link_url.as_ref()?, "artist")
+            }
+            MusicQuery::Album { artist, title }
+                if same(artist, &item.artist_name) && same(title, &item.collection_name) =>
+            {
+                (item.collection_view_url.as_ref()?, "album")
+            }
+            MusicQuery::Song {
+                artist,
+                title,
+                album,
+            } if same(artist, &item.artist_name)
+                && same(title, &item.track_name)
+                && album
+                    .as_ref()
+                    .is_none_or(|name| same(name, &item.collection_name)) =>
+            {
+                (item.track_view_url.as_ref()?, "album")
+            }
+            _ => return None,
+        };
+        let url = reqwest::Url::parse(link).ok()?;
+        (url.scheme() == "https"
+            && url.host_str() == Some("music.apple.com")
+            && url.path_segments()?.nth(1) == Some(kind))
+        .then_some(link)
+    });
+    let first = matches.next()?;
+    matches.all(|other| other == first).then(|| first.clone())
+}
+
+async fn apple_catalog_link(query: &MusicQuery) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Results {
+        results: Vec<CatalogItem>,
+    }
+    let (entity, term) = query.catalog_term()?;
+    let response = reqwest::Client::new()
+        .get("https://itunes.apple.com/search")
+        .query(&[
+            ("term", term.as_str()),
+            ("country", "US"),
+            ("entity", entity),
+            ("limit", "25"),
+        ])
+        .timeout(Duration::from_secs(4))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    catalog_link(query, &response.json::<Results>().await.ok()?.results)
+}
+
+pub async fn resolve(target: SearchTarget, query: MusicQuery) -> Destination {
+    let mut destination = search_destination(target, &query.text());
+    if target == SearchTarget::AppleMusic {
+        destination.native_url = apple_catalog_link(&query).await;
+    }
+    destination
+}
+
 #[derive(Debug, Clone)]
 pub struct Destination {
     pub target: SearchTarget,
@@ -177,6 +303,46 @@ mod tests {
         assert_eq!(
             url.query_pairs().find(|(key, _)| key == "term").unwrap().1,
             query
+        );
+    }
+
+    #[test]
+    fn song_link_requires_the_requested_release_and_a_unique_apple_destination() {
+        let query = MusicQuery::Song {
+            artist: "Guided By Voices".into(),
+            title: "Doughnut for a Snowman".into(),
+            album: Some("Let's Go Eat the Factory".into()),
+        };
+        let link = "https://music.apple.com/us/album/doughnut-for-a-snowman/480002450?i=480002454";
+        let item = |album: &str, url: &str| CatalogItem {
+            artist_name: "GUIDED BY VOICES".into(),
+            track_name: "Doughnut for a Snowman".into(),
+            collection_name: album.into(),
+            track_view_url: Some(url.into()),
+            ..Default::default()
+        };
+        let release = "Let's Go Eat the Factory";
+        assert_eq!(catalog_link(&query, &[item("Live", link)]), None);
+        assert_eq!(
+            catalog_link(
+                &query,
+                &[item(release, "https://example.com/us/album/title/123")]
+            ),
+            None
+        );
+        assert_eq!(
+            catalog_link(&query, &[item("Live", link), item(release, link)]).as_deref(),
+            Some(link)
+        );
+        assert_eq!(
+            catalog_link(
+                &query,
+                &[
+                    item(release, link),
+                    item(release, "https://music.apple.com/us/album/another/2?i=3")
+                ]
+            ),
+            None
         );
     }
 

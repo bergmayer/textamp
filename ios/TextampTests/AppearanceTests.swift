@@ -6,15 +6,52 @@ import XCTest
 
 @MainActor
 final class AppearanceTests: XCTestCase {
+  func testDismissingPlayerKeepsSurfaceCloseToMovingArtwork() {
+    let screen = CGRect(x: 0, y: 0, width: 400, height: 760)
+    let bar = CGRect(x: 12, y: 692, width: 376, height: 60)
+    let thumbnailTop = bar.minY + 10
+    let coverTop: CGFloat = 134
+    for progress: CGFloat in [0, 0.25, 0.5, 0.75, 1] {
+      let surface = TransportSurface(expansion: progress, bar: bar,
+        compactContentTop: thumbnailTop, expandedContentTop: coverTop).path(in: screen).boundingRect
+      if progress == 1 { XCTAssertEqual(surface, screen); continue }
+      if progress == 0 { XCTAssertEqual(surface, bar) }
+      let artworkTop = thumbnailTop + progress * (coverTop - thumbnailTop)
+      XCTAssertGreaterThanOrEqual(artworkTop - surface.minY, 9.9)
+      XCTAssertLessThan(artworkTop - surface.minY, 18)
+    }
+  }
+
+  func testNamedHeadingUsesCompactFontBeforeTruncating() throws {
+    let title = "Songs in the Key of Life"
+    func width(_ font: Font) -> CGFloat {
+      UIHostingController(rootView: Text(title).font(font).fixedSize())
+        .sizeThatFits(in: CGSize(width: 1000, height: 80)).width
+    }
+    func pixels(_ view: some View, width: CGFloat) throws -> Data {
+      let renderer = ImageRenderer(content: view.frame(width: width, height: 44, alignment: .leading))
+      return try XCTUnwrap(renderer.uiImage?.pngData())
+    }
+    let compact = Font.subheadline.weight(.semibold)
+    let fullWidth = width(.headline)
+    let compactWidth = width(compact)
+    XCTAssertLessThan(compactWidth + 1, fullWidth)
+    let heading = ColumnHeading(title: title, namedDestination: true)
+    for (space, font) in [(fullWidth + 8, Font.headline), (compactWidth + 1, compact), (compactWidth / 2, compact)] {
+      let expected = Text(title).font(font).lineLimit(1).truncationMode(.middle)
+      XCTAssertEqual(try pixels(heading, width: space), try pixels(expected, width: space))
+    }
+  }
+
   func testOnlyOverflowingColumnHeadingsScrollAfterTheDelay() async throws {
     try XCTSkipIf(UIAccessibility.isReduceMotionEnabled, "The marquee respects Reduce Motion")
     let scene = try XCTUnwrap(
       UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
     let window = UIWindow(windowScene: scene)
     let headings = VStack(spacing: 0) {
-      ColumnHeading(title: "A playlist with a title that extends well beyond the column")
+      ColumnHeading(title: "A playlist with a title that extends well beyond the column", namedDestination: true)
         .frame(height: 40)
-      ColumnHeading(title: "Short").frame(height: 40)
+      ColumnHeading(title: "Albums", namedDestination: false).frame(height: 40)
     }.frame(width: 140, height: 80)
     let host = UIHostingController(rootView: headings)
     host.safeAreaRegions = []
@@ -46,14 +83,16 @@ final class AppearanceTests: XCTestCase {
   }
 
   func testAppleMusicSearchUsesOnlyAppHandoffs() async throws {
-    let query = "Qzxv, live? #2 & Δ"
+    let query = "Qzxv, live? C++ #2 & Δ"
     var components = URLComponents()
     components.host = "music.apple.com"
     components.path = "/search"
     components.queryItems = [URLQueryItem(name: "term", value: query)]
     components.scheme = "https"
     let universal = try XCTUnwrap(components.url)
-    let request = ExternalSearchRequest(label: "Apple Music", url: universal, webURL: universal, requiresApp: true)
+    components.path = "/us/search"
+    let storefront = try XCTUnwrap(components.url)
+    let request = ExternalSearchRequest(label: "Apple Music", url: storefront, webURL: storefront, requiresApp: true)
     var attempts: [URL] = []
     let opened = await request.open { url, appOnly in
       attempts.append(url)
@@ -61,14 +100,24 @@ final class AppearanceTests: XCTestCase {
       return false
     }
     XCTAssertFalse(opened)
-    XCTAssertEqual(attempts, [universal])
+    XCTAssertEqual(attempts, [storefront, universal])
     attempts.removeAll()
     let accepted = await request.open { url, _ in
       attempts.append(url)
       return true
     }
     XCTAssertTrue(accepted)
-    XCTAssertEqual(attempts, [universal])
+    XCTAssertEqual(attempts, [storefront])
+    let song = try XCTUnwrap(URL(string: "https://music.apple.com/us/album/doughnut-for-a-snowman/480002450?i=480002454"))
+    let exact = ExternalSearchRequest(label: "Apple Music", url: song, webURL: storefront, requiresApp: true)
+    attempts.removeAll()
+    let fallback = await exact.open { url, appOnly in
+      XCTAssertTrue(appOnly)
+      attempts.append(url)
+      return url == storefront
+    }
+    XCTAssertTrue(fallback)
+    XCTAssertEqual(attempts, [song, storefront])
   }
 
   func testHomeShortcutAcceptsOnlyRegisteredAction() {

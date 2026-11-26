@@ -225,10 +225,8 @@ impl WindowExt for Window {
 
     #[inline]
     fn has_active_dialog(&mut self, cx: &mut App) -> bool {
-        WindowState::read(self, cx)
-            .active_dialogs
-            .iter()
-            .any(|dialog| !dialog.closing)
+        WindowState::try_read(self, cx)
+            .is_some_and(|state| state.active_dialogs.iter().any(|dialog| !dialog.closing))
     }
 
     #[inline]

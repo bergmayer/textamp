@@ -6,7 +6,7 @@ use crate::library::models::Track;
 pub struct Control {
     pub label: String,
     /// A compact provider mark, retaining the full accessible label.
-    pub mark: Option<&'static str>,
+    pub search_provider: Option<crate::services::web_search::Provider>,
     pub actions: std::sync::Arc<Vec<Action>>,
     pub alternate: Option<(String, std::sync::Arc<Vec<Action>>)>,
     next: Option<(String, std::sync::Arc<Vec<Action>>)>,
@@ -17,7 +17,7 @@ impl Control {
     pub fn new(label: impl Into<String>, action: impl Into<Action>) -> Self {
         Self {
             label: label.into(),
-            mark: None,
+            search_provider: None,
             actions: std::sync::Arc::new(vec![action.into()]),
             alternate: None,
             next: None,

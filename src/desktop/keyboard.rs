@@ -21,6 +21,83 @@ pub(super) fn previous_focus(_: &PreviousFocus, window: &mut Window, cx: &mut Ap
     cx.stop_propagation();
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum Pane {
+    Sidebar,
+    Library,
+    Queue,
+    Rail,
+    Transport,
+}
+
+pub(super) struct PaneFocus([FocusHandle; 5]);
+
+impl PaneFocus {
+    pub fn new(cx: &mut App) -> Self {
+        Self(std::array::from_fn(|index| {
+            cx.focus_handle()
+                .tab_stop(index == Pane::Queue as usize || index == Pane::Library as usize)
+        }))
+    }
+
+    pub fn handle(&self, pane: Pane) -> &FocusHandle {
+        &self.0[pane as usize]
+    }
+
+    pub fn step(
+        &self,
+        backwards: bool,
+        within_pane: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        step_pane_focus(&self.0, backwards, within_pane, window, cx)
+    }
+}
+
+/// Walk the native focus order, retaining only stops in the requested pane scope.
+pub(super) fn step_pane_focus(
+    panes: &[FocusHandle],
+    backwards: bool,
+    within_pane: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let current = |window: &Window, cx: &App| {
+        panes
+            .iter()
+            .position(|pane| pane.contains_focused(window, cx))
+    };
+    let initial = window.focused(cx);
+    let pane = current(window, cx);
+    if within_pane && pane.is_none() {
+        return false;
+    }
+    let mut first = None;
+    loop {
+        if backwards {
+            window.focus_prev(cx);
+        } else {
+            window.focus_next(cx);
+        }
+        let focused = window.focused(cx);
+        if focused.is_none() || focused == initial || focused == first {
+            if let Some(initial) = initial {
+                initial.focus(window, cx);
+            }
+            break;
+        }
+        if (current(window, cx) == pane) == within_pane {
+            break;
+        }
+        if first.is_none() {
+            first = focused;
+        }
+    }
+    cx.stop_propagation();
+    true
+}
+
 pub(super) fn bind_navigation_shortcuts(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(
         "f7",

@@ -65,10 +65,7 @@ fn render_select_step(
 ) {
     let t = theme();
 
-    let title = format!(
-        " Artist Mix · {} selected ",
-        picker.selected_artists.len()
-    );
+    let title = format!(" Artist Mix · {} selected ", picker.selected_artists.len());
 
     let block = Block::default()
         .title(title)

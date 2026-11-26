@@ -10,6 +10,47 @@ use crate::library::models::Track;
 
 /// Handle Queue view keys (track list + sidebar buttons).
 pub(super) fn handle_queue_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
+    use crate::app::queue_controls::Menu;
+    if key.code == KeyCode::Char('h') {
+        return vec![QueueAction::ShowHistory(!state.showing_queue_history).into()];
+    }
+    match key.code {
+        KeyCode::Char('M') => return Menu::QueueType.open(state),
+        KeyCode::Char('T') => return Menu::Tools.open(state),
+        _ => {}
+    }
+    if state.showing_queue_history {
+        if matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            state.scroll.history_offset = None;
+        }
+        match key.code {
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('+') => {
+                use crate::app::track_context::ContextKind;
+                let command = match key.code {
+                    KeyCode::Right => {
+                        ContextKind::ShowDetails(crate::app::library_details::Destination::Track)
+                    }
+                    KeyCode::Char('+') => ContextKind::PlayNextInQueue,
+                    _ => ContextKind::PlayTrack,
+                };
+                return state
+                    .listening_history
+                    .get(state.history_cursor)
+                    .map(|p| crate::app::listening_history::track_action(&p.id, command))
+                    .into_iter()
+                    .collect();
+            }
+            KeyCode::Up => state.history_cursor = state.history_cursor.saturating_sub(1),
+            KeyCode::Down => {
+                state.history_cursor =
+                    (state.history_cursor + 1).min(state.listening_history.len().saturating_sub(1))
+            }
+            KeyCode::Char('c') => return vec![QueueAction::ClearHistory.into()],
+            KeyCode::Left | KeyCode::Esc => return vec![QueueAction::ShowHistory(false).into()],
+            _ => {}
+        }
+        return vec![];
+    }
     if state.tui_queue_type_focused {
         match key.code {
             KeyCode::Enter | KeyCode::Char(' ') => {

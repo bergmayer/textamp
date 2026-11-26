@@ -22,6 +22,7 @@ pub enum Operation {
 }
 #[derive(Clone)]
 pub struct Item {
+    pub glyph: Option<gpui_kit::assets::IconName>,
     pub key: String,
     pub label: String,
     pub selected: bool,
@@ -60,9 +61,14 @@ pub struct HelpSection {
     pub rows: &'static [(&'static str, &'static str)],
 }
 #[derive(Clone)]
-pub struct SaveFile {
-    pub suggested_name: String,
-    pub action: Action,
+pub enum PlaylistFile {
+    Import {
+        generation: u64,
+    },
+    Export {
+        suggested_name: String,
+        action: Action,
+    },
 }
 #[derive(Clone, Default)]
 pub struct Surface {
@@ -71,7 +77,9 @@ pub struct Surface {
     pub title: String,
     pub layout: WindowLayout,
     pub fixed_size: bool,
-    pub save_file: Option<SaveFile>,
+    pub library_inspector: bool,
+    pub player_reader: bool,
+    pub playlist_file: Option<PlaylistFile>,
     pub help: Vec<HelpSection>,
     context_key: String,
     pub text: String,
@@ -95,6 +103,7 @@ pub struct Surface {
     pub radio: Option<super::radio::Model>,
     pub lyrics: Option<crate::app::lyrics::View>,
     pub query: String,
+    pub bio_search: Option<crate::services::web_search::Provider>,
     pub image: Option<Vec<u8>>,
 }
 impl Surface {
@@ -114,6 +123,7 @@ impl Surface {
     fn button(&mut self, label: impl Into<String>, operation: Operation) {
         let label = label.into();
         self.buttons.push(Item {
+            glyph: None,
             aliases: vec![],
             key: label.clone(),
             label,
@@ -134,6 +144,7 @@ impl Surface {
         index: usize,
     ) {
         self.rows.push(Item {
+            glyph: None,
             aliases: vec![],
             key: key.into(),
             label: label.into(),
@@ -151,6 +162,9 @@ impl Surface {
     fn finish(mut self) -> Self {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.id.hash(&mut h);
+        if self.library_inspector {
+            self.text.hash(&mut h);
+        }
         self.palette_path.hash(&mut h);
         self.disabled_rows.hash(&mut h);
         self.context_key.hash(&mut h);
@@ -164,6 +178,7 @@ impl Surface {
             .chain(&self.tabs)
             .chain(&self.endpoints)
         {
+            item.glyph.hash(&mut h);
             item.key.hash(&mut h);
             item.aliases.hash(&mut h);
             item.label.hash(&mut h);
@@ -232,7 +247,12 @@ fn result_rows(
         rows.extend(results.tracks.iter().map(|t| {
             (
                 t.rating_key.clone(),
-                format!("{}\n{} · {}", t.title, t.track_artist(), t.album_name()),
+                format!(
+                    "{}\nTrack · {} · {}",
+                    t.title,
+                    t.track_artist(),
+                    t.album_name()
+                ),
             )
         }));
     }
@@ -248,6 +268,7 @@ fn result_rows(
 fn tabs(model: &mut Surface, selected: SearchTab) {
     for (index, tab) in SearchTab::all().iter().enumerate() {
         model.tabs.push(Item {
+            glyph: None,
             aliases: vec![],
             key: tab.name().into(),
             label: tab.name().into(),
@@ -304,6 +325,7 @@ pub fn project(state: &AppState) -> Option<Surface> {
             }
             // Window and layout commands are handled by the desktop adapter.
             m.rows.push(Item {
+                glyph: None,
                 aliases: entry.aliases,
                 key: entry.label.clone(),
                 label: entry.label,
@@ -464,15 +486,21 @@ pub(super) fn content(state: &AppState) -> Option<Surface> {
             } else {
                 m.field("", dialog.input.as_str(), false);
             }
+            if let InputDialogAction::ImportPlaylist { generation } = &dialog.action_type {
+                m.context_key = format!("import:{generation}");
+                m.playlist_file = Some(PlaylistFile::Import {
+                    generation: *generation,
+                });
+            }
             if let InputDialogAction::ExportPlaylist {
                 generation,
-                tracks,
+                contents,
                 format,
             } = &dialog.action_type
             {
                 m.context_key = format!("export:{generation}:{}", format.extension());
                 let path = std::path::PathBuf::from(dialog.input.as_str());
-                m.save_file = Some(SaveFile {
+                m.playlist_file = Some(PlaylistFile::Export {
                     suggested_name: path
                         .file_name()
                         .unwrap_or_default()
@@ -480,8 +508,7 @@ pub(super) fn content(state: &AppState) -> Option<Surface> {
                         .into_owned(),
                     action: QueueAction::ExportPlaylist {
                         generation: *generation,
-                        tracks: tracks.clone(),
-                        format: *format,
+                        contents: contents.clone(),
                         path,
                     }
                     .into(),
@@ -495,6 +522,7 @@ pub(super) fn content(state: &AppState) -> Option<Surface> {
         }
         Modal::Lyrics(panel) => {
             let mut m = Surface::new("lyrics", state, format!("Lyrics · {}", panel.track.title));
+            m.player_reader = true;
             m.layout = WindowLayout::Reading;
             let view = crate::app::lyrics::view(state).unwrap();
             m.loading = view.loading;
@@ -507,6 +535,7 @@ pub(super) fn content(state: &AppState) -> Option<Surface> {
             });
             for (index, label) in view.languages.iter().enumerate() {
                 m.tabs.push(Item {
+                    glyph: None,
                     key: format!("language:{index}"),
                     label: label.clone(),
                     aliases: vec![],
@@ -535,6 +564,7 @@ pub(super) fn content(state: &AppState) -> Option<Surface> {
                 state,
                 &popup.title,
             );
+            m.player_reader = popup.album_notes;
             m.loading = false;
             m.text = popup.text.clone();
             if let Some(query) = &popup.lyrics_query {
@@ -616,24 +646,8 @@ pub(super) fn content(state: &AppState) -> Option<Surface> {
                 state,
                 &popup.artist_name,
             );
+            m.player_reader = true;
             m.layout = WindowLayout::Reading;
-            if state
-                .sources
-                .active
-                .capabilities()
-                .supports(crate::library::capabilities::Feature::ArtistRadio)
-            {
-                m.button(
-                    "Artist Mix",
-                    Operation::Actions(vec![
-                        crate::app::action::RadioAction::StartArtistRadio {
-                            key: popup.artist_key.clone(),
-                            title: popup.artist_name.clone(),
-                        }
-                        .into(),
-                    ]),
-                );
-            }
             m.loading = popup.task.is_some();
             m.text = if popup.task.is_some() {
                 "Loading biography…".into()
@@ -655,10 +669,7 @@ pub(super) fn content(state: &AppState) -> Option<Surface> {
                     Operation::Actions(vec![SearchAction::OpenBiographySource.into()]),
                 );
             }
-            m.button(
-                state.web_search_provider.search_label(),
-                Operation::Actions(vec![SearchAction::SearchBiographyOnWeb.into()]),
-            );
+            m.bio_search = Some(state.web_search_provider);
             m
         }
         Modal::ArtistRadioPicker(picker) => {
@@ -779,6 +790,7 @@ pub(super) fn content(state: &AppState) -> Option<Surface> {
             .filter(|(_, step)| !radio || *step == AdventureStep::FindStartTrack)
             {
                 m.endpoints.push(Item {
+                    glyph: None,
                     key: label.into(),
                     label: summary(if step == AdventureStep::FindStartTrack {
                         &launcher.start_track
@@ -791,7 +803,7 @@ pub(super) fn content(state: &AppState) -> Option<Surface> {
                 });
             }
             match &launcher.stage {
-                JourneyStage::Generating => {
+                JourneyStage::Generating { .. } => {
                     m.form_hidden = true;
                     m.loading = true;
                     m.text =
@@ -813,6 +825,7 @@ pub(super) fn content(state: &AppState) -> Option<Surface> {
                     );
                     for (index, track) in tracks.iter().enumerate() {
                         m.rows.push(Item {
+                            glyph: None,
                             key: track.rating_key.clone(),
                             label: format!(
                                 "{}. {}\n{} · {}",
@@ -887,7 +900,16 @@ fn search(state: &AppState) -> Surface {
     m.layout = WindowLayout::Browser;
     m.field("Search", &state.search.query, false);
     tabs(&mut m, state.search.tab);
-    if let Some(results) = &state.search.results {
+    if state.search.query.is_empty() {
+        for (i, result) in state.search.recent.iter().enumerate() {
+            m.row(
+                format!("recent-{i}"),
+                format!("{} · {}", result.kind_label(), result.label),
+                i == state.list_state.search_item_index,
+                i,
+            );
+        }
+    } else if let Some(results) = &state.search.results {
         for (i, (key, label)) in result_rows(results, state.search.tab)
             .into_iter()
             .enumerate()
@@ -906,8 +928,10 @@ fn search(state: &AppState) -> Surface {
 
 fn library(state: &AppState, dialog: &LibraryDialog) -> Surface {
     let mut m = Surface::new("library-options", state, "Library");
+    m.loading = false;
     match dialog {
         LibraryDialog::Library(options) => {
+            m.library_inspector = true;
             m.id.push_str(&format!(":{:?}", options.choice.artwork_key()));
             m.title = options.choice.label();
             let key = options.choice.artwork_key();
@@ -929,14 +953,73 @@ fn library(state: &AppState, dialog: &LibraryDialog) -> Surface {
                         format!("{count} images · {}", crate::util::format_bytes(*bytes))
                     })
                     .unwrap_or_else(|| "Measuring…".into());
-                m.text = format!("Metadata: {metadata}\nDownloaded artwork: {artwork}");
+                let mut details = vec![
+                    format!("Metadata and analysis   {metadata}"),
+                    format!("Downloaded artwork   {artwork}"),
+                ];
+                if matches!(
+                    options.choice,
+                    crate::app::sources::LibraryChoice::Navidrome { .. }
+                ) {
+                    let timestamp = key
+                        .as_ref()
+                        .and_then(|k| state.settings_state.catalog_sync_times.get(k))
+                        .and_then(|t| {
+                            time::OffsetDateTime::from_unix_timestamp((*t).try_into().ok()?).ok()
+                        });
+                    let date = timestamp
+                        .map(|utc| {
+                            let local = utc.to_offset(
+                                time::UtcOffset::local_offset_at(utc)
+                                    .unwrap_or(time::UtcOffset::UTC),
+                            );
+                            format!(
+                                "{} at {:02}:{:02}",
+                                local.date(),
+                                local.hour(),
+                                local.minute()
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            if state.settings_state.cache_task.is_some() {
+                                "Checking…".into()
+                            } else {
+                                "No full sync recorded".into()
+                            }
+                        });
+                    details.insert(0, format!("Last full Navidrome sync   {date}"));
+                }
+                if crate::app::sources::cache::running(&options.choice, state) {
+                    details.push(crate::app::sources::cache::status(&options.choice, state));
+                }
+                m.text = details.join("\n");
             }
-
-            for (i, (_, label)) in options.items(state).into_iter().enumerate() {
-                m.row(label.clone(), label, i == options.selected, i);
+            use crate::app::sources::options::{OptionAction, OptionsPage};
+            for (index, (action, label)) in options.items(state).into_iter().enumerate() {
+                let op = Operation::Row(index);
+                match action {
+                    OptionAction::Close => {}
+                    OptionAction::Rescan if options.page != OptionsPage::Cache => {}
+                    OptionAction::Sonic => {
+                        let enabled =
+                            crate::app::sources::sonic::choice_key(&options.choice, state)
+                                .is_some_and(|key| {
+                                    !state.sources.sonic_disabled_libraries.contains(&key)
+                                });
+                        m.toggles.push(Toggle {
+                            disabled: false,
+                            control: ChoiceControl::Checkbox,
+                            label: "Sonic / AI features".into(),
+                            checked: enabled,
+                            operation: op,
+                        });
+                    }
+                    _ => m.button(label.replace("...", "…"), op),
+                }
             }
             for page in options.pages(state) {
                 m.tabs.push(Item {
+                    glyph: None,
                     aliases: vec![],
                     key: page.name().into(),
                     label: page.name().into(),
@@ -1204,7 +1287,18 @@ pub fn apply(
 ) -> Vec<Action> {
     match operation {
         Operation::Native(_) => vec![],
-        Operation::RadioSelect { column, key } => super::radio::select(state, column, &key),
+        Operation::RadioSelect { column, key } => {
+            let actions = super::radio::select(state, column, &key);
+            if state
+                .station_nav
+                .columns
+                .get(column + 1)
+                .is_some_and(|child| child.key.as_deref() == Some(&key))
+            {
+                state.station_nav.focused_column = column + 1;
+            }
+            actions
+        }
         Operation::Actions(actions) => actions,
         Operation::Palette(command) => {
             if crate::app::command_catalog::disabled_reason(state, &command).is_some() {
@@ -1431,7 +1525,7 @@ mod tests {
             &Default::default(),
         );
         assert!(
-            matches!(actions.as_slice(), [Action::System(SystemAction::OpenExternalSearch { query: Some(query), .. })] if query == "Momus - Spacewalk")
+            matches!(actions.as_slice(), [Action::System(SystemAction::OpenExternalSearch { query: Some(query), .. })] if query.text() == "Momus - Spacewalk")
         );
     }
     use crate::library::models::{Album, Artist, Genre, Playlist, SearchResults, Track};
@@ -1440,6 +1534,7 @@ mod tests {
         let mut state = AppState::new();
         state.library_loading = true;
         state.popups.set_text(Some(TextPopup {
+            album_notes: false,
             lyrics_query: None,
             title: "Lyrics · Track".into(),
             text: "Loading…".into(),
@@ -1551,7 +1646,10 @@ mod tests {
         let model = project(&state).unwrap();
         assert_eq!(model.primary.as_deref(), Some(crate::app::journey::PREVIEW));
         assert_eq!(model.endpoints.len(), 2);
-        assert!(!state.adventure.generating);
+        assert!(matches!(
+            state.popups.adventure_launcher().unwrap().stage,
+            JourneyStage::Choosing
+        ));
         assert!(state.queue.tracks.is_empty());
         assert!(
             state
@@ -1597,15 +1695,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn player_tools_are_available_and_run_from_library_fullscreen_and_split_views() {
-        for (fullscreen, split) in [(false, false), (true, false), (false, true)] {
+    async fn player_tools_are_available_and_run_from_library_and_fullscreen() {
+        for fullscreen in [false, true] {
             let mut state = AppState::new();
             state.fullscreen = if fullscreen {
                 crate::app::state::FullscreenView::Visualizer
             } else {
                 crate::app::state::FullscreenView::Closed
             };
-            state.desktop_split_view = split;
             state.queue.tracks = ["one", "two", "three"]
                 .map(|key| Track {
                     rating_key: key.into(),
@@ -1614,47 +1711,24 @@ mod tests {
                 })
                 .into();
             state.queue.index = Some(0);
-            state.palette.open = true;
-            let model = project(&state).unwrap();
-            assert_eq!(
-                model
-                    .rows
-                    .iter()
-                    .filter(|r| r.label.starts_with("DJ "))
-                    .count(),
-                0
-            );
-            assert_eq!(
-                model
-                    .rows
-                    .iter()
-                    .filter(|r| matches!(
-                        r.operation,
-                        Operation::Palette(
-                            PaletteCommandKind::RemixGemini
-                                | PaletteCommandKind::RemixTwofer
-                                | PaletteCommandKind::RemixStretch
-                                | PaletteCommandKind::RemixDoppelganger
-                                | PaletteCommandKind::RemixOppositeDay
-                                | PaletteCommandKind::RemixEnemies
-                                | PaletteCommandKind::RemixShuffle
-                                | PaletteCommandKind::RemixUndoShuffle
-                        )
-                    ))
-                    .count(),
-                8
-            );
             let mut audio = crate::audio::AudioPlayer::new_without_audio();
             let mut config = crate::config::Config::default();
             let (tx, _rx) = tokio::sync::mpsc::channel(16);
-            for label in ["Shuffle", "Undo Shuffle"] {
+            for shuffled in [true, false] {
                 state.palette.open = true;
                 let model = project(&state).unwrap();
                 let operation = model
                     .rows
                     .iter()
-                    .find(|r| r.label == label)
-                    .unwrap()
+                    .find(|r| {
+                        matches!(
+                            r.operation,
+                            Operation::Palette(PaletteCommandKind::QueueTool(
+                                crate::app::presentation::NpSidebarButton::Shuffle
+                            ))
+                        )
+                    })
+                    .expect("available queue edit")
                     .operation
                     .clone();
                 for action in apply(operation, &mut state, &config) {
@@ -1668,6 +1742,10 @@ mod tests {
                     .await
                     .unwrap();
                 }
+                assert_eq!(
+                    state.queue.sort_mode == crate::app::state::QueueSortMode::Shuffle,
+                    shuffled
+                );
             }
             assert_eq!(
                 state
@@ -1784,7 +1862,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn album_view_options_offer_covers_without_playlist_grouping() {
+    async fn album_view_options_offer_grid_and_list_without_playlist_grouping() {
         let mut state = AppState::new();
         state.library_loading = true;
         state.artist_nav.columns = vec![BrowseColumn::new(
@@ -1815,12 +1893,9 @@ mod tests {
             !model.loading,
             "View Options must not inherit library loading"
         );
-        assert!(
-            model
-                .toggles
-                .iter()
-                .any(|toggle| toggle.label == "Show artwork")
-        );
+        for layout in ["Grid", "List"] {
+            assert!(model.toggles.iter().any(|toggle| toggle.label == layout));
+        }
         assert!(
             !model
                 .toggles
@@ -1938,10 +2013,15 @@ mod tests {
             }],
         };
         let rows = result_rows(&results, SearchTab::Global);
-        for (index, (key, _)) in rows.iter().enumerate() {
+        for (index, (key, label)) in rows.iter().enumerate() {
             let (tab, local) =
                 crate::app::handlers::dispatch_search::resolve_global_index(&results, index);
             assert_eq!(*key, result_rows(&results, tab)[local].0);
+            assert!(
+                label
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{} · ", tab.result_kind())))
+            );
         }
     }
     #[test]
@@ -1961,10 +2041,13 @@ mod tests {
             let actions = apply(operation, &mut state, &Default::default());
             assert!(matches!(
                 actions.as_slice(),
-                [Action::Browse(BrowseAction::OpenDetailsInLibrary {
-                    destination: crate::app::library_details::Destination::Track,
-                    ..
-                })]
+                [
+                    Action::Settings(SettingsAction::RememberSearchResult(_)),
+                    Action::Browse(BrowseAction::OpenDetailsInLibrary {
+                        destination: crate::app::library_details::Destination::Track,
+                        ..
+                    })
+                ]
             ));
         }
     }
@@ -2078,7 +2161,7 @@ mod tests {
             input: "Queue.csv".into(),
             action_type: InputDialogAction::ExportPlaylist {
                 generation: state.library_generation,
-                tracks: state.queue.tracks.clone(),
+                contents: std::sync::Arc::new(b"Title,Artist".to_vec()),
                 format: crate::services::playlist_export::Format::Csv,
             },
         }));
@@ -2087,7 +2170,7 @@ mod tests {
         let after = project(&state).unwrap();
         assert_eq!(before.id, after.id);
         assert_eq!(before.revision, after.revision);
-        assert!(after.save_file.is_some());
+        assert!(after.playlist_file.is_some());
     }
 }
 
@@ -2111,14 +2194,14 @@ pub(super) fn sidebar_group(state: &AppState, title: &str, selected: usize) -> O
         .into_iter()
         .enumerate()
     {
-        model.row(
-            row.playlist_key
-                .clone()
-                .unwrap_or_else(|| row.label.clone()),
-            row.label.clone(),
-            ordinal == selected,
-            index,
-        );
+        model.rows.push(Item {
+            glyph: super::sidebar::glyph(&row),
+            key: row.playlist_key.unwrap_or_else(|| row.label.clone()),
+            label: row.label,
+            aliases: vec![],
+            selected: ordinal == selected,
+            operation: Operation::Row(index),
+        });
     }
     Some(model.finish())
 }
@@ -2137,5 +2220,12 @@ mod sidebar_group_tests {
         let rows = super::super::catalog::sidebar(&state);
         assert_eq!(rows[index].library_root, Some(LibraryRoot::Albums));
         assert!(model.rows[0].selected);
+        for item in &model.rows {
+            let Operation::Row(index) = item.operation else {
+                panic!("Expected destination")
+            };
+            assert!(item.glyph.is_some());
+            assert_eq!(item.glyph, super::super::sidebar::glyph(&rows[index]));
+        }
     }
 }

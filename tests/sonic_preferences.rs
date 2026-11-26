@@ -159,13 +159,13 @@ async fn disabled_commands_neither_start_requests_nor_change_the_queue() {
 }
 
 #[test]
-fn disabled_features_disappear_from_palette_context_and_station_navigation() {
+fn disabled_sonic_tools_cannot_run_and_sonic_stations_are_hidden() {
     let (mut state, choice) = nav_state(None);
     state.view = View::Queue;
     load_stations(&mut state);
     assert!(
         state.station_nav.columns[0]
-            .stations
+            .stations()
             .iter()
             .any(|s| s.key == "nav-radio/sonic")
     );
@@ -173,13 +173,13 @@ fn disabled_features_disappear_from_palette_context_and_station_navigation() {
     sonic::reconcile(&mut state);
     assert!(
         state.station_nav.columns[0]
-            .stations
+            .stations()
             .iter()
             .any(|s| s.key == "nav-radio/randomAlbum")
     );
     assert!(
         state.station_nav.columns[0]
-            .stations
+            .stations()
             .iter()
             .any(|s| s.key == "nav-radio/randomArtist")
     );
@@ -188,14 +188,27 @@ fn disabled_features_disappear_from_palette_context_and_station_navigation() {
             .station_nav
             .columns
             .iter()
-            .flat_map(|c| &c.stations)
+            .flat_map(|c| c.stations())
             .any(sonic::station_requires_sonic)
     );
     let entries = textamp::app::command_palette::materialize_entries(&state);
-    assert!(!entries.iter().any(|e| e.label.contains("Sonic")
-        || e.label.contains("Twins")
-        || e.label.contains("Stretch")
-        || e.label.contains("Freeze")));
+    use textamp::app::state::PaletteCommandKind;
+    let disabled: Vec<_> = entries
+        .into_iter()
+        .filter(|entry| {
+            matches!(
+                entry.command,
+                PaletteCommandKind::RemixGemini
+                    | PaletteCommandKind::RemixStretch
+                    | PaletteCommandKind::SonicAdventure
+            )
+        })
+        .collect();
+    assert!(!disabled.is_empty());
+    for entry in disabled {
+        assert!(textamp::app::command_catalog::disabled_reason(&state, &entry.command).is_some());
+        assert!(textamp::app::command_palette::run(entry.command, &mut state).is_empty());
+    }
     let contexts =
         textamp::app::track_context::track_context_entries(&state, &Default::default(), false);
     assert!(
@@ -207,7 +220,7 @@ fn disabled_features_disappear_from_palette_context_and_station_navigation() {
     load_stations(&mut state);
     assert!(
         state.station_nav.columns[0]
-            .stations
+            .stations()
             .iter()
             .any(|s| s.key == "nav-radio/sonic")
     );
@@ -301,8 +314,8 @@ async fn disabling_cancels_work_without_stopping_current_music() {
     let task = tokio::spawn(std::future::pending::<()>());
     state
         .sources
-        .sonic_tasks
-        .insert("remix", textamp::app::tasks::TaskLease::new(&task));
+        .nav_tasks
+        .insert("remix", (1, textamp::app::tasks::TaskLease::new(&task)));
     let epoch = state.radio_generation;
     disable(&mut state, &choice);
     sonic::cancel_pending(&mut state);
@@ -350,9 +363,8 @@ async fn journey_preview_preserves_queue_until_play_and_cancel_rejects_completio
         )
         .await
         .unwrap();
-        state.adventure.generating = true;
-        state.adventure_request_id = 10;
-        state.popups.adventure_launcher_mut().unwrap().stage = JourneyStage::Generating;
+        state.popups.adventure_launcher_mut().unwrap().stage =
+            JourneyStage::Generating { request_id: 10 };
         let tracks: Vec<_> = ["A", "B", "C"]
             .into_iter()
             .map(|artist| Track {
@@ -377,7 +389,7 @@ async fn journey_preview_preserves_queue_until_play_and_cancel_rejects_completio
         .unwrap();
         assert!(matches!(
             state.popups.adventure_launcher().unwrap().stage,
-            JourneyStage::Generating
+            JourneyStage::Generating { request_id: 10 }
         ));
         dispatch_action(
             SettingsAction::AdventureGenerated {
@@ -418,8 +430,9 @@ async fn journey_preview_preserves_queue_until_play_and_cancel_rejects_completio
         )
         .await
         .unwrap();
-        state.adventure.generating = true;
-        let request_id = state.adventure_request_id;
+        let request_id = 11;
+        state.popups.adventure_launcher_mut().unwrap().stage =
+            JourneyStage::Generating { request_id };
         dispatch_action(
             SearchAction::CloseAdventureLauncher.into(),
             &mut state,
@@ -432,7 +445,7 @@ async fn journey_preview_preserves_queue_until_play_and_cancel_rejects_completio
         dispatch_action(
             SettingsAction::AdventureGenerated {
                 request_id,
-                result: Ok(vec![original]),
+                result: Ok(tracks.into_iter().rev().collect()),
             }
             .into(),
             &mut state,
@@ -444,6 +457,7 @@ async fn journey_preview_preserves_queue_until_play_and_cancel_rejects_completio
         .unwrap();
         assert!(state.popups.adventure_launcher().is_none());
         assert_eq!(state.queue.tracks.len(), 3);
+        assert_eq!(state.queue.tracks[0].rating_key, "A");
     }
 }
 
@@ -571,6 +585,9 @@ async fn endpoint_search_edits_invalidate_only_the_edited_selection_without_play
     assert!(launcher.start_track.is_some());
     assert!(launcher.end_track.is_none());
     assert_eq!(launcher.query, "New endpoint");
-    assert!(!state.adventure.generating);
+    assert!(matches!(
+        launcher.stage,
+        textamp::app::state::JourneyStage::Choosing
+    ));
     assert!(state.queue.tracks.is_empty());
 }

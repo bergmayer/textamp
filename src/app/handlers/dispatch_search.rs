@@ -4,7 +4,7 @@
 //! ExecuteListFilter, OpenSearchPopup, CloseSearchPopup, OpenLibraryPicker,
 //! CloseLibraryPicker.
 
-use crate::app::action::{BrowseAction, SearchAction};
+use crate::app::action::SearchAction;
 use crate::app::event::*;
 use crate::app::state::{BrowseCategory, BrowseItem, SearchFocus, SearchTab, View};
 use crate::app::{Action, AppState, Event};
@@ -191,6 +191,9 @@ pub fn dispatch(
         }
 
         SearchAction::SelectSearchResult => {
+            if state.search.query.is_empty() && !state.search.recent.is_empty() {
+                return Ok(crate::app::library_details::search_result_actions(state));
+            }
             let section = state.search.results.as_ref().map(|results| {
                 if state.search.tab == SearchTab::Global {
                     resolve_global_index(results, state.list_state.search_item_index).0
@@ -228,8 +231,18 @@ pub fn dispatch(
                 }
                 return Ok(vec![]);
             }
-            let follow_up_actions = select_search_result(state);
-            follow_ups.extend(follow_up_actions);
+            if let Some(result) = selected_collection(state) {
+                follow_ups.push(
+                    crate::app::action::SettingsAction::RememberSearchResult(Box::new(
+                        result.clone(),
+                    ))
+                    .into(),
+                );
+                follow_ups.extend(open_collection(state, &result));
+            }
+        }
+        SearchAction::OpenRecentResult(result) => {
+            follow_ups.extend(open_collection(state, &result));
         }
         SearchAction::SetSearchQuery(q) => {
             if state.search.query == q {
@@ -635,11 +648,6 @@ pub fn dispatch(
                     end_track: None,
                     track_count_input: "20".to_string(),
                     scroll_pin: None,
-                    // Journey only ever picks tracks (start /
-                    // end), so force the tracks tab — that path makes
-                    // `adventure_launcher_select_track` index directly
-                    // into `results.tracks` without an artist+album
-                    // offset.
                     search_tab: crate::app::state::SearchTab::Tracks,
                 }));
         }
@@ -667,22 +675,11 @@ pub fn dispatch(
                     end_track: None,
                     track_count_input: "20".to_string(),
                     scroll_pin: None,
-                    // Journey only ever picks tracks (start /
-                    // end), so force the tracks tab — that path makes
-                    // `adventure_launcher_select_track` index directly
-                    // into `results.tracks` without an artist+album
-                    // offset.
                     search_tab: crate::app::state::SearchTab::Tracks,
                 }));
         }
         SearchAction::CloseAdventureLauncher => {
-            if state.popups.adventure_launcher().is_some_and(|launcher| {
-                launcher.purpose == crate::app::state::TrackPickerPurpose::Journey
-            }) {
-                state.sources.sonic_tasks.remove("adventure");
-                state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
-                state.adventure = Default::default();
-            }
+            crate::app::journey::cancel_preview(state);
             state.adventure_launcher_request_id =
                 state.adventure_launcher_request_id.wrapping_add(1);
             state.popups.set_adventure_launcher(None);
@@ -702,9 +699,7 @@ pub fn dispatch(
             }
         }
         SearchAction::AdventureLauncherEdit => {
-            state.sources.sonic_tasks.remove("adventure");
-            state.adventure_request_id = state.adventure_request_id.wrapping_add(1);
-            state.adventure = Default::default();
+            crate::app::journey::cancel_preview(state);
             if let Some(launcher) = state.popups.adventure_launcher_mut() {
                 launcher.stage = crate::app::state::JourneyStage::Choosing;
                 launcher.loading = false;
@@ -753,6 +748,10 @@ pub fn dispatch(
         SearchAction::AdventureLauncherSetEndpointQuery { step, query } => {
             if let Some(launcher) = state.popups.adventure_launcher_mut() {
                 launcher.step = step;
+                match step {
+                    crate::app::state::AdventureStep::FindStartTrack => launcher.start_track = None,
+                    crate::app::state::AdventureStep::FindEndTrack => launcher.end_track = None,
+                }
                 launcher.query = query;
             }
             adventure_launcher_search(event_tx, state)?;
@@ -826,18 +825,14 @@ pub fn dispatch(
         }
         SearchAction::ArtistRadioPickerToggleArtist => {
             if let Some(picker) = state.popups.artist_radio_picker_mut()
-                && let Some(artist) = picker.filtered_artists.get(picker.item_index).cloned()
+                && let Some(artist) = picker.filtered_artists.get(picker.item_index)
             {
-                // Toggle: remove if already selected, add if not
-                if let Some(pos) = picker
+                let key = artist.rating_key.clone();
+                let selected = picker
                     .selected_artists
                     .iter()
-                    .position(|a| a.rating_key == artist.rating_key)
-                {
-                    picker.selected_artists.remove(pos);
-                } else if picker.selected_artists.len() < 12 {
-                    picker.selected_artists.push(artist);
-                }
+                    .any(|artist| artist.rating_key == key);
+                picker.set_selected(&key, !selected);
             }
         }
         // Artist bio popup (F4)
@@ -908,123 +903,102 @@ pub fn dispatch(
 }
 
 /// Handle SelectSearchResult — navigate to the selected item in the library.
-fn select_search_result(state: &mut AppState) -> Vec<Action> {
-    let results = match state.search.results.clone() {
-        Some(r) => r,
-        None => return vec![],
-    };
-    let idx = state.list_state.search_item_index;
-
-    // For the All tab, map global index to (section, local_index)
-    let (section, local_idx) = if state.search.tab == SearchTab::Global {
-        resolve_global_index(&results, idx)
+fn selected_collection(state: &AppState) -> Option<crate::app::library_details::RecentResult> {
+    use crate::app::library_details::{RecentResult, RecentTarget};
+    let results = state.search.results.as_ref()?;
+    let index = state.list_state.search_item_index;
+    let (tab, index) = if state.search.tab == SearchTab::Global {
+        resolve_global_index(results, index)
     } else {
-        (state.search.tab, idx)
+        (state.search.tab, index)
     };
-
-    match section {
-        SearchTab::Artists => {
-            if let Some(artist) = results.artists.get(local_idx) {
-                return vec![
-                    BrowseAction::OpenInLibrary {
-                        artist_key: artist.rating_key.clone(),
-                        artist_name: artist.title.clone(),
-                        album_key: None,
-                        album_title: None,
-                    }
-                    .into(),
-                ];
-            }
-        }
-        SearchTab::Albums => {
-            if let Some(album) = results.albums.get(local_idx) {
-                return vec![
-                    BrowseAction::OpenInLibrary {
-                        artist_key: album.parent_rating_key.clone().unwrap_or_default(),
-                        artist_name: album.artist_name().to_owned(),
-                        album_key: Some(album.rating_key.clone()),
-                        album_title: Some(album.title.clone()),
-                    }
-                    .into(),
-                ];
-            }
-        }
-        SearchTab::Tracks => {
-            // Handled in place before taking the results.
-            state.search.results = Some(results);
-            return vec![];
-        }
+    let (label, key, target) = match tab {
         SearchTab::Playlists => {
-            if let Some(playlist) = results.playlists.get(local_idx) {
-                crate::app::navigation_history::record(state);
-                state.popups.set_search_active(false);
-                state.library_navigation =
-                    crate::app::navigation_history::LibraryNavigation::Columns(Some(
-                        crate::app::sidebar::SidebarGroup::Playlists,
-                    ));
-                state.set_browse_category(BrowseCategory::Playlists, false);
-                state.set_view(View::Browse);
-                state.category_column_focused = false;
-                state.playlist_nav.reset(
-                    "playlists",
-                    BrowseItem::from_playlists(&state.library.playlists),
-                );
-                state.playlist_nav.columns[0].selected_index = state.playlist_nav.columns[0]
-                    .items
-                    .iter()
-                    .position(|item| item.key() == playlist.rating_key)
-                    .unwrap_or(0);
-                return vec![
-                    crate::app::action::MillerAction::LoadPlaylistTracksForMiller {
-                        playlist_key: playlist.rating_key.clone(),
-                        replace_child: false,
-                    }
-                    .into(),
-                ];
-            }
+            let p = results.playlists.get(index)?;
+            (&p.title, p.rating_key.as_str(), RecentTarget::Playlist)
         }
         SearchTab::Genres => {
-            if let Some(genre) = results.genres.get(local_idx) {
-                crate::app::navigation_history::record(state);
-                let genre_key = genre.effective_key().to_string();
-                let genre_title = genre.title.clone();
-                state.search.query.clear();
-
-                state.popups.set_search_active(false);
-                // Search results' genre list comes from album_genres, so
-                // open the Album Genres section.
-                state.set_browse_category(BrowseCategory::AlbumGenres, false);
-                state.set_view(View::Browse);
-
-                // Populate column 0 with the album-genre list, with the
-                // searched genre selected. Column 1 (albums) is pushed by
-                // LoadGenreAlbumsForMiller below.
-                let genre_items = BrowseItem::from_genres(&state.library.album_genres);
-                let mut col0 = crate::app::state::BrowseColumn::new(
-                    BrowseCategory::AlbumGenres.name(),
-                    genre_items,
-                );
-                if let Some(pos) = col0.items.iter().position(|i| i.key() == genre_key) {
-                    col0.selected_index = pos;
-                }
-                state.tag_nav.columns.clear();
-                state.tag_nav.columns.push(col0);
-                state.tag_nav.focused_column = 0;
-                state.library.selected_album_title = format!("genre: {}", genre_title);
-
-                return vec![
-                    crate::app::action::MillerAction::LoadGenreAlbumsForMiller {
-                        genre_key,
-                        replace_child: false,
-                    }
-                    .into(),
-                ];
-            }
+            let g = results.genres.get(index)?;
+            (&g.title, g.effective_key(), RecentTarget::Genre)
         }
-        _ => {}
-    }
+        _ => return None,
+    };
+    Some(RecentResult {
+        label: label.clone(),
+        key: key.to_owned(),
+        target,
+    })
+}
+fn open_collection(
+    state: &mut AppState,
+    result: &crate::app::library_details::RecentResult,
+) -> Vec<Action> {
+    use crate::app::library_details::RecentTarget;
+    match result.target {
+        RecentTarget::Playlist => {
+            crate::app::navigation_history::record(state);
+            state.popups.set_search_active(false);
+            state.library_navigation = crate::app::navigation_history::LibraryNavigation::Columns(
+                Some(crate::app::sidebar::SidebarGroup::Playlists),
+            );
+            state.set_browse_category(BrowseCategory::Playlists, false);
+            state.set_view(View::Browse);
+            state.category_column_focused = false;
+            state.playlist_nav.reset(
+                "playlists",
+                BrowseItem::from_playlists(&state.library.playlists),
+            );
+            state.playlist_nav.columns[0].selected_index = state.playlist_nav.columns[0]
+                .items
+                .iter()
+                .position(|item| item.key() == result.key)
+                .unwrap_or(0);
+            vec![
+                crate::app::action::MillerAction::LoadPlaylistTracksForMiller {
+                    playlist_key: result.key.clone(),
+                    replace_child: false,
+                }
+                .into(),
+            ]
+        }
+        RecentTarget::Genre => {
+            crate::app::navigation_history::record(state);
+            let genre_key = result.key.clone();
+            let genre_title = &result.label;
+            state.search.query.clear();
 
-    vec![]
+            state.popups.set_search_active(false);
+            // Search results' genre list comes from album_genres, so
+            // open the Album Genres section.
+            state.set_browse_category(BrowseCategory::AlbumGenres, false);
+            state.set_view(View::Browse);
+
+            // Populate column 0 with the album-genre list, with the
+            // searched genre selected. Column 1 (albums) is pushed by
+            // LoadGenreAlbumsForMiller below.
+            let genre_items = BrowseItem::from_genres(&state.library.album_genres);
+            let mut col0 = crate::app::state::BrowseColumn::new(
+                BrowseCategory::AlbumGenres.name(),
+                genre_items,
+            );
+            if let Some(pos) = col0.items.iter().position(|i| i.key() == genre_key) {
+                col0.selected_index = pos;
+            }
+            state.tag_nav.columns.clear();
+            state.tag_nav.columns.push(col0);
+            state.tag_nav.focused_column = 0;
+            state.library.selected_album_title = format!("genre: {}", genre_title);
+
+            vec![
+                crate::app::action::MillerAction::LoadGenreAlbumsForMiller {
+                    genre_key,
+                    replace_child: false,
+                }
+                .into(),
+            ]
+        }
+        RecentTarget::Details { .. } => vec![],
+    }
 }
 
 /// For the All tab, map a global flat index to (section, local_index).
@@ -1223,7 +1197,6 @@ fn adventure_launcher_search(_event_tx: &mpsc::Sender<Event>, state: &mut AppSta
         return Ok(());
     }
 
-    // Local ranked search for artists, albums, playlists, genres
     use crate::services::{search_albums_with_ranking, search_with_ranking};
     let query = launcher.query.to_lowercase();
     let mut artists = search_with_ranking(
@@ -1262,19 +1235,6 @@ fn adventure_launcher_search(_event_tx: &mpsc::Sender<Event>, state: &mut AppSta
     artists.extend(alias_extras);
 
     let albums = search_albums_with_ranking(&state.library.albums, &query, SEARCH_RESULT_LIMIT);
-    let playlists = search_with_ranking(
-        &state.library.playlists,
-        &query,
-        |p| &p.title,
-        SEARCH_RESULT_LIMIT,
-    );
-    let genres = search_with_ranking(
-        &state.library.album_genres,
-        &query,
-        |g| &g.title,
-        SEARCH_RESULT_LIMIT,
-    );
-
     let navidrome = state.sources.active.navidrome().is_some();
     let tracks = if navidrome {
         search_with_ranking(
@@ -1287,12 +1247,10 @@ fn adventure_launcher_search(_event_tx: &mpsc::Sender<Event>, state: &mut AppSta
         vec![]
     };
     launcher.results = Some(SearchResults {
-        global_order: vec![],
         artists,
         albums,
-        playlists,
-        genres,
         tracks,
+        ..Default::default()
     });
     launcher.loading = false;
     launcher.item_index = 0;

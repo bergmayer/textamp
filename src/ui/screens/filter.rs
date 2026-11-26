@@ -172,6 +172,18 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
     let scroll_pin = state.scroll.search;
     let t = theme();
 
+    if state.search.query.is_empty() && !state.search.recent.is_empty() {
+        render_single_section(
+            frame,
+            &state.search.recent,
+            |result| format!("{} · {}", result.kind_label(), result.label),
+            state.search.focus == SearchFocus::Results,
+            state.list_state.search_item_index,
+            None,
+            area,
+        );
+        return;
+    }
     let results = match &state.search.results {
         Some(r) => r,
         None => {
@@ -204,11 +216,12 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
             frame,
             &results.artists,
             |a| {
-                if a.title.is_empty() {
-                    "Unknown Artist".to_string()
+                let title = if a.title.is_empty() {
+                    "Unknown Artist"
                 } else {
-                    a.title.clone()
-                }
+                    &a.title
+                };
+                format!("Artist · {title}")
             },
             is_results_focused,
             selected_idx,
@@ -227,7 +240,7 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
                 } else {
                     a.title.clone()
                 };
-                format!("{} - {}", title, artist)
+                format!("Album · {title} — {artist}")
             },
             is_results_focused,
             selected_idx,
@@ -237,7 +250,7 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
         SearchTab::Playlists => render_single_section(
             frame,
             &results.playlists,
-            |p| p.title.clone(),
+            |p| format!("Playlist · {}", p.title),
             is_results_focused,
             selected_idx,
             scroll_pin,
@@ -253,7 +266,7 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
                     } else {
                         &tr.title
                     };
-                    format!("{} - {}", title, tr.track_artist())
+                    format!("Track · {title} — {}", tr.track_artist())
                 },
                 is_results_focused,
                 selected_idx,
@@ -264,7 +277,7 @@ fn render_results(frame: &mut Frame, state: &AppState, area: Rect) {
         SearchTab::Genres => render_single_section(
             frame,
             &results.genres,
-            |g| g.title.clone(),
+            |g| format!("Genre · {}", g.title),
             is_results_focused,
             selected_idx,
             scroll_pin,

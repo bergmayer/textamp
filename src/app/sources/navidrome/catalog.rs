@@ -19,6 +19,8 @@ pub struct PreparedCatalog {
     catalog: Catalog,
     artists: crate::services::compilations::ArtistIndex,
     lookup: crate::services::catalog_lookup::TrackLookup,
+    #[serde(skip)]
+    availability: crate::services::radio::Availability,
 }
 
 impl PreparedCatalog {
@@ -34,6 +36,7 @@ impl PreparedCatalog {
             },
             artists: self.artists.clone(),
             lookup: Default::default(),
+            availability: Default::default(),
         }
     }
     pub(crate) fn save_browse(
@@ -149,11 +152,10 @@ fn start(state: &mut AppState, tx: &mpsc::Sender<Event>, force: bool) {
     state.library.artists_loading = true;
     state.library.playlists_loading = true;
     let tx = tx.clone();
-    let ticket = session.cache_store().map(|store| store.ticket("catalog"));
-    let browse_ticket = session
-        .cache_store()
-        .ok()
-        .map(|store| store.ticket("browse-catalog-v1"));
+    let store = session.cache_store();
+    let browse_ticket = store.as_ref().ok().map(|s| s.ticket("browse-catalog-v1"));
+    let playlists = store.as_ref().ok().map(|s| s.ticket("playlist-list"));
+    let ticket = store.map(|s| s.ticket("catalog"));
     // Account-wide snapshots are valid for a sole folder only when their stored directory agrees.
     let legacy_store = match session.source.libraries.as_slice() {
         [only] if session.client.folder.as_ref() == Some(&only.id) => {
@@ -190,9 +192,17 @@ fn start(state: &mut AppState, tx: &mpsc::Sender<Event>, force: bool) {
         };
         let mut restored_browse = None;
         if !force {
+            let browse_playlists = playlists.clone();
             if let Some(ticket) = browse_ticket.clone().filter(|_| restore_browse)
                 && let Ok(Ok(Some(hit))) = crate::app::tasks::spawn_blocking(move || {
-                    read_browse_catalog(&ticket, legacy_browse)
+                    let mut hit = read_browse_catalog(&ticket, legacy_browse)?;
+                    if let Some(hit) = &mut hit {
+                        restore_playlists(
+                            browse_playlists.as_ref(),
+                            &mut hit.value.catalog.playlists,
+                        );
+                    }
+                    Ok::<_, anyhow::Error>(hit)
                 })
                 .await
             {
@@ -219,7 +229,8 @@ fn start(state: &mut AppState, tx: &mpsc::Sender<Event>, force: bool) {
                 let browse_ticket = browse_ticket.clone();
                 match crate::app::tasks::spawn_blocking(move || {
                     read_catalog(&ticket, legacy).map(|hit| {
-                        hit.map(|hit| {
+                        hit.map(|mut hit| {
+                            restore_playlists(playlists.as_ref(), &mut hit.value.playlists);
                             let value = hit.value.prepare();
                             if restored_browse != Some(hit.timestamp) {
                                 value.save_browse(browse_ticket, hit.timestamp);
@@ -363,7 +374,7 @@ pub(crate) async fn fetch(
             let (artists, albums, playlists) = tokio::try_join!(
                 session.client.artists(),
                 session.client.albums("alphabeticalByName", &[]),
-                session.client.playlists()
+                fetch_playlists(session)
             )?;
             tracing::info!(
                 elapsed_ms = started.elapsed().as_millis(),
@@ -375,7 +386,7 @@ pub(crate) async fn fetch(
                 artists: artists.into_iter().map(|a| session.artist(a)).collect(),
                 albums: albums.into_iter().map(|a| session.album(a)).collect(),
                 tracks: vec![],
-                playlists: playlists.into_iter().map(|p| session.playlist(p)).collect(),
+                playlists,
                 libraries: session.source.libraries.clone(),
                 extensions: session.extensions.clone(),
             };
@@ -427,15 +438,22 @@ pub(crate) async fn fetch(
             tracks = songs.len(),
             "Navidrome track catalog fetched"
         );
-        songs.sort_by_key(|t| {
-            (
-                t.album_id.clone(),
-                t.disc_number.unwrap_or(1),
-                t.track.unwrap_or(0),
-                t.title.clone(),
-            )
-        });
-        catalog.tracks = songs.into_iter().map(|t| session.track(t)).collect();
+        let playlist_ticket = session
+            .cache_store()
+            .ok()
+            .map(|s| s.ticket("playlist-list"));
+        let session = session.clone();
+        let catalog = crate::app::tasks::spawn_blocking(move || {
+            songs.sort_by(|a, b| {
+                a.album_id
+                    .cmp(&b.album_id)
+                    .then_with(|| a.album_order().cmp(&b.album_order()))
+            });
+            restore_playlists(playlist_ticket.as_ref(), &mut catalog.playlists);
+            catalog.tracks = songs.into_iter().map(|song| session.track(song)).collect();
+            catalog
+        })
+        .await?;
         Ok(catalog)
     }
     .await
@@ -480,6 +498,7 @@ impl Catalog {
             &self.tracks,
         );
         PreparedCatalog {
+            availability: crate::services::radio::Availability::build(&self.tracks, &self.albums),
             lookup,
             catalog: self,
             artists,
@@ -499,6 +518,7 @@ pub fn install(state: &mut AppState, prepared: PreparedCatalog) {
         catalog,
         artists,
         lookup,
+        availability,
     } = prepared;
     if let ActiveSource::Navidrome(session) = &mut state.sources.active {
         session.source.libraries = catalog.libraries;
@@ -513,11 +533,12 @@ pub fn install(state: &mut AppState, prepared: PreparedCatalog) {
         session.extensions = catalog.extensions;
     }
     state.library.artists_total = catalog.artists.len() as u32;
-    state.library.albums_total = catalog.albums.len() as u32;
     state.library.artists = std::sync::Arc::new(catalog.artists);
     state.library.albums = std::sync::Arc::new(catalog.albums);
     state.library.all_tracks = std::sync::Arc::new(catalog.tracks);
     state.library.track_lookup = lookup;
+    state.library.radio_availability = availability.into();
+    state.library.audio_mood_cache = Default::default();
     state.library.visited_album_tracks.clear();
     state.replace_playlists(catalog.playlists);
     super::radio::load(state);
@@ -525,6 +546,7 @@ pub fn install(state: &mut AppState, prepared: PreparedCatalog) {
     state.library.track_artists = artists.track_artists;
     state.library.artist_aliases = std::sync::Arc::new(artists.aliases);
     state.library.album_display_artist = artists.album_display;
+    super::album_artists::reconcile_compilation_index(state);
     let items = state.build_artist_root_items();
     if state.desktop_library_root == crate::app::state::LibraryRoot::Singles {
         crate::app::album_collections::refresh_singles(state);
@@ -592,42 +614,48 @@ fn tags(values: impl Iterator<Item = String>) -> Vec<Genre> {
         .collect()
 }
 
-/// Refresh playlists without scanning artists, albums or tracks.
+/// Playlist edits update this small snapshot independently of the track index.
+/// Catalogs without a separate snapshot supply their embedded playlist list.
+fn restore_playlists(
+    ticket: Option<&crate::library::cache::Ticket>,
+    playlists: &mut Vec<Playlist>,
+) {
+    if let Some(ticket) = ticket {
+        match ticket.read(crate::library::cache::REFRESH_INTERVAL) {
+            Ok(Some(hit)) => *playlists = hit.value,
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "Read cached playlist list"),
+        }
+    }
+}
+
+async fn fetch_playlists(session: &Session) -> anyhow::Result<Vec<Playlist>> {
+    let ticket = session
+        .cache_store()
+        .map(|store| store.ticket("playlist-list"));
+    let playlists: Vec<_> = session
+        .client
+        .playlists()
+        .await?
+        .into_iter()
+        .map(|item| session.playlist(item))
+        .collect();
+    crate::app::tasks::spawn_blocking(move || {
+        if let Err(error) = ticket.and_then(|ticket| ticket.write(&playlists)) {
+            tracing::warn!(%error, "Persist playlist metadata");
+        }
+        playlists
+    })
+    .await
+    .map_err(Into::into)
+}
+
 pub fn refresh_playlists(state: &mut AppState, tx: &mpsc::Sender<Event>) {
     let Some(session) = state.sources.active.navidrome().cloned() else {
         return;
     };
     effects::spawn(state, tx, "playlist-list", async move {
-        let playlists: Vec<_> = session
-            .client
-            .playlists()
-            .await?
-            .into_iter()
-            .map(|playlist| session.playlist(playlist))
-            .collect();
-        let cached = playlists.clone();
-        let store = session.cache_store()?;
-        let ticket = store.ticket("catalog");
-        let browse = store.ticket("browse-catalog-v1");
-        if let Err(error) = crate::app::tasks::spawn_blocking(move || -> anyhow::Result<()> {
-            if let Some(mut hit) =
-                browse.read::<PreparedCatalog>(crate::library::cache::REFRESH_INTERVAL)?
-            {
-                hit.value.catalog.playlists = cached.clone();
-                browse.write_at(&hit.value, hit.timestamp)?;
-            }
-            if let Some(mut hit) =
-                ticket.read::<Catalog>(crate::library::cache::REFRESH_INTERVAL)?
-            {
-                hit.value.playlists = cached;
-                ticket.write_at(&hit.value, hit.timestamp)?;
-            }
-            Ok(())
-        })
-        .await?
-        {
-            tracing::warn!("Persist playlist metadata: {error}");
-        }
+        let playlists = fetch_playlists(&session).await?;
         Ok(vec![
             crate::app::action::DataAction::PlaylistsLoaded(playlists).into(),
         ])

@@ -5,7 +5,7 @@
 pub mod settings;
 mod xdg;
 
-pub use settings::{Config, GeneralConfig, PlaybackConfig, UiConfig};
+pub use settings::{AlbumLayout, Config, DeviceSync, GeneralConfig, PlaybackConfig, UiConfig};
 pub use xdg::XdgPaths;
 
 use anyhow::{Result, anyhow};

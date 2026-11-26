@@ -103,18 +103,212 @@ pub fn encode(tracks: &[Track], format: Format) -> Result<String> {
     }
     Ok(output)
 }
-pub fn write(path: &Path, tracks: &[Track], format: Format) -> Result<()> {
-    let contents = encode(tracks, format)?;
+pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
     use std::io::Write;
     let directory = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
-    file.write_all(contents.as_bytes())?;
+    file.write_all(contents)?;
     file.as_file().sync_all()?;
     file.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+/// Match the document against the active catalog before creating anything on the server.
+pub fn read_playlist(file: &Path, catalog: &[Track]) -> Result<(String, Vec<String>)> {
+    use anyhow::{Context, bail};
+    use std::{collections::HashMap, io::Read};
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    let mut contents = String::new();
+    ensure!(
+        std::fs::metadata(file)?.is_file(),
+        "Choose a regular playlist file"
+    );
+    std::fs::File::open(file)?
+        .take(MAX_BYTES + 1)
+        .read_to_string(&mut contents)
+        .context("Read playlist as UTF-8")?;
+    ensure!(
+        contents.len() as u64 <= MAX_BYTES,
+        "Playlist exceeds 16 MiB"
+    );
+    let text = contents.trim_start_matches('\u{feff}');
+    let name = file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .context("Playlist needs a filename")?;
+    #[derive(Default)]
+    struct Entry {
+        path: String,
+        title: String,
+        artist: String,
+        album: String,
+    }
+    let entries: Vec<Entry> = match file
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "m3u" | "m3u8" => text
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('#'))
+            .map(|s| Entry {
+                path: s.into(),
+                ..Default::default()
+            })
+            .collect(),
+        "csv" => {
+            let mut reader = csv::Reader::from_reader(text.as_bytes());
+            let header = reader.headers()?.clone();
+            let column = |name: &str| {
+                header
+                    .iter()
+                    .position(|h| h.trim().eq_ignore_ascii_case(name))
+            };
+            let (path, title, artist, album) = (
+                column("Path"),
+                column("Title"),
+                column("Artist"),
+                column("Album"),
+            );
+            ensure!(
+                path.is_some() || title.is_some(),
+                "CSV needs a Path or Title column"
+            );
+            reader
+                .records()
+                .map(|record| {
+                    let record = record?;
+                    let value = |index: Option<usize>| {
+                        index.and_then(|i| record.get(i)).unwrap_or("").to_owned()
+                    };
+                    Ok(Entry {
+                        path: value(path),
+                        title: value(title),
+                        artist: value(artist),
+                        album: value(album),
+                    })
+                })
+                .collect::<Result<_>>()?
+        }
+        _ => bail!("Choose an M3U, M3U8 or CSV playlist"),
+    };
+    ensure!(!entries.is_empty(), "The playlist contains no tracks");
+    ensure!(
+        !catalog.is_empty(),
+        "Load the library track catalog before importing"
+    );
+    // Store only keys that occur in this document. A second catalog identity marks a match as ambiguous.
+    #[derive(Clone, Copy, Default)]
+    enum Match<'a> {
+        #[default]
+        Missing,
+        Track(&'a str),
+        Ambiguous,
+    }
+    impl<'a> Match<'a> {
+        fn include(&mut self, key: &'a str) {
+            *self = match *self {
+                Self::Missing => Self::Track(key),
+                Self::Track(previous) if previous == key => *self,
+                _ => Self::Ambiguous,
+            };
+        }
+    }
+    let mut paths = HashMap::new();
+    let mut titles = HashMap::new();
+    for e in &entries {
+        if !e.path.is_empty() {
+            let key = normalized_path(&e.path);
+            paths.insert(key.clone(), Match::Missing);
+            if Path::new(&key).is_relative()
+                && let Some(parent) = file.parent()
+            {
+                paths.insert(
+                    normalized_path(&parent.join(key).to_string_lossy()),
+                    Match::Missing,
+                );
+            }
+        }
+        if !e.title.is_empty() {
+            titles.entry(e.title.as_str()).or_insert_with(Vec::new);
+        }
+    }
+    for t in catalog {
+        if let Some(matches) = titles.get_mut(t.title.as_str()) {
+            matches.push(t);
+        }
+        if !paths.is_empty()
+            && let Ok(p) = path(t)
+            && !p.is_empty()
+            && let Some(slot) = paths.get_mut(&normalized_path(&p))
+        {
+            slot.include(&t.rating_key);
+        }
+    }
+    let mut keys = Vec::with_capacity(entries.len());
+    for (i, e) in entries.iter().enumerate() {
+        let key = normalized_path(&e.path);
+        let mut found = paths.get(&key).copied().unwrap_or_default();
+        if matches!(found, Match::Missing)
+            && !key.is_empty()
+            && Path::new(&key).is_relative()
+            && let Some(parent) = file.parent()
+        {
+            found = paths
+                .get(&normalized_path(&parent.join(key).to_string_lossy()))
+                .copied()
+                .unwrap_or_default();
+        }
+        if matches!(found, Match::Missing)
+            && let Some(tracks) = titles.get(e.title.as_str())
+        {
+            let matches = tracks.iter().filter(|t| {
+                (e.artist.is_empty() || t.track_artist() == e.artist)
+                    && (e.album.is_empty() || t.album_name() == e.album)
+            });
+            for track in matches {
+                found.include(&track.rating_key);
+            }
+        }
+        match found {
+            Match::Track(k) => keys.push(k.to_owned()),
+            Match::Ambiguous => bail!("Playlist entry {} matches multiple library tracks", i + 1),
+            Match::Missing => bail!("Playlist entry {} has no match in this library", i + 1),
+        }
+    }
+    Ok((name.to_owned(), keys))
+}
+
+fn normalized_path(value: &str) -> String {
+    let value = reqwest::Url::parse(value)
+        .ok()
+        .filter(|url| url.scheme() == "file")
+        .and_then(|url| url.to_file_path().ok())
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| value.to_owned())
+        .replace('\\', "/");
+    let mut parts = Vec::new();
+    for part in value.split('/') {
+        match part {
+            "." | "" => {}
+            ".." if parts.last().is_some_and(|p| *p != "..") => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    format!(
+        "{}{}",
+        if value.starts_with('/') { "/" } else { "" },
+        parts.join("/")
+    )
 }
 
 #[cfg(test)]

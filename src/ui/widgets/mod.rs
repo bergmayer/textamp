@@ -9,6 +9,7 @@ pub mod transport;
 pub use scrollbar::{render_scrollbar, render_scrollbar_borderless};
 pub use selectable_list::{DisplayItem, calculate_scroll_offset, render_selectable_list};
 
+pub(crate) mod album_page;
 pub mod column_header;
 pub(crate) mod text_input;
 

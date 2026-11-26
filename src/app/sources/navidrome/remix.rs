@@ -133,6 +133,8 @@ async fn candidates(
     }
 }
 
+const SONIC_QUEUE_LIMIT: usize = 64;
+
 pub fn remix(state: &mut AppState, tx: &mpsc::Sender<Event>, action: QueueAction) {
     let Some(session) = state.sources.active.navidrome().cloned() else {
         state.set_status("Choose a server library to edit this queue".into());
@@ -176,7 +178,13 @@ pub fn remix(state: &mut AppState, tx: &mpsc::Sender<Event>, action: QueueAction
         .iter()
         .map(|t| t.rating_key.clone())
         .collect();
-    let tracks = state.playback_tracks().to_vec();
+    let queue = state.playback_tracks();
+    let tracks = if mode == RemixKind::Twofer {
+        queue
+    } else {
+        &queue[..queue.len().min(SONIC_QUEUE_LIMIT)]
+    }
+    .to_vec();
     let excluded = expected.iter().cloned().collect();
     let allow_same_artist = mode == RemixKind::Twofer || state.remix_allow_same_artist;
     let mut excluded_albums: HashSet<_> = tracks.iter().flat_map(album_keys).collect();
@@ -304,6 +312,7 @@ fn ranked_remix(state: &mut AppState, tx: &mpsc::Sender<Event>, session: &Sessio
         let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
             let ids = expected
                 .iter()
+                .take(SONIC_QUEUE_LIMIT)
                 .map(|key| api.session.id(key))
                 .collect::<Result<Vec<_>>>()?;
             let outcome = rank_queue(&api, mode, &ids).await?;

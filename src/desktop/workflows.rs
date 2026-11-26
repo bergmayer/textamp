@@ -401,6 +401,7 @@ mod tests {
         state.palette.close();
         state.view = View::Browse;
         state.popups.set_text(Some(TextPopup {
+            album_notes: false,
             lyrics_query: None,
             title: title.into(),
             text: "Loading…".into(),

@@ -5,8 +5,8 @@ use crate::app::state::PaletteEntry;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewOptions {
     pub application_mode: Option<crate::app::launch::ApplicationMode>,
-    pub covers: bool,
-    pub large_covers: bool,
+    pub covers: Option<bool>,
+    pub album_grid: Option<bool>,
     pub compilation_artists: bool,
     pub grouped: bool,
     pub reverse: bool,
@@ -16,12 +16,20 @@ pub fn view_options(state: &crate::app::AppState) -> ViewOptions {
     let column = state.browse_nav().and_then(|nav| nav.focused());
     let checked = |id| crate::app::view_options::is_checked(state, column, id);
     use crate::app::state::SortPopupOption;
+    let popup = state
+        .browse_nav()
+        .and_then(|nav| crate::app::view_options::for_column(state, nav.focused_column));
+    let available = |id| popup.as_ref().is_some_and(|p| p.options.contains(&id));
     ViewOptions {
         application_mode: state.application_mode(),
-        covers: checked(SortPopupOption::Artwork),
-        large_covers: checked(SortPopupOption::LargeArtwork),
+        covers: available(SortPopupOption::Artwork).then(|| checked(SortPopupOption::Artwork)),
+        album_grid: available(SortPopupOption::AlbumGrid).then_some(state.album_grid),
         compilation_artists: checked(SortPopupOption::CompilationOnlyArtists),
-        grouped: checked(SortPopupOption::GroupByAlbum),
+        grouped: if popup.as_ref().is_some_and(|popup| popup.is_downloads) {
+            state.downloads.group_by_album
+        } else {
+            checked(SortPopupOption::GroupByAlbum)
+        },
         reverse: checked(SortPopupOption::Direction),
         sort: column.map(|column| column.sort_mode),
     }
@@ -37,9 +45,6 @@ pub fn check_view_options(menus: &mut [Menu], options: &ViewOptions) {
                     disabled,
                     ..
                 } => {
-                    if action.as_any().is::<super::LargeAlbumCovers>() {
-                        *checked = options.large_covers;
-                    }
                     let command =
                         if let Some(command) = action.as_any().downcast_ref::<NativeCommand>() {
                             Some(command.command())
@@ -60,7 +65,8 @@ pub fn check_view_options(menus: &mut [Menu], options: &ViewOptions) {
                             SetApplicationMode(mode) => {
                                 Some(options.application_mode == Some(mode))
                             }
-                            ToggleArtwork => Some(options.covers),
+                            SetAlbumLayout(grid) => Some(options.album_grid == Some(grid)),
+                            ToggleArtwork => Some(options.covers.unwrap_or(false)),
                             ToggleCompilationArtists => Some(options.compilation_artists),
                             ToggleGroupByAlbum => Some(options.grouped),
                             ReverseSort => Some(options.reverse),
@@ -70,7 +76,11 @@ pub fn check_view_options(menus: &mut [Menu], options: &ViewOptions) {
                         if let Some(value) = value {
                             *checked = value;
                         }
-                        if matches!(command, CycleApplicationMode) {
+                        if matches!(command, ToggleArtwork) {
+                            *disabled |= options.covers.is_none();
+                        } else if matches!(command, SetAlbumLayout(_)) {
+                            *disabled |= options.album_grid.is_none();
+                        } else if matches!(command, CycleApplicationMode) {
                             *disabled = options.application_mode.is_none();
                         } else if matches!(command, SetApplicationMode(_)) {
                             *disabled = *checked;
@@ -278,9 +288,11 @@ mod tests {
             "Radio: Play Random Albums".into(),
         ]);
         let discover = menus.iter().find(|menu| menu.name == "Discover").unwrap();
-        assert!(!discover.items.iter().any(
-            |item| matches!(item, MenuItem::Action {name,..} if name == "Random Artist Mix")
-        ));
+        assert!(
+            !discover.items.iter().any(
+                |item| matches!(item, MenuItem::Action {name,..} if name == "Random Artist Mix")
+            )
+        );
         assert!(
             !discover
                 .items
@@ -397,7 +409,7 @@ mod tests {
     fn native_menus_keep_long_command_families_in_submenus() {
         let menus = super::super::native_menus(&[]);
         let view = menus.iter().find(|menu| menu.name == "View").unwrap();
-        for title in ["Sort", "View Options", "Browse", "Full Screen"] {
+        for title in ["View Options", "Browse", "Full Screen"] {
             assert!(
                 view.items
                     .iter()

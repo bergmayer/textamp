@@ -60,6 +60,12 @@ pub fn handle_key(
     state: &mut AppState,
     config: &crate::config::Config,
 ) -> Vec<Action> {
+    if matches!(
+        key.code,
+        KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+    ) {
+        state.scroll.track_detail = None;
+    }
     if !state.desktop_frontend {
         use crossterm::event::{KeyEventKind, ModifierKeyCode};
         if let KeyCode::Modifier(modifier) = key.code {
@@ -358,16 +364,8 @@ pub fn handle_key(
     if let Some(dialog) = state.popups.input_dialog_mut() {
         match key.code {
             KeyCode::Esc => {
-                // Cancel dialog and adventure if it was for adventure length
-                let was_adventure = matches!(
-                    dialog.action_type,
-                    crate::app::state::InputDialogAction::AdventureLength
-                );
                 state.popups.set_input_dialog(None);
                 crate::app::sources::dialogs::restore_parent(state);
-                if was_adventure {
-                    return vec![SettingsAction::CancelAdventure.into()];
-                }
             }
             KeyCode::Enter => {
                 if matches!(
@@ -457,16 +455,24 @@ pub fn handle_key(
                             .into(),
                         ];
                     }
+                    crate::app::state::InputDialogAction::ImportPlaylist { generation } => {
+                        return vec![
+                            QueueAction::ImportPlaylist {
+                                generation,
+                                path: input.into(),
+                            }
+                            .into(),
+                        ];
+                    }
                     crate::app::state::InputDialogAction::ExportPlaylist {
                         generation,
-                        tracks,
-                        format,
+                        contents,
+                        ..
                     } => {
                         return vec![
                             QueueAction::ExportPlaylist {
                                 generation,
-                                tracks,
-                                format,
+                                contents,
                                 path: std::path::PathBuf::from(input),
                             }
                             .into(),
@@ -474,11 +480,6 @@ pub fn handle_key(
                     }
                     crate::app::state::InputDialogAction::SavePlaylist => {
                         return vec![QueueAction::SaveQueueAsPlaylist(input).into()];
-                    }
-                    crate::app::state::InputDialogAction::AdventureLength => {
-                        // Parse the length (default to 20)
-                        let length = input.parse::<usize>().unwrap_or(20).clamp(5, 100);
-                        return vec![SettingsAction::SetAdventureLength(length).into()];
                     }
                 }
             }
@@ -490,19 +491,8 @@ pub fn handle_key(
                     KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
                 ) =>
             {
-                // For adventure length, only allow digits
-                if matches!(
-                    dialog.action_type,
-                    crate::app::state::InputDialogAction::AdventureLength
-                ) {
-                    if c.is_ascii_digit() && dialog.input.len() < 3 {
-                        dialog.input.push(c);
-                    }
-                } else {
-                    // Allow all printable characters for other dialogs
-                    if dialog.input.len() < 2048 {
-                        dialog.input.push(c);
-                    }
+                if dialog.input.len() < 2048 {
+                    dialog.input.push(c);
                 }
             }
             _ => {}
@@ -693,7 +683,7 @@ pub fn handle_key(
         match key.code {
             KeyCode::Char('[') => {
                 state.tui_sidebar_visible = !state.tui_sidebar_visible;
-                if !state.tui_sidebar_visible {
+                if !state.tui_sidebar_visible && !cfg!(target_os = "macos") {
                     state.category_column_focused = false;
                 }
                 return vec![];
@@ -724,10 +714,30 @@ pub fn handle_key(
         crate::app::tui_navigation::traverse(state, key.code == KeyCode::BackTab);
         return vec![];
     }
+    if let Some(control) = state.tui_rail_focus {
+        use crate::app::tui_navigation::RailControl;
+        let controls = RailControl::visible(state);
+        if let Some(index) = controls.iter().position(|item| *item == control) {
+            let len = controls.len();
+            match key.code {
+                KeyCode::Left | KeyCode::Up => {
+                    state.tui_rail_focus = Some(controls[(index + len - 1) % len])
+                }
+                KeyCode::Right | KeyCode::Down => {
+                    state.tui_rail_focus = Some(controls[(index + 1) % len])
+                }
+                KeyCode::Enter => return control.activate(state),
+                KeyCode::Esc => state.tui_rail_focus = None,
+                _ => {}
+            }
+            return vec![];
+        }
+        state.tui_rail_focus = None;
+    }
     if let Some(index) = state.tui_footer_focus {
         match key.code {
-            KeyCode::Left => state.tui_footer_focus = Some(index.saturating_sub(1)),
-            KeyCode::Right => {
+            KeyCode::Left | KeyCode::Up => state.tui_footer_focus = Some(index.saturating_sub(1)),
+            KeyCode::Right | KeyCode::Down => {
                 state.tui_footer_focus =
                     Some((index + 1).min(crate::app::tui_navigation::FOOTER.len() - 1))
             }
@@ -814,12 +824,13 @@ pub fn handle_key(
                 state.tui_sidebar_group =
                     Some((title, (selected + 1).min(rows.len().saturating_sub(1))))
             }
-            KeyCode::Enter | KeyCode::Right => {
+            KeyCode::Enter => {
                 return crate::app::sidebar::open_group_child(state, &title, selected);
             }
             KeyCode::Left | KeyCode::Esc | KeyCode::Backspace => {
                 state.tui_sidebar_group = None;
-                state.category_column_focused = state.tui_sidebar_visible;
+                state.category_column_focused =
+                    state.tui_sidebar_visible || cfg!(target_os = "macos");
             }
             _ => {}
         }
@@ -837,7 +848,9 @@ pub fn handle_key(
                 state.tui_transport_focus = None;
                 return vec![];
             }
-            KeyCode::Left | KeyCode::Right if control == TransportControl::Seek => {
+            KeyCode::Left | KeyCode::Right
+                if control == TransportControl::Seek && control.enabled(state) =>
+            {
                 return vec![
                     PlaybackAction::SeekRelative(if key.code == KeyCode::Left {
                         -5000
@@ -884,15 +897,10 @@ pub fn handle_key(
 
     if key.code == KeyCode::Backspace
         && key.modifiers.is_empty()
-        && state.view == View::Browse
-        && state.jump_history.head().is_some()
+        && (state.tui_player_raised()
+            || (state.view == View::Browse && state.jump_history.head().is_some()))
     {
         return vec![NavigationAction::Back.into()];
-    }
-
-    // Handle adventure mode Esc separately
-    if state.adventure.active && key.code == KeyCode::Esc {
-        return vec![SettingsAction::CancelAdventure.into()];
     }
 
     // Modal owners have returned. An inline filter can still reserve function keys.
@@ -1233,18 +1241,19 @@ pub fn handle_key(
         {
             return vec![QueueAction::PromptSavePlaylist.into()];
         }
-        // Ctrl+V = View options popup (sort modes, direction,
-        // group-by-album, cover-art toggle) for the focused column.
-        (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
-            return vec![SearchAction::OpenSortPopup.into()];
+        (KeyModifiers::CONTROL, KeyCode::Char('v')) | (KeyModifiers::NONE, KeyCode::F(6)) => {
+            return crate::app::view_options::open_for_input(state);
         }
         // Ctrl+W = Close current Miller column. Drops the focused
         // column + any cols to its right and moves focus one left.
         // At the root (or the hidden Playlists col-offset prefix),
         // falls back to focusing the cat col so the user can pivot
         // to another category.
-        (KeyModifiers::CONTROL, KeyCode::Char('w')) if state.view == View::Browse => {
+        (KeyModifiers::CONTROL, KeyCode::Char('w'))
+            if state.view == View::Browse || state.tui_player_raised() =>
+        {
             close_focused_browse_column(state);
+            crate::app::tui_navigation::focus_root_after_close(state);
             return vec![];
         }
         (KeyModifiers::CONTROL, KeyCode::Char('x'))
@@ -1262,12 +1271,6 @@ pub fn handle_key(
         }
         (KeyModifiers::ALT, KeyCode::Char('r')) => {
             return random_album_radio(state);
-        }
-        // F6 = Sort popup for current column. Was Ctrl+S until that
-        // became the standard Save shortcut; F6 keeps sort reachable
-        // from the keyboard without colliding with save.
-        (KeyModifiers::NONE, KeyCode::F(6)) => {
-            return vec![SearchAction::OpenSortPopup.into()];
         }
 
         _ => {}
@@ -1507,21 +1510,6 @@ pub(super) fn handle_library_picker_keys(
 
 /// Handle keys when artist bio popup is active.
 fn handle_artist_bio_popup_keys(key: event::KeyEvent, state: &mut AppState) -> Vec<Action> {
-    if matches!(key.code, KeyCode::Char('r' | 'R'))
-        && state
-            .sources
-            .active
-            .capabilities()
-            .supports(crate::library::capabilities::Feature::ArtistRadio)
-        && let Some(popup) = state.popups.artist_bio()
-    {
-        let action = crate::app::action::RadioAction::StartArtistRadio {
-            key: popup.artist_key.clone(),
-            title: popup.artist_name.clone(),
-        };
-        state.popups.set_artist_bio(None);
-        return vec![action.into()];
-    }
     let max_scroll = state
         .hit_regions
         .biography_text
@@ -1929,6 +1917,10 @@ pub fn close_browse_column_at(state: &mut AppState, col_idx: usize) {
     if state.browse_category == BrowseCategory::Folders {
         if let Some(fs) = state.folder_state.as_mut() {
             if col_idx == 0 {
+                if state.sources.listing.take().is_some() {
+                    state.sources.list_id = state.sources.list_id.wrapping_add(1);
+                    state.library_loading = false;
+                }
                 state.folder_state = None;
                 state.focus_category_column();
             } else if col_idx < fs.columns.len() {

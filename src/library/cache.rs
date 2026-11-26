@@ -200,6 +200,31 @@ impl Ticket {
         let path = self.path();
         path.is_file() || path.with_extension("").is_file()
     }
+    /// Read the timestamp in the versioned snapshot header without inflating its catalog.
+    pub(crate) fn stored_timestamp(&self) -> Option<u64> {
+        let path = self.path();
+        let mut reader: Box<dyn Read> = match std::fs::File::open(&path) {
+            Ok(file) => Box::new(flate2::read::GzDecoder::new(file)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Box::new(std::fs::File::open(path.with_extension("")).ok()?)
+            }
+            Err(_) => return None,
+        };
+        let prefix = format!(
+            r#"{{"version":{VERSION},"identity":{},"key":{},"timestamp":"#,
+            serde_json::to_string(&self.store.identity).ok()?,
+            serde_json::to_string(&self.key).ok()?,
+        );
+        let mut header = vec![0; prefix.len()];
+        reader.read_exact(&mut header).ok()?;
+        if header != prefix.as_bytes() {
+            return None;
+        }
+        u64::deserialize(&mut serde_json::Deserializer::from_reader(
+            std::io::BufReader::new(reader.take(32)),
+        ))
+        .ok()
+    }
     pub fn read<T: DeserializeOwned>(&self, ttl: Duration) -> Result<Option<Hit<T>>> {
         let path = self.path();
         let (file, compressed) = match std::fs::File::open(&path) {
@@ -605,6 +630,7 @@ mod tests {
             .read::<Vec<String>>(Duration::from_secs(60))
             .unwrap()
             .unwrap();
+        assert_eq!(new.stored_timestamp(), Some(hit.timestamp));
         assert_eq!(hit.value, ["new"]);
         assert!(!hit.stale);
         assert!(

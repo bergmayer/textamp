@@ -130,6 +130,33 @@ impl Form {
     }
 }
 
+pub(super) async fn verify_setup(
+    mut setup: dialogs::AnalysisSetup,
+) -> anyhow::Result<dialogs::AnalysisSetup> {
+    let resolve = crate::util::server_url::resolve(&setup.connection.url, "api/servers");
+    let password = async {
+        if !setup.password.is_empty() {
+            return Ok(setup.password);
+        }
+        let key = setup
+            .library_key
+            .clone()
+            .context("Enter an AudioMuse password")?;
+        let stored = crate::app::tasks::spawn_blocking(move || {
+            crate::library::credentials::load_source("audiomuse", &key)
+        })
+        .await??
+        .context("Enter an AudioMuse password")?;
+        Ok::<_, anyhow::Error>(SecretString::from(stored.as_str()))
+    };
+    (setup.connection.url, setup.password) = tokio::try_join!(resolve, password)?;
+    Client::connect(&setup.connection, &setup.password)
+        .await?
+        .verify()
+        .await?;
+    Ok(setup)
+}
+
 pub(super) async fn client(connection: &Connection, library_key: &str) -> anyhow::Result<Client> {
     let key = library_key.to_owned();
     let password = crate::app::tasks::spawn_blocking(move || {
@@ -623,6 +650,7 @@ pub fn track_info(state: &mut AppState, tx: &mpsc::Sender<Event>) {
     state.sources.nav_request_id = state.sources.nav_request_id.wrapping_add(1);
     let request_id = state.sources.nav_request_id;
     state.popups.set_text(Some(TextPopup {
+        album_notes: false,
         lyrics_query: None,
         title: format!("AudioMuse · {}", track.title),
         text: "Loading…".into(),
@@ -753,6 +781,7 @@ pub async fn dispatch(
                 "remove description history item",
             );
             if state.sources.nav_collection == Some(CollectionKind::AudioMuse(Feature::Describe)) {
+                let had_results = state.artist_nav.columns.len() > 1;
                 let selected = state
                     .artist_nav
                     .columns
@@ -777,8 +806,9 @@ pub async fn dispatch(
                     .unwrap_or(selected.min(rows.len().saturating_sub(1)));
                 state.artist_nav = BrowseNavigationState::with_root("Description history", rows);
                 state.artist_nav.columns[0].selected_index = next;
-                if let Some(BrowseItem::Description { query }) =
-                    state.artist_nav.selected_item().cloned()
+                if had_results
+                    && let Some(BrowseItem::Description { query }) =
+                        state.artist_nav.selected_item().cloned()
                 {
                     restore_description(state, &query, true);
                 }
@@ -939,7 +969,7 @@ pub async fn dispatch(
             if form.task.is_some() {
                 return Ok(vec![]);
             }
-            let mut connection = match form.draft() {
+            let connection = match form.draft() {
                 Ok(c) => c,
                 Err(e) => {
                     form.error = Some(e.to_string());
@@ -951,28 +981,14 @@ pub async fn dispatch(
             let password = form.fields[2].value.clone();
             let tx = tx.clone();
             let task = crate::app::tasks::spawn(async move {
-                let result = async {
-                    connection.url =
-                        crate::util::server_url::resolve(&connection.url, "api/servers").await?;
-                    let password = if password.is_empty() {
-                        crate::app::tasks::spawn_blocking(move || {
-                            crate::library::credentials::load_source("audiomuse", &library_key)
-                        })
-                        .await??
-                        .context("Enter an AudioMuse password")?
-                        .as_str()
-                        .into()
-                    } else {
-                        password
-                    };
-                    Client::connect(&connection, &password)
-                        .await?
-                        .verify()
-                        .await?;
-                    Ok((connection, password))
-                }
+                let result = verify_setup(dialogs::AnalysisSetup {
+                    connection,
+                    password,
+                    library_key: Some(library_key),
+                })
                 .await
-                .map_err(|e: anyhow::Error| format!("{e:#}"));
+                .map(|setup| (setup.connection, setup.password))
+                .map_err(|e| format!("{e:#}"));
                 let _ = tx
                     .send(Event::Effect(Command::Checked { instance, result }.into()))
                     .await;

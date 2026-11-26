@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use textamp::app::action::{QueueAction, RadioAction, SearchAction};
 use textamp::app::command_palette::{self};
 use textamp::app::dispatch::{dispatch_action, handle_core_event};
-use textamp::app::handlers::{helpers, key_input};
+use textamp::app::handlers::key_input;
 use textamp::app::state::{
     BrowseCategory, BrowseColumn, BrowseItem, PaletteCommandKind, PlaybackMode, View,
 };
@@ -260,6 +260,55 @@ fn refresh_palette_matches_f5_in_every_category() {
 }
 
 #[test]
+fn tui_radio_renders_only_the_station_catalog_and_stops_at_its_last_row() {
+    use ratatui::{Terminal, backend::TestBackend};
+    use textamp::app::{
+        action::BrowseAction, radio_navigation, sources::navidrome, state::LibraryRoot,
+    };
+
+    let mut state = common::navidrome_state();
+    let albums: Vec<_> = (0..20)
+        .map(|i| textamp::library::models::Album {
+            rating_key: format!("album-{i}"),
+            parent_rating_key: Some(format!("artist-{i}")),
+            ..Default::default()
+        })
+        .collect();
+    let tracks: Vec<_> = albums
+        .iter()
+        .map(|a| textamp::library::track::Track {
+            rating_key: format!("song-{}", a.rating_key),
+            parent_rating_key: Some(a.rating_key.clone()),
+            ..Default::default()
+        })
+        .collect();
+    state.library.radio_availability =
+        textamp::services::radio::Availability::build(&tracks, &albums).into();
+    state.view = View::Browse;
+    state.desktop_library_root = LibraryRoot::Radio;
+    let (tx, _rx) = mpsc::channel(8);
+    navidrome::intercept(&BrowseAction::LoadStations.into(), &mut state, &tx);
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    terminal
+        .draw(|frame| state.apply_render_feedback(textamp::ui::render(frame, &state)))
+        .unwrap();
+    let rows = &state.hit_regions.station_rows;
+    assert!(
+        rows.iter()
+            .any(|(_, _, key)| key == "nav-radio/artist-picker")
+    );
+    assert!(rows.iter().all(|(_, _, key)| key.starts_with("nav-radio/")));
+    let last = rows.last().unwrap().2.clone();
+    for _ in 0..=rows.len() {
+        radio_navigation::key(&mut state, KeyCode::Down);
+    }
+    assert_eq!(
+        state.station_nav.columns[0].selected_station().unwrap().key,
+        last
+    );
+}
+
+#[test]
 fn utility_rows_are_native_commands_not_station_urls_in_both_playback_views() {
     for view in [View::Queue, View::NowPlaying] {
         let mut state = common::navidrome_state();
@@ -268,13 +317,13 @@ fn utility_rows_are_native_commands_not_station_urls_in_both_playback_views() {
         state.station_nav.columns = vec![textamp::app::state::StationColumn::new(
             None,
             "stations".into(),
-            vec![station(
-                "nav-radio/randomAlbum",
-                "Play Random Albums",
-                "station",
-            )],
+            vec![
+                station("nav-radio/randomAlbum", "Play Random Albums", "station"),
+                station("remix:shuffle", "Remix: Shuffle", "remix"),
+                station("action:adventure", "Journey", "action"),
+            ],
         )];
-        helpers::append_station_action_items(&mut state.station_nav.columns[0].stations, false);
+        assert_eq!(state.station_nav.columns[0].stations().len(), 1);
         let entries = command_palette::materialize_entries(&state);
         assert_eq!(
             entries
@@ -415,7 +464,7 @@ fn palette_submenus_preserve_context_and_global_fuzzy_search() {
     assert!(labels(&state).contains(&"View".into()));
     assert!(!labels(&state).contains(&"By Title".into()));
     command_palette::run(
-        PaletteCommandKind::OpenCommandGroup(vec!["View".into(), "Sort".into()]),
+        PaletteCommandKind::OpenCommandGroup(vec!["View".into(), "View Options".into()]),
         &mut state,
     );
     assert!(state.palette.open && state.palette.player_context);

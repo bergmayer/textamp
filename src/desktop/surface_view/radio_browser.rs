@@ -15,8 +15,14 @@ impl SurfaceView {
         self.radio_scroll
             .retain(|key, _| model.columns.iter().any(|column| &column.key == key));
         let stale = self.model.stale;
+        let theme = self.updates.borrow().theme;
+        let single = self.embedded && self.updates.borrow().sheet_browser;
+        let mut single_list = None;
         let mut columns = h_resizable("radio-browser-columns");
         for (column_index, column) in model.columns.iter().enumerate() {
+            if single && column_index != model.focused_column {
+                continue;
+            }
             let scroll = self
                 .radio_scroll
                 .entry(column.key.clone())
@@ -36,6 +42,10 @@ impl SurfaceView {
                             let category = station.is_category();
                             let owner = owner.clone();
                             ListItem::new(("radio-station", index))
+                                .when_some(
+                                    crate::desktop::theme::aluminum_list_stripe(theme, index),
+                                    |row, stripe| row.bg(stripe),
+                                )
                                 .role(Role::ListItem)
                                 .w_full()
                                 .text_size(px(13.))
@@ -77,49 +87,63 @@ impl SurfaceView {
             )
             .track_scroll(&scroll)
             .h_full();
-            columns = columns.child(
-                resizable_panel()
-                    .size(px(220.))
-                    .size_range(px(160.)..px(340.))
-                    .child(
-                        div()
-                            .debug_selector(move || format!("radio-column-{column_index}"))
-                            .size_full()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .h(px(32.))
-                                    .flex_none()
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .border_b_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().muted.opacity(0.35))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(px(12.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(column.title.clone()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .flex()
-                                    .child(div().flex_1().min_w_0().h_full().child(list))
-                                    .child(div().w(px(12.)).h_full().flex_none().child(
-                                        Scrollbar::vertical(&scroll).viewport_from_layout(),
-                                    )),
-                            ),
-                    ),
-            );
+            let body = div()
+                .debug_selector(move || format!("radio-column-{column_index}"))
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(crate::desktop::theme::column_header_height(theme))
+                        .flex_none()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .when(
+                            theme != crate::app::theme::ThemeName::BrushedAluminum,
+                            |header| header.border_b_1().border_color(cx.theme().border),
+                        )
+                        .bg(cx.theme().muted.opacity(0.35))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(crate::util::column_heading::capitalized(&column.title)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .child(div().flex_1().min_w_0().h_full().child(list))
+                        .child(
+                            div()
+                                .w(px(12.))
+                                .h_full()
+                                .flex_none()
+                                .child(Scrollbar::vertical(&scroll).viewport_from_layout()),
+                        ),
+                );
+            if single {
+                single_list = Some(body);
+            } else {
+                columns = columns.child(
+                    resizable_panel()
+                        .size(px(220.))
+                        .size_range(px(160.)..px(340.))
+                        .child(body),
+                );
+            }
         }
-        let mut detail = div().size_full().p_4().flex().flex_col().gap_3();
+        let mut detail = div()
+            .when(!single, |v| v.size_full())
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3();
         if let Some(station) = &model.selected {
             detail = detail.child(
                 div()
@@ -138,7 +162,9 @@ impl SurfaceView {
                         .label("Play Station")
                         .disabled(self.model.stale || model.loading)
                         .on_click(cx.listener(move |this, _, _, _| {
-                            this.send(Operation::Actions(super::super::radio::play(&key)));
+                            this.send(Operation::Actions(vec![
+                                crate::app::action::RadioAction::PlayStation(key.clone()).into(),
+                            ]));
                         })),
                 );
             }
@@ -168,6 +194,7 @@ impl SurfaceView {
                     .map_or("Radio", |station| station.title.as_str())
                     .to_owned()
             });
+        let show_detail = pane.is_some() || single_list.is_none();
         let detail = if let Some(pane) = pane {
             if self
                 .inline_detail
@@ -196,36 +223,61 @@ impl SurfaceView {
             self.inline_detail = None;
             detail.into_any_element()
         };
-        columns = columns.child(
-            resizable_panel().size_range(px(220.)..Pixels::MAX).child(
+        let content = if single {
+            if show_detail {
+                detail
+            } else {
                 div()
                     .size_full()
                     .flex()
                     .flex_col()
-                    .child(
+                    .child(div().flex_1().min_h_0().child(single_list.unwrap()))
+                    .when(
+                        model.selected.as_ref().is_some_and(|s| !s.is_category()),
+                        |v| v.child(div().flex_none().child(detail)),
+                    )
+                    .into_any_element()
+            }
+        } else {
+            columns
+                .child(
+                    resizable_panel().size_range(px(220.)..Pixels::MAX).child(
                         div()
-                            .debug_selector(|| "radio-detail-header".into())
-                            .h(px(32.))
-                            .flex_none()
-                            .px_3()
+                            .size_full()
                             .flex()
-                            .items_center()
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().muted.opacity(0.35))
+                            .flex_col()
                             .child(
                                 div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_ellipsis_middle()
-                                    .text_size(px(12.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(pane_title),
-                            ),
-                    )
-                    .child(div().flex_1().min_h_0().child(detail)),
-            ),
-        );
+                                    .debug_selector(|| "radio-detail-header".into())
+                                    .h(crate::desktop::theme::column_header_height(theme))
+                                    .flex_none()
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .when(
+                                        theme != crate::app::theme::ThemeName::BrushedAluminum,
+                                        |header| {
+                                            header.border_b_1().border_color(cx.theme().border)
+                                        },
+                                    )
+                                    .bg(cx.theme().muted.opacity(0.35))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_ellipsis_middle()
+                                            .text_size(px(12.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(crate::util::column_heading::capitalized(
+                                                &pane_title,
+                                            )),
+                                    ),
+                            )
+                            .child(div().flex_1().min_h_0().child(detail)),
+                    ),
+                )
+                .into_any_element()
+        };
         let mut footer = StatusBar::new()
             .bg(cx.theme().title_bar)
             .flex_none()
@@ -300,7 +352,7 @@ impl SurfaceView {
                     .small(),
                 )
             })
-            .child(div().flex_1().min_h_0().child(columns))
+            .child(div().flex_1().min_h_0().child(content))
             .when(!self.model.buttons.is_empty(), |view| {
                 view.child(
                     div()
@@ -384,7 +436,7 @@ mod tests {
             Command::Surface { operation: Operation::RadioSelect {column:0,key}, .. } if key == "nav-radio/style"
         )));
         crate::desktop::radio::select(&mut state, 0, "nav-radio/style");
-        let template = state.station_nav.columns[0].stations[genre_index].clone();
+        let template = state.station_nav.columns[0].stations()[genre_index].clone();
         let children = (0..300)
             .map(|index| {
                 let mut station = template.clone();

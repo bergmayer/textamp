@@ -69,6 +69,7 @@ async fn search_selection_opens_the_actual_library_detail_without_playing() {
         let mut state = AppState::new();
         state.popups.set_search_active(true);
         state.search.tab = tab;
+        state.search.query = "Second".into();
         state.search.focus = SearchFocus::Results;
         state.search.results = Some(SearchResults {
             tracks: tracks(),
@@ -83,8 +84,32 @@ async fn search_selection_opens_the_actual_library_detail_without_playing() {
         )
         .unwrap();
         assert!(
-            matches!(actions.as_slice(),[Action::Browse(textamp::app::action::BrowseAction::OpenDetailsInLibrary{track,destination:textamp::app::library_details::Destination::Track})] if track.rating_key=="second")
+            matches!(actions.as_slice(), [Action::Settings(textamp::app::action::SettingsAction::RememberSearchResult(result)), Action::Browse(BrowseAction::OpenDetailsInLibrary{track,destination:textamp::app::library_details::Destination::Track})] if result.key == "second" && track.rating_key=="second")
         );
+        let Action::Settings(textamp::app::action::SettingsAction::RememberSearchResult(result)) =
+            &actions[0]
+        else {
+            panic!("expected a saved result");
+        };
+        let stored = serde_json::to_string(result).unwrap();
+        state.search.recent = vec![serde_json::from_str(&stored).unwrap()];
+        state.search.query.clear();
+        state.search.results = None;
+        state.list_state.search_item_index = 0;
+        assert!(matches!(
+            key(&mut state, KeyCode::Enter).as_slice(),
+            [Action::Search(SearchAction::SelectSearchResult)]
+        ));
+        let actions = textamp::app::handlers::dispatch_search::dispatch(
+            &tx,
+            SearchAction::SelectSearchResult,
+            &mut state,
+        )
+        .unwrap();
+        assert!(
+            matches!(actions.as_slice(), [Action::Browse(BrowseAction::OpenDetailsInLibrary{track,destination:textamp::app::library_details::Destination::Track})] if track.rating_key=="second")
+        );
+        assert!(state.search.query.is_empty());
         assert!(state.queue.tracks.is_empty());
     }
 }
@@ -188,9 +213,11 @@ fn related_details_reuse_one_column_and_keep_parent_and_ranked_playback() {
         &Config::default(),
     ));
     for expected in ["third", "second"] {
-        for _ in 0..3 {
-            key(&mut state, KeyCode::Down);
-        }
+        key(&mut state, KeyCode::Down);
+        assert_eq!(
+            sonic_details::visible(&state).unwrap().details.action_index,
+            3
+        );
         assert!(key(&mut state, KeyCode::Enter).is_empty());
         assert_eq!(
             sonic_details::selected_track(&state).unwrap().rating_key,
@@ -216,8 +243,6 @@ fn related_details_reuse_one_column_and_keep_parent_and_ranked_playback() {
 fn related_details_mouse_opens_replaces_and_closes_only_child() {
     let mut state = browse_state();
     key(&mut state, KeyCode::Enter);
-    key(&mut state, KeyCode::Down);
-    key(&mut state, KeyCode::Down);
     key(&mut state, KeyCode::Down);
     draw(&mut state, "adjacent-selected", 100, 40);
     let row = state
@@ -322,8 +347,8 @@ fn jump_commands_target_queue_search_related_and_playback_fallback() {
     assert_eq!(state.queue.index, Some(0));
 }
 
-#[test]
-fn related_track_jump_rebuilds_ancestors_and_back_restores_the_previous_view() {
+#[tokio::test]
+async fn related_track_jump_rebuilds_ancestors_and_back_restores_the_previous_view() {
     use std::sync::Arc;
     use textamp::{
         app::{

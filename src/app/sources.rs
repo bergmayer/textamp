@@ -160,13 +160,13 @@ impl NextWaveform {
 
 #[derive(Debug, Clone, Default)]
 pub struct SourceState {
+    pub(crate) album_artists: Option<navidrome::album_artists::Related>,
     pub album_notes: Option<navidrome::album_notes::Notes>,
     pub next_waveform: NextWaveform,
     /// Saved connection edits take effect on explicit activation, not on Save.
     pub reconnect_sources: std::collections::HashSet<String>,
     pub nav_connection_task: Option<TaskLease>,
     pub audiomuse: audiomuse::State,
-    pub sonic_tasks: std::collections::HashMap<&'static str, TaskLease>,
     pub sonic_disabled_libraries: std::collections::HashSet<String>,
     pub folders: Vec<FolderSource>,
     pub active: ActiveSource,
@@ -337,7 +337,6 @@ async fn reset_source(
     state.advance_connection_generation();
     state.advance_library_generation();
     events::reset_account_scoped_state(state);
-    state.sources.nav_tasks.clear();
     state.sources.next_waveform = NextWaveform::Idle;
     state.sources.nav_collection = None;
     state.sources.listing = None;
@@ -355,9 +354,7 @@ fn restore_library_artwork(state: &mut AppState, config: &Config) {
             .get(key)
             .map(|view| view.columns.clone())
             .unwrap_or_default();
-        state.artwork.mode = config.artwork_mode(key, crate::app::launch::WindowedMode::Text);
-        state.artwork.graphical_mode =
-            config.artwork_mode(key, crate::app::launch::WindowedMode::Gui);
+        state.artwork.mode = config.artwork_mode(key);
     }
 }
 
@@ -714,14 +711,25 @@ pub fn command_visible(state: &AppState, command: &super::state::PaletteCommandK
             .can_activate(super::launch::WindowedMode::Text);
     }
     if let SetApplicationMode(mode) = command {
-        return state
-            .windowed_presentation
-            .can_activate(mode.presentation());
+        return state.windowed_presentation.can_activate(*mode);
+    }
+    if let Some(recipe) = match command {
+        PlayRandomAlbums => Some("randomAlbum"),
+        LibraryMix => Some("library"),
+        _ => None,
+    } {
+        return state.station_nav.columns.first().is_some_and(|root| {
+            root.stations()
+                .iter()
+                .any(|s| s.identifier.as_deref() == Some(recipe))
+        });
     }
     let requirement = match command {
         GotoLibrary | OpenInLibrary | PlayFocusedAlbum | GoToRandomAlbum => Some(Feature::Catalog),
         GotoGenres => Some(Feature::Genres),
-        SaveQueue | Navidrome(navidrome::commands::Command::PromptNewPlaylist(None)) => {
+        SaveQueue
+        | ImportPlaylist
+        | Navidrome(navidrome::commands::Command::PromptNewPlaylist(None)) => {
             Some(Feature::SavePlaylist)
         }
         ArtistRadio | RemixTwofer => Some(Feature::ArtistRadio),

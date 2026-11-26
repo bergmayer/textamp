@@ -28,6 +28,10 @@ pub struct ArtistIndex {
     pub album_display: HashMap<String, String>,
 }
 
+pub(crate) fn performer_key(name: &str) -> String {
+    format!("track_artist:{}", name.to_lowercase())
+}
+
 fn performer_name(track: &Track) -> Option<&str> {
     track
         .original_title
@@ -76,7 +80,7 @@ impl ArtistIndex {
             let key = lookup.entry(normalized).or_insert_with(|| {
                 // A track's provider ID can refer to an album artist or the first
                 // credited performer. Never reuse it for a different name.
-                format!("track_artist:{}", name.to_lowercase())
+                performer_key(name)
             });
             performers.entry(key.clone()).or_insert_with(|| {
                 by_key
